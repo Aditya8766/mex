@@ -9,14 +9,16 @@ import {
   committedBaselines,
   committedElsewhere,
   resolveAnchorBaseline,
+  type GroundingCodeHashing,
   type SourceDriftGrounding,
   type SourceDriftResolution,
 } from "../drift/checkers/grounding.js";
+import { codeHash, codeHashOfBody, formatCommittedCodeHash, prepareCodeHashing } from "./code-hash.js";
 import { createGraphEngine } from "./engine-impl.js";
 import type { GraphEngine } from "./engine.js";
 import { detectLanguage, extractFile, loadGrammars } from "./extraction/index.js";
 import type { CompilerSourceLanguage } from "./extraction/compiler.js";
-import type { Language } from "./types.js";
+import type { GraphNode, Language } from "./types.js";
 import {
   GRAPH_CORPUS_GLOB_OPTIONS,
   GRAPH_CORPUS_LIMITS,
@@ -26,7 +28,7 @@ import {
 import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { FingerprintStore } from "./fingerprint-store.js";
-import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
+import { deserializeFingerprint, sameFingerprint, serializeFingerprint } from "./fingerprint.js";
 import { acquireGraphMaintenanceLease } from "./maintenance.js";
 import { MinHashReconciler } from "./reconcile-engine.js";
 import type { Fingerprint, Reconciler } from "./reconcile.js";
@@ -204,7 +206,9 @@ export async function loadReadOnlyGroundingRuntime(
           loaded.graphStatus.changes.modified,
         )
       : undefined;
+    await prepareGroundingCodeHashing();
     const runtime = assembleGroundingRuntime(
+      config.projectRoot,
       session.graph,
       null,
       fingerprints,
@@ -265,7 +269,8 @@ export async function loadGroundingRuntime(config: MexConfig): Promise<Grounding
     graph = createGraphEngine({ rootDir: config.projectRoot, dbPath: lease.databasePath });
     db = openGraphDatabase(lease.databasePath);
     const fingerprints = new FingerprintStore(db);
-    const assembled = assembleGroundingRuntime(graph, db, fingerprints, anchorFingerprints);
+    await prepareGroundingCodeHashing();
+    const assembled = assembleGroundingRuntime(config.projectRoot, graph, db, fingerprints, anchorFingerprints);
     graph = null;
     db = null;
     let closed = false;
@@ -497,6 +502,7 @@ interface GroundingRuntimeGuard {
 }
 
 function assembleGroundingRuntime(
+  projectRoot: string,
   graph: GraphEngine,
   database: SqliteDatabase | null,
   fingerprints: FingerprintStore,
@@ -511,7 +517,18 @@ function assembleGroundingRuntime(
     getFingerprint: (nodeId) => anchorFingerprints.get(nodeId) ?? reconciler.getFingerprint(nodeId),
     getGroundedSource: (file, nodeId) => reconciler.getGroundedSource(file, nodeId),
   };
-  const rawChecker = createGroundingChecker(graph, checkerReconciler, sourceDrift);
+  const codeHashing: GroundingCodeHashing = {
+    current: (nodeId) => {
+      const node = graph.getNode(nodeId);
+      return node ? currentNodeCodeHash(projectRoot, node) : null;
+    },
+    ofBody: (nodeId, body) => {
+      const node = graph.getNode(nodeId);
+      return node ? codeHashOfBody(node.filePath, body) : null;
+    },
+    recallBody: (bodyHash) => fingerprints.sourceByBodyHash(bodyHash),
+  };
+  const rawChecker = createGroundingChecker(graph, checkerReconciler, sourceDrift, codeHashing);
   const checker: GroundingChecker = guard
     ? (...args) => {
         if (!guard.validate()) {
@@ -602,10 +619,11 @@ async function prepareSourceDriftGrounding(
   // A grammar that fails to load leaves `extractFile` returning null, which
   // resolves to unverified below; it never fails the check.
   try { await loadGrammars(treeLanguages); } catch { /* unverified, not fatal */ }
-  const rederived = new Map<string, Map<string, { kind: string; bodyHash: string }> | null>();
-  const rederive = (filePath: string): Map<string, { kind: string; bodyHash: string }> | null => {
+  type Rederived = { kind: string; bodyHash: string; startLine: number; endLine: number; source: string };
+  const rederived = new Map<string, Map<string, Rederived> | null>();
+  const rederive = (filePath: string): Map<string, Rederived> | null => {
     if (rederived.has(filePath)) return rederived.get(filePath)!;
-    let nodes: Map<string, { kind: string; bodyHash: string }> | null = null;
+    let nodes: Map<string, Rederived> | null = null;
     try {
       const source = readContainedRepositorySource(projectRoot, filePath);
       const extraction = extractFile(filePath, source);
@@ -615,6 +633,9 @@ async function prepareSourceDriftGrounding(
         nodes = new Map(extraction.nodes.map((node) => [node.id, {
           kind: node.kind,
           bodyHash: hashBody(lines.slice(node.startLine - 1, node.endLine).join("\n")),
+          startLine: node.startLine,
+          endLine: node.endLine,
+          source,
         }]));
       }
     } catch {
@@ -628,7 +649,9 @@ async function prepareSourceDriftGrounding(
     resolve(nodeId) {
       const node = graph.getNode(nodeId);
       if (!node) return unverified("not in the last graph snapshot");
-      if (!drifted.has(node.filePath)) return { kind: "current", bodyHash: node.bodyHash };
+      if (!drifted.has(node.filePath)) {
+        return { kind: "current", bodyHash: node.bodyHash, codeHash: () => currentNodeCodeHash(projectRoot, node) };
+      }
       if (!modified.has(node.filePath)) return unverified(`${node.filePath} was deleted`);
       if (isCompilerSourceLanguage(node.language) || isCompilerSourceLanguage(detectLanguage(node.filePath))) {
         return unverified(`${node.filePath} changed; its compiler-derived span needs a refresh`);
@@ -638,7 +661,11 @@ async function prepareSourceDriftGrounding(
         return unverified(`${node.filePath} changed; the node could not be located there exactly`);
       }
       // Only body-bearing kinds carry a hash, and the kind is part of the id.
-      return { kind: "current", bodyHash: node.bodyHash === undefined ? undefined : current.bodyHash };
+      return {
+        kind: "current",
+        bodyHash: node.bodyHash === undefined ? undefined : current.bodyHash,
+        codeHash: () => codeHash(node.filePath, current.source, current.startLine, current.endLine),
+      };
     },
   };
 }
@@ -712,7 +739,7 @@ export function refreshGroundingBaselines(
         if (!grounding
           || resolveGroundingReviewFile(config, scaffoldFile) !== resolve(filePath)
           || acceptance.contentHash !== hashText(content)
-          || acceptance.fingerprint !== serialized
+          || !sameFingerprint(acceptance.fingerprint, serialized)
           || acceptance.bodyHash !== node.bodyHash) {
           skipped += 1;
           options.warn?.(`Grounding review changed for ${nodeId} in ${scaffoldFile}; review it again.`);
@@ -720,7 +747,7 @@ export function refreshGroundingBaselines(
         }
       } else {
         const baselineHash = grounding?.bodyHash ?? previous?.bodyHash;
-        if ((grounding && grounding.fingerprint !== serialized)
+        if ((grounding && !sameFingerprint(grounding.fingerprint, serialized))
           || (baselineHash !== undefined && baselineHash !== node.bodyHash)) {
           skipped += 1;
           options.warn?.(`Preserved changed grounding ${nodeId} in ${scaffoldFile}; explicit review is required.`);
@@ -737,13 +764,24 @@ export function refreshGroundingBaselines(
         continue;
       }
       pendingBaselines.push(baseline);
-      if (grounding && acceptance && grounding.fingerprint !== serialized) {
+      if (grounding && acceptance && !sameFingerprint(grounding.fingerprint, serialized)) {
         grounding.fingerprint = serialized;
         dirty = true;
       }
       if (grounding && (grounding.bodyHash === undefined || acceptance) && grounding.bodyHash !== baseline.bodyHash) {
         grounding.bodyHash = baseline.bodyHash;
         dirty = true;
+      }
+      // The comment-free hash of the same moment (#236). Written only while the
+      // committed body hash is this code's, so `codeHash` never describes a
+      // body other than the one `bodyHash` does; a drifted entry keeps its own.
+      if (grounding && grounding.bodyHash === node.bodyHash) {
+        const code = currentNodeCodeHash(config.projectRoot, node);
+        const committed = code === null ? null : formatCommittedCodeHash(code, node.bodyHash);
+        if (committed !== null && grounding.codeHash !== committed) {
+          grounding.codeHash = committed;
+          dirty = true;
+        }
       }
     }
     if (readBoundedText(filePath, readLimit) !== content) {
@@ -802,7 +840,7 @@ export function previewGroundingBaseline(
   const serialized = serializeFingerprint(fingerprint);
   const previous = runtime.fingerprints.getGroundedSource(scaffoldFile, nodeId);
   if ((grounding.bodyHash ?? previous?.bodyHash) === node.bodyHash
-    && grounding.fingerprint === serialized) return null;
+    && sameFingerprint(grounding.fingerprint, serialized)) return null;
   const newBody = readNodeBody(config.projectRoot, node.filePath, node.startLine, node.endLine);
   const oldBody = previous && (grounding.bodyHash === undefined || grounding.bodyHash === previous.bodyHash)
     && hashBody(previous.source) === previous.bodyHash ? previous.source : null;
@@ -837,6 +875,36 @@ function hashText(text: string): string {
 /** Same normalized body bytes used by the graph; never bless a changed source read. */
 function hashBody(source: string): string {
   return hashText(source.replace(/\s+/g, " ").trim());
+}
+
+/**
+ * Load the grammars comment-free code hashes need (#236). A failure is not an
+ * error: every hash then returns null, and a changed body stays a warning.
+ */
+async function prepareGroundingCodeHashing(): Promise<void> {
+  try {
+    await prepareCodeHashing();
+  } catch {
+    /* Nothing is downgraded without a hash. */
+  }
+}
+
+/**
+ * A node's comment-free code hash, from its file as the graph indexed it
+ * (#236). Null for a node with no body, a file that cannot be read, or a file
+ * edited since indexing — the span would no longer be the node's, and a hash
+ * of the wrong lines must never be compared.
+ */
+function currentNodeCodeHash(projectRoot: string, node: GraphNode): string | null {
+  if (!node.bodyHash) return null;
+  try {
+    const source = readContainedRepositorySource(projectRoot, node.filePath);
+    const lines = source.split("\n");
+    if (hashBody(lines.slice(node.startLine - 1, node.endLine).join("\n")) !== node.bodyHash) return null;
+    return codeHash(node.filePath, source, node.startLine, node.endLine);
+  } catch {
+    return null;
+  }
 }
 
 export function groundingPromptContext(
@@ -886,7 +954,8 @@ function readNodeBody(root: string, filePath: string, startLine: number, endLine
     .split("\n").slice(startLine - 1, endLine).join("\n");
 }
 
-function readBoundedText(filePath: string, maxBytes: number): string {
+/** Read one regular file, never through a symlink, refusing one over `maxBytes`. */
+export function readBoundedText(filePath: string, maxBytes: number): string {
   const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = fstatSync(fd, { bigint: true });
@@ -909,7 +978,11 @@ function readBoundedText(filePath: string, maxBytes: number): string {
   }
 }
 
-function replaceGroundingDocument(
+/**
+ * Publish `next` over a scaffold document atomically, only if it still holds
+ * `previous`. The path must be Markdown contained in the scaffold.
+ */
+export function replaceGroundingDocument(
   config: MexConfig,
   filePath: string,
   previous: string,

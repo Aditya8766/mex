@@ -58,11 +58,19 @@
 import {
   aggregateGroundingHealth,
   groundingComparator,
+  type GroundingDriftNote,
   type GroundingHealth,
   type GroundingResolution,
   type WikiGrounding,
 } from "../model/grounding.js";
-import type { GroundedNode, GroundingGraph } from "./adapter.js";
+import { sameFingerprintCode, type GroundedNode, type GroundingGraph } from "./adapter.js";
+import { factDrift } from "./fact-drift.js";
+
+/** What resolution may know about the entity a grounding belongs to. */
+export interface GroundingContext {
+  /** The entity's text (title and body): the fact the grounding supports. */
+  fact?: string;
+}
 
 /**
  * Resolve one grounding against the local checkout.
@@ -74,6 +82,7 @@ import type { GroundedNode, GroundingGraph } from "./adapter.js";
 export function resolveGrounding(
   grounding: WikiGrounding,
   graph: GroundingGraph | null,
+  context: GroundingContext = {},
 ): GroundingResolution {
   if (graph === null) {
     return {
@@ -85,7 +94,7 @@ export function resolveGrounding(
   }
 
   const direct = graph.getNode(grounding.node);
-  if (direct !== null) return compare(grounding, graph, direct, grounding.node);
+  if (direct !== null) return compare(grounding, graph, direct, grounding.node, context);
 
   // Tier-1 miss. The committed fingerprint is what finds the symbol again —
   // this is the job MinHash is actually for.
@@ -129,7 +138,7 @@ export function resolveGrounding(
       reason: `${grounding.node} was rebound to ${resolution.nodeId}, which the graph does not hold.`,
     };
   }
-  return compare(grounding, graph, rebound, grounding.node);
+  return compare(grounding, graph, rebound, grounding.node, context);
 }
 
 /**
@@ -143,6 +152,7 @@ function compare(
   graph: GroundingGraph,
   node: GroundedNode,
   declaredNode: string,
+  context: GroundingContext,
 ): GroundingResolution {
   const currentBodyHash = node.bodyHash ?? "";
   const rebound = node.id !== declaredNode;
@@ -162,6 +172,7 @@ function compare(
   // that write re-derives the body hash from the current node.
   if (!rebound && groundingComparator(grounding) === "bodyHash") {
     if (grounding.bodyHash === currentBodyHash) {
+      graph.rememberBody?.(node.id, currentBodyHash);
       return {
         state: "fresh",
         health: "fresh",
@@ -169,6 +180,18 @@ function compare(
         resolvedNode: node.id,
         rebound,
         bodyHash: currentBodyHash,
+      };
+    }
+    const drift = explainDrift(grounding, graph, node.id, context);
+    if (drift !== null) {
+      return {
+        state: "fresh",
+        health: "fresh",
+        node: declaredNode,
+        resolvedNode: node.id,
+        rebound,
+        bodyHash: currentBodyHash,
+        drift,
       };
     }
     return {
@@ -180,6 +203,26 @@ function compare(
       // The cached one may differ from it and is not what was compared.
       baselineBodyHash: grounding.bodyHash,
       currentBodyHash,
+    };
+  }
+
+  // **A rebind whose body is byte-identical is fresh.** The graph answers a
+  // declared id through a compatibility alias when ids are re-minted (#240),
+  // and reconciliation rebinds a moved symbol; either way, a body equal to the
+  // committed hash is the code the entity described. Neighbour ids inside
+  // the fingerprint were renumbered by the re-mint, so comparing structure
+  // here reported `changed` for code that had not changed by one byte —
+  // where `mex check`, comparing bodies, rightly called it fresh. A body that
+  // differs still goes to the fingerprint below, so a rename stays fresh.
+  if (rebound && grounding.bodyHash !== undefined && grounding.bodyHash === currentBodyHash) {
+    graph.rememberBody?.(node.id, currentBodyHash);
+    return {
+      state: "fresh",
+      health: "fresh",
+      node: declaredNode,
+      resolvedNode: node.id,
+      rebound,
+      bodyHash: currentBodyHash,
     };
   }
 
@@ -195,7 +238,12 @@ function compare(
       reason: `${node.id} has no fingerprint in this graph, so there is nothing to compare the committed one against.`,
     };
   }
-  if (currentFingerprint === grounding.fingerprint) {
+  // By value: a grounding committed before #233 spells the same fingerprint in
+  // the older encoding, and that is not a change. And by code alone: the
+  // neighbour list changes when a caller elsewhere is added or node ids are
+  // re-minted (#240), and reading that as this node's code changing reported
+  // `changed` for groundings whose every token was the same.
+  if (sameFingerprintCode(currentFingerprint, grounding.fingerprint)) {
     return {
       state: "fresh",
       health: "fresh",
@@ -205,6 +253,20 @@ function compare(
       bodyHash: currentBodyHash,
     };
   }
+  // A moved symbol whose code differs only in comments, layout or lines the
+  // fact does not name is the same fact in a new place.
+  const movedDrift = rebound ? explainDrift(grounding, graph, node.id, context) : null;
+  if (movedDrift !== null) {
+    return {
+      state: "fresh",
+      health: "fresh",
+      node: declaredNode,
+      resolvedNode: node.id,
+      rebound,
+      bodyHash: currentBodyHash,
+      drift: movedDrift,
+    };
+  }
   return {
     state: "stale",
     health: "changed",
@@ -212,6 +274,29 @@ function compare(
     resolvedNode: node.id,
     currentBodyHash,
   };
+}
+
+/**
+ * Why a body that differs from the committed hash still says the same thing,
+ * or null when that cannot be shown. In order of certainty: only comments
+ * changed, only layout changed, or — given the fact's text — the change is in
+ * lines away from everything the fact names ({@link factDrift}). Every gap in
+ * the evidence (no source, no remembered old body, no fact) returns null, and
+ * the grounding stays `changed`.
+ */
+function explainDrift(
+  grounding: WikiGrounding,
+  graph: GroundingGraph,
+  nodeId: string,
+  context: GroundingContext,
+): GroundingDriftNote | null {
+  const evidence = graph.explainChange?.(grounding, nodeId) ?? null;
+  if (evidence === null) return null;
+  if (evidence.commentOnly) return { kind: "comment-only" };
+  if (evidence.layoutOnly) return { kind: "layout-only" };
+  if (context.fact === undefined || evidence.oldBody === null || evidence.newBody === null) return null;
+  const verdict = factDrift(context.fact, evidence.oldBody, evidence.newBody);
+  return verdict.kind === "nearby" ? { kind: "changed-nearby", anchors: verdict.anchors } : null;
 }
 
 /** One entity's groundings, resolved together. */
@@ -232,11 +317,12 @@ export interface EntityResolution {
 export function resolveEntityGroundings(
   groundings: readonly WikiGrounding[],
   graph: GroundingGraph | null,
+  context: GroundingContext = {},
 ): EntityResolution {
   if (groundings.length === 0) {
     return { groundings: [], health: "unverified" };
   }
-  const resolved = groundings.map((grounding) => resolveGrounding(grounding, graph));
+  const resolved = groundings.map((grounding) => resolveGrounding(grounding, graph, context));
   // The model's precedence, not the query layer's `HEALTH_RANK`. The two orders
   // genuinely differ — the model calls `ambiguous` worse than `changed`, the
   // ranking penalizes `changed` more — because they answer different questions:

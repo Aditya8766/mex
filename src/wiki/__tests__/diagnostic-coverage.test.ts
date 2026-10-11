@@ -61,11 +61,13 @@ import { fts5UnavailableDiagnostic } from "../index/fts5.js";
 import { assertFts5Available, openSqlite } from "../../graph/db/sqlite.js";
 import { rebuildWikiIndex } from "../index/rebuild.js";
 import { getEntity } from "../query/get.js";
+import { wikiSearch } from "../service/read.js";
 import { escapedSymlinkDiagnostic } from "../index/discover.js";
 import { planOperation } from "../operations/plan.js";
 import { applyOperation } from "../operations/apply.js";
 import { readAuditLog } from "../operations/audit.js";
 import type { GroundingResolver } from "../index/write.js";
+import { codeGraphUnavailableDiagnostic } from "../grounding/availability.js";
 
 /** Run `body` against a fresh scratch directory, cleaning up afterwards. */
 function inScratch<T>(body: (directory: string) => T): T {
@@ -75,6 +77,17 @@ function inScratch<T>(body: (directory: string) => T): T {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+/** One indexed entity for the two search notices to search. */
+function indexedSearchScaffold(directory: string): void {
+  mkdirSync(join(directory, "context"), { recursive: true });
+  writeFileSync(
+    join(directory, "context", "notes.md"),
+    [`<!-- mex:entity`, `id: ${OPS_ID}`, "type: decision", "status: promoted", "revision: 1", "-->", "## Rotate refresh tokens", "", "Tokens rotate on every refresh."].join(String.fromCharCode(10)),
+    "utf-8",
+  );
+  rebuildWikiIndex({ scaffoldRoot: directory });
 }
 
 /**
@@ -99,6 +112,17 @@ function inScratch<T>(body: (directory: string) => T): T {
  * what stops one being parked here after its check has landed.
  */
 const NOT_YET_EMITTED: Record<string, string> = {};
+
+/** A scaffold the Wiki is in use in: one adopted file-level entity. */
+function writeAdoptedArchitecture(directory: string): void {
+  mkdirSync(join(directory, "context"), { recursive: true });
+  writeFileSync(
+    join(directory, "context", "architecture.md"),
+    "---\nname: architecture\nmex:\n  id: mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD\n  type: architecture\n  status: promoted\n"
+      + "  revision: 1\n  title: architecture\n---\n\n# Architecture\n\nProse.\n",
+    "utf-8",
+  );
+}
 
 function codesOf(diagnostics: readonly WikiDiagnostic[]): WikiDiagnosticCode[] {
   return diagnostics.map((entry) => entry.code);
@@ -351,6 +375,34 @@ status: promoted
     inScratch((directory) => {
       const opened = openWikiIndex(join(directory, "wiki.db"));
       return opened.ok ? [] : [opened.diagnostic];
+    }),
+
+  // A search that finds nothing, and one that finds only some of its terms (#235).
+  WIKI_QUERY_NO_MATCH: () =>
+    inScratch((directory) => {
+      indexedSearchScaffold(directory);
+      return wikiSearch({ scaffoldRoot: directory, text: "GraphQL federation" }).diagnostics;
+    }),
+
+  WIKI_HEALTH_UNCHECKED: () =>
+    inScratch((directory) => {
+      mkdirSync(join(directory, "context"), { recursive: true });
+      writeFileSync(
+        join(directory, "context", "notes.md"),
+        [`<!-- mex:entity`, `id: ${OPS_ID}`, "type: decision", "status: promoted", "revision: 1", "grounds_to:",
+          "  - node: function:0123456789abcdef", "    fingerprint: mh:64:00", "-->", "## Rotate refresh tokens", "",
+          "Tokens rotate on every refresh."].join(String.fromCharCode(10)),
+        "utf-8",
+      );
+      // Built without a graph: the grounding carries no verdict.
+      rebuildWikiIndex({ scaffoldRoot: directory });
+      return wikiSearch({ scaffoldRoot: directory, text: "rotate refresh tokens" }).diagnostics;
+    }),
+
+  WIKI_QUERY_PARTIAL_MATCH: () =>
+    inScratch((directory) => {
+      indexedSearchScaffold(directory);
+      return wikiSearch({ scaffoldRoot: directory, text: "Why do tokens rotate hourly?" }).diagnostics;
     }),
 
   WIKI_INDEX_FTS5_UNAVAILABLE: () => {
@@ -629,6 +681,28 @@ See [the code](mex://function:0123456789abcdef).
       const inventory = inventoryScaffold({ scaffoldRoot: directory });
       const index = inventory.files.find((file) => file.path === "patterns/INDEX.md")!;
       return planGeneratedView(index, inventory, "pattern")?.diagnostics ?? [];
+    }),
+
+  KNOWLEDGE_NOT_ADOPTED: () =>
+    // A pattern added after the scaffold was migrated, through the real pass.
+    inScratch((directory) => {
+      writeAdoptedArchitecture(directory);
+      mkdirSync(join(directory, "patterns"), { recursive: true });
+      writeFileSync(join(directory, "patterns", "add-route.md"), "---\nname: add-route\n---\n\n# Add a route\n\nSteps.\n", "utf-8");
+      return validateScaffold({ scaffoldRoot: directory }).diagnostics;
+    }),
+
+  CODE_GRAPH_UNAVAILABLE: () =>
+    // A graph that exists but could not be trusted for the pass (#232). A
+    // missing graph is ordinary and has no notice, so it is not the case here.
+    [codeGraphUnavailableDiagnostic("stale")!],
+
+  KNOWLEDGE_UNTYPED: () =>
+    // A domain context file population wrote without a `type`.
+    inScratch((directory) => {
+      writeAdoptedArchitecture(directory);
+      writeFileSync(join(directory, "context", "routing.md"), "---\nname: routing\n---\n\n# Routing\n\nProse.\n", "utf-8");
+      return validateScaffold({ scaffoldRoot: directory }).diagnostics;
     }),
 
   INVALID_AGENT_RESPONSE: () =>

@@ -18,7 +18,7 @@ edges:
     condition: when refreshing the release README, badges, community links, or architecture illustrations
   - target: patterns/hub-first-run-onboarding.md
     condition: when adding or changing the Hub first-run tour or its checkout-local completion state
-last_updated: 2026-09-28
+last_updated: 2026-10-08
 ---
 
 # Session Bootstrap
@@ -30,6 +30,15 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- Local work on `fix/knowledge-drift-precision` adds `mex wiki link-sections`:
+  preview or explicitly apply missing section-to-parent `refines` relationships
+  without changing claim text or groundings. Setup/GROW guidance preserves those
+  connections; the bounded Hub graph retains up to 25 authored parent targets
+  beyond its initial page. These changes are on this branch, not yet released.
+  `mex wiki upgrade` previews existing broad code-linked review candidates;
+  `--apply` uses sync's agent chooser (or a manual prompt fallback). It requires
+  a fresh graph and rejects flagged candidate groundings before launching an
+  agent. Claim splitting is reviewed, not inferred on Hub reads or installation.
 
 - Release preparation for 0.8.3 is on `codex/release-0.8.3`, based on main
   `490ffe5`. The maintainer selected 0.8.3, including documented additive API
@@ -385,10 +394,12 @@ Then read this file fully before doing anything else in this session.
   appear only when a stable status observation makes the requested operation
   safe; migration-required or unstable Wiki observations never fabricate a
   repair action.
-- The Wiki CLI's `serviceOptions` carries no code graph, so `wiki validate`
-  cannot resolve a grounding and `wiki migrate`'s body-hash backfill never runs.
-  Both degrade silently rather than failing; the validate notice now reports
-  that the pass had no graph instead of asserting the checkout has none.
+- The Wiki CLI's graph-aware commands (validate, rebuild-index, migrate, apply,
+  regenerate-views) reach the graph only through the repository graph port's
+  fresh snapshot (#232). A stale or changing graph is not used: the command
+  runs without it and reports `CODE_GRAPH_UNAVAILABLE`, so `mex graph` must be
+  current for Wiki grounding verdicts. Synthesis (`wiki build/prepare/propose`)
+  still opens `graph.db` directly, without that freshness proof.
 
 ## Routing Table
 

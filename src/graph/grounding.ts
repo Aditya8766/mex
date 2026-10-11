@@ -32,7 +32,7 @@
 import type { DriftIssue, ScaffoldFrontmatter, Grounding } from "../types.js";
 import type { GraphEngine } from "./engine.js";
 import type { Reconciler } from "./reconcile.js";
-import { makeGroundingChecker, type SourceDriftGrounding } from "../drift/checkers/grounding.js";
+import { makeGroundingChecker, type GroundingCodeHashing, type SourceDriftGrounding } from "../drift/checkers/grounding.js";
 
 export type { Grounding };
 
@@ -73,7 +73,7 @@ export interface GroundingBaseline {
   source: string;
   /** sha256 of `source` at grounding time. */
   bodyHash: string;
-  /** Serialized Tier-2 fingerprint (`mh:<K>:<hex>`) captured at grounding time. */
+  /** Serialized Tier-2 fingerprint (`mh2:<K>:<base64url>`, or `mh:<K>:<hex>` before #233) captured at grounding time. */
   fingerprint: string;
 }
 
@@ -94,7 +94,7 @@ export interface GroundedSource {
   source: string;
   /** sha256 of `source` at grounding time; compared against the node's current bodyHash. */
   bodyHash: string;
-  /** Serialized Tier-2 fingerprint (`mh:<K>:<hex>`) captured at grounding time. */
+  /** Serialized Tier-2 fingerprint (`mh2:<K>:<base64url>`, or `mh:<K>:<hex>` before #233) captured at grounding time. */
   fingerprint: string;
 }
 
@@ -127,11 +127,16 @@ export type GroundingChecker = (
  * stale only because source files changed is still checked, with every node
  * the snapshot cannot vouch for reported as GROUNDING_UNVERIFIED and no
  * reconciliation attempted. Omit it for the frozen fresh-graph behaviour.
+ *
+ * `codeHashing` lets a body that changed only in its comments be reported as
+ * GROUNDING_COMMENT_DRIFT rather than GROUNDING_DRIFT (#236). Without it every
+ * changed body is GROUNDING_DRIFT, as before.
  */
 export function createGroundingChecker(
   graph: GraphEngine,
   reconciler: Reconciler,
   sourceDrift?: SourceDriftGrounding,
+  codeHashing?: GroundingCodeHashing,
 ): GroundingChecker {
-  return makeGroundingChecker(graph, reconciler, sourceDrift);
+  return makeGroundingChecker(graph, reconciler, sourceDrift, codeHashing);
 }

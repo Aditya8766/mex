@@ -215,10 +215,26 @@ Scaffold frontmatter may include an optional `grounds_to` array. Each entry stor
 ```yaml
 grounds_to:
   - node: "function:a3f8...c21"
-    fingerprint: "mh:64:9f2a..."
+    fingerprint: "mh2:64:AXbN..."
 ```
 
+Fingerprints are written as `mh2:64:<base64url>`. Scaffolds committed before #233 hold `mh:64:<hex>`; both are read and compared by value, and an older entry is re-encoded only when its file's groundings are rewritten. `mex graph compact-fingerprints` re-encodes them all in one explicit pass (`--dry-run` writes nothing). Versions before #233 cannot read `mh2:`, so everyone sharing a scaffold should upgrade before new groundings are committed.
+
+An entry may also carry `bodyHash`, the hash of the node's body when it was grounded, and `codeHash`, the hash of that body's code with comments set aside, bound to the `bodyHash` it was captured with (#236). Capture writes both; neither is hand-written. When only `bodyHash` differs from the current code, `mex check` reports the info notice `GROUNDING_COMMENT_DRIFT` instead of `GROUNDING_DRIFT`.
+
 Files without `grounds_to` retain their previous behavior. The graph database and grounding baselines under `.mex/` are internal mex data and should not be edited directly.
+
+### Declared entity type
+
+A scaffold file that no Wiki migration rule names may declare what it is with a root `type` key, for example `type: component` on a domain file such as `context/payments.md` (#227):
+
+```yaml
+name: payments
+description: How payouts are scheduled and settled.
+type: component
+```
+
+`mex wiki migrate` then adopts the file as one file-level entity of that type and moves the value to `mex.type`, removing the root key. Every Wiki-authored type except the Spec family is accepted; Spec-family entities are created through `mex inbox`. A value that is not one of those types, or that disagrees with the rule that already types the file (such as `type: guide` on `context/stack.md`), is reported and the file is left unchanged. A file without `type` behaves as before: untyped `context/*.md` files are still not adopted, and `mex check` and `mex wiki validate` now report them as `KNOWLEDGE_UNTYPED`.
 
 The `LanguageExtractor` and `FrameworkResolver` interfaces are source-level contribution seams, not part of the public npm API, and may change between minor versions. They are intentionally not exported from `src/index.ts`.
 

@@ -5,7 +5,8 @@ import type { MexConfig, SyncTarget, DriftIssue, AiTool } from "../types.js";
 import { AI_TOOLS } from "../types.js";
 import { runDriftCheck } from "../drift/index.js";
 import { isCliAvailable } from "../cli-tools.js";
-import { buildSyncBrief, buildCombinedBrief } from "./brief-builder.js";
+import { buildSyncBrief, buildCombinedBrief, flaggedWikiEntities, type FlaggedEntity } from "./brief-builder.js";
+import { rebuildWikiIndexAfterSync } from "./wiki-index.js";
 import { findScaffoldFiles } from "../drift/index.js";
 import { captureGroundingBaselines, groundingReviewNodeIds, loadGroundingRuntime, persistMovedGroundings, previewGroundingBaseline, type MovedByNeighborsNotice } from "../graph/runtime.js";
 import { movedByNeighborsMessage } from "../drift/checkers/grounding.js";
@@ -54,7 +55,7 @@ export function runToolInteractive(
 }
 
 /** Pick which AI tool to use for interactive sync */
-async function pickSyncTool(configuredTools: AiTool[]): Promise<AiTool | null> {
+export async function pickSyncTool(configuredTools: AiTool[]): Promise<AiTool | null> {
   // Filter to tools that have a CLI and are installed
   let available = configuredTools.filter((t) => {
     const meta = AI_TOOLS[t];
@@ -104,7 +105,17 @@ interface SyncDependencies {
   ask?: (question: string) => Promise<string>;
   runAgent?: typeof runToolInteractive;
   reviewGrounding?: boolean;
+  /** Rebuilds the Wiki index after a session that reviewed Wiki entities. */
+  rebuildWikiIndex?: (config: MexConfig) => Promise<{ entityCount: number }>;
 }
+
+/** Findings `sync` reports but never hands to an AI session. */
+const SYNC_NOTICE_CODES: ReadonlySet<DriftIssue["code"]> = new Set([
+  "GROUNDING_MOVED_BY_NEIGHBORS",
+  "GROUNDING_COMMENT_DRIFT",
+  "GROUNDING_MOVED",
+  "GROUNDING_NEARBY_DRIFT",
+]);
 
 /** Run targeted sync: detect → brief → AI → verify → ask → loop */
 export async function runSync(
@@ -148,11 +159,20 @@ export async function runSync(
       }
     }
     const report = await runDriftCheck(config);
-    // A notice reports a completed rebind (#229); there is nothing to repair.
-    const issues = report.issues.filter((i) => i.code !== "GROUNDING_MOVED_BY_NEIGHBORS");
+    // Notices, not repairs. A completed rebind (#229) has nothing left to do.
+    // A body that changed only in comments (#236) needs a review of the new
+    // body, not an AI session over prose that still describes the code.
+    const commentOnly = report.issues.filter((i) => i.code === "GROUNDING_COMMENT_DRIFT");
+    // A move and a change away from the fact are notices too: the link's
+    // verdict is not `changed`, so nothing in the prose is in question.
+    const issues = report.issues.filter((i) => !SYNC_NOTICE_CODES.has(i.code));
 
     if (issues.length === 0) {
-      console.log(chalk.green("✓ No drift detected. Everything is in sync."));
+      if (commentOnly.length === 0) {
+        console.log(chalk.green("✓ No drift detected. Everything is in sync."));
+      } else {
+        await offerCommentOnlyReview(config, commentOnly, opts.dryRun === true, dependencies, ask);
+      }
       return;
     }
 
@@ -288,8 +308,24 @@ export async function runSync(
       }
     }
 
+    // The session may have re-recorded or rewritten Wiki entities. Rebuild the
+    // index so `wiki query`, `wiki for-code` and the Hub show it; a rebuild that
+    // fails stops sync loudly rather than leave the index silently behind.
+    const reviewed = flaggedWikiEntities(targets);
+    if (ok && reviewed.length > 0) {
+      try {
+        const rebuilt = await (dependencies.rebuildWikiIndex ?? rebuildWikiIndexAfterSync)(config);
+        console.log(chalk.dim(`Rebuilt the Wiki index (${rebuilt.entityCount} entities).`));
+      } catch (error) {
+        console.error(chalk.red(`✗ Wiki index rebuild failed: ${error instanceof Error ? error.message : String(error)}`));
+        process.exitCode = 1;
+        return;
+      }
+    }
+
     // Step 4: Verify
     const postReport = await runDriftCheck(config);
+    reportStillFlagged(reviewed, postReport.issues);
     const scoreDelta = postReport.score - report.score;
     const deltaStr =
       scoreDelta > 0
@@ -344,6 +380,55 @@ export async function runSync(
       return;
     }
   }
+}
+
+/**
+ * Name every reviewed Wiki entity that `check` still flags: the agent was
+ * unsure, or the link is missing or ambiguous and could not be re-recorded.
+ * Said plainly, so nothing reads as reviewed that was not.
+ */
+function reportStillFlagged(reviewed: readonly FlaggedEntity[], issues: readonly DriftIssue[]): void {
+  if (reviewed.length === 0) return;
+  const still = new Map<string, string[]>();
+  for (const issue of issues) {
+    if (issue.entity === undefined || SYNC_NOTICE_CODES.has(issue.code) || !issue.code.startsWith("GROUNDING_")) continue;
+    still.set(issue.entity.id, [...(still.get(issue.entity.id) ?? []), issue.verdict ?? issue.code]);
+  }
+  const left = reviewed.filter((entity) => still.has(entity.id));
+  console.log(chalk.dim(`Wiki entities reviewed: ${reviewed.length - left.length} cleared, ${left.length} still flagged.`));
+  for (const entity of left) {
+    console.log(chalk.yellow(`  still flagged, not cleared: ${entity.id} "${entity.title}" — ${still.get(entity.id)!.join(", ")}`));
+  }
+}
+
+/**
+ * When the only findings are bodies that changed in comments alone (#236),
+ * offer the grounding review directly. Accepting stays an explicit, per-entry
+ * decision against the shown old and new code; nothing is renewed silently,
+ * and no AI session is started for prose that still describes the code.
+ */
+async function offerCommentOnlyReview(
+  config: MexConfig,
+  notices: readonly DriftIssue[],
+  dryRun: boolean,
+  dependencies: SyncDependencies,
+  ask: (question: string) => Promise<string>,
+): Promise<void> {
+  const count = notices.length;
+  console.log(chalk.blue(
+    `ℹ ${count} grounded node${count === 1 ? "" : "s"} changed only in comments; the code ${count === 1 ? "it describes is" : "they describe is"} unchanged.`,
+  ));
+  const interactive = dependencies.reviewGrounding ?? (process.stdin.isTTY && process.stdout.isTTY);
+  if (dryRun || !interactive) {
+    console.log(chalk.dim("Run `mex sync` in a terminal to review and accept the new bodies."));
+    return;
+  }
+  const answer = (await ask("Review and accept them now? [y/N] ")).trim().toLowerCase();
+  if (answer !== "y" && answer !== "yes") {
+    console.log(chalk.dim("Left as notices. They do not affect the drift score."));
+    return;
+  }
+  await reviewGroundingBaselines(config, groupIntoTargets([...notices]), ask);
 }
 
 /** Review one exact entry at a time; no graph lease is held while waiting for input. */

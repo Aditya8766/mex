@@ -201,7 +201,21 @@ export type IssueCode =
   // A MOVED decided by callers and callees because the body was too small to
   // tell (old → new). Info, and not counted in the score: nothing is wrong,
   // but a rebind is otherwise silent. See #229.
-  | "GROUNDING_MOVED_BY_NEIGHBORS";
+  | "GROUNDING_MOVED_BY_NEIGHBORS"
+  // A grounded node's body changed only in its comments: the committed
+  // `bodyHash` differs but `codeHash` matches. Info, and not counted in the
+  // score; accepting the new body is still an explicit review. See #236.
+  | "GROUNDING_COMMENT_DRIFT"
+  | "GROUNDING_NEARBY_DRIFT"
+  | "GROUNDING_NO_BASELINE"
+  | "GROUNDING_MOVED"
+  // ── Wiki adoption (emitted by src/drift/checkers/wiki-adoption.ts; #227) ──
+  // A knowledge file migration would adopt but has not, such as a pattern
+  // added after setup (warning).
+  | "KNOWLEDGE_NOT_ADOPTED"
+  // A context file no rule names and whose frontmatter declares no usable
+  // `type`, so migration leaves it outside the Wiki (warning).
+  | "KNOWLEDGE_UNTYPED";
 
 export interface DriftIssue {
   code: IssueCode;
@@ -211,6 +225,13 @@ export interface DriftIssue {
   message: string;
   /** The claim that triggered this issue, if any */
   claim?: Claim;
+  /** The Wiki entity whose code link this issue is about, if any. */
+  entity?: { id: string; title: string };
+  /**
+   * For a code-link finding: the shared verdict (`src/wiki/grounding/verdict.ts`)
+   * it reports, the same one the Wiki stores.
+   */
+  verdict?: "fresh" | "changed-nearby" | "moved" | "changed" | "missing" | "ambiguous" | "unverified";
 }
 
 export interface DriftReport {
@@ -233,7 +254,7 @@ export interface DriftReport {
  * ```yaml
  * grounds_to:
  *   - node: "function:a3f8...c21"
- *     fingerprint: "mh:64:9f2a..."
+ *     fingerprint: "mh2:64:AXbN..."
  *     bodyHash: "sha256:7c1d..."
  * ```
  */
@@ -241,7 +262,7 @@ export interface Grounding {
   /** The grounded node's Tier-1 id, `${kind}:sha256(filePath:kind:name)[:32]`. */
   node: string;
   /**
-   * Serialized Tier-2 fingerprint (`mh:<K>:<hex>`) captured when grounded.
+   * Serialized Tier-2 fingerprint (`mh2:<K>:<base64url>`, or `mh:<K>:<hex>` before #233) captured when grounded.
    *
    * An **identity** signal, not a change signal: it is what finds the symbol
    * again after it moves. It is deliberately insensitive to an edited constant
@@ -264,6 +285,18 @@ export interface Grounding {
    * structural comparator, and `mex sync` backfills it on the next capture.
    */
   bodyHash?: string;
+  /**
+   * Hash of the grounded node's code with comments set aside, captured at the
+   * same moment as `bodyHash` (#236; `src/graph/code-hash.ts`).
+   *
+   * Not a second change signal: `bodyHash` still decides whether a body
+   * changed. This only tells a comment-only change from a code change, so the
+   * checker can report the first as `GROUNDING_COMMENT_DRIFT` rather than
+   * `GROUNDING_DRIFT`. Optional and additive; written only while `bodyHash`
+   * describes the current code, as `ch1:<first 12 hex of bodyHash>:<hash>`, so
+   * a pair that no longer records one moment is detected and ignored.
+   */
+  codeHash?: string;
 }
 
 export interface ScaffoldFrontmatter {
