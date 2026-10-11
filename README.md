@@ -176,7 +176,7 @@ The team's memory is shared; the machinery that retrieves it stays local. MEX se
 
 Canonical knowledge is structured Markdown with metadata, relations, sources, provenance, and code groundings; accepted Wiki writes append audit records. The Code Graph and Wiki search index are rebuildable local SQLite views, not shared sources of truth.
 
-In 0.8.1, ordinary Wiki creation and synthesis capture the operation's recorded actor, time, and session as creation provenance while preserving any supplied original attribution. Migration leaves unknown, untyped `context/*.md` files untouched; supply an explicit entity type before migrating them instead of relying on an architecture default.
+In 0.8.1, ordinary Wiki creation and synthesis capture the operation's recorded actor, time, and session as creation provenance while preserving any supplied original attribution. Migration leaves unknown, untyped `context/*.md` files untouched; declare the file's type with a root `type` key in its frontmatter (for example `type: component`) before migrating it, instead of relying on an architecture default. `mex check` and `mex wiki validate` report knowledge files that are not yet in the Wiki.
 
 | Commit and push to share | Keep local or ephemeral; never commit |
 | --- | --- |
@@ -355,13 +355,24 @@ Run `mex <command> --help` for the complete interface.
 | Open a local interface | `mex hub`, `mex tui` |
 | Build and retrieve code context | `mex graph status`, `mex graph refresh`, `mex graph rebuild`, `mex graph scope <task>`, `mex graph query <relation> <target>`, `mex graph get <node-id>`, `mex impact <target>` |
 | Index and retrieve knowledge | `mex wiki rebuild-index`, `mex wiki query <text>`, `mex wiki show <id>`, `mex wiki related <id>`, `mex wiki backlinks <id>`, `mex wiki for-code <node-id>` |
-| Synthesize or maintain the Wiki | `mex wiki build`, `mex wiki prepare --stage <stage> [--cluster <name>]`, `mex wiki validate`; `mex wiki propose <response-file>` and `mex wiki apply <operation-file>` preview by default and write only with `--apply` |
+| Synthesize or maintain the Wiki | `mex wiki build`, `mex wiki prepare --stage <stage> [--cluster <name>]`, `mex wiki validate` (structure only); `mex wiki propose <response-file>`, `mex wiki apply <operation-file>` and `mex wiki reground <id>` preview by default and write only with `--apply` |
 | Review team memory | `mex member --help`, `mex activity --help`, `mex workstream --help`, `mex spec --help` |
 | Propose knowledge additions or corrections | `mex inbox draft --help`, `mex inbox publish --help`, `mex inbox proposal --help` |
 | Prepare and receive handoffs | `mex relay draft --help`, `mex relay publish --help`, `mex relay acknowledge --help`, `mex relay close --help` |
 | Record and retrieve project notes | `mex log <message>`, `mex logging --help`, `mex timeline --format md`, `mex pattern --help` |
 | Export scaffold Markdown | `mex export`, `mex export --out <path>` |
 | Check and maintain the project | `mex check`, `mex sync`, `mex doctor`, `mex watch` |
+
+### Keeping knowledge true to the code
+
+Two commands cover it:
+
+- `mex check` runs every deterministic check, with no AI and no writes: scaffold files, paths and commands, and every code link in the scaffold and the Wiki. Each link gets one verdict, the same one `wiki query`, `wiki for-code` and the Hub show: `fresh`, `changed-nearby` (the change is away from everything the fact names), `moved`, `changed`, `missing` or `ambiguous`. Comment-only and formatting-only edits stay fresh. A finding on a Wiki entity names its id and title.
+- `mex sync` fixes what check found in one interactive agent session. For each flagged Wiki entity the agent compares the fact with the code as recorded and as it is now, then re-records it with `mex wiki reground <id> --apply` (still true), fixes the text and re-records (changed), or leaves the flag (unsure). Missing and ambiguous links are relinked by hand or left flagged. Sync then rebuilds the Wiki index and checks again.
+- `mex wiki link-sections` previews missing connections from existing section entities to their enclosing document or section. Add `--apply` to record those `refines` relationships without changing facts or code groundings. It works on existing scaffolds without setup or an AI session. Semantic dependencies still need evidence. The Hub graph remains bounded to 100 entities and 500 relationships and keeps a limited number of linked parents visible; use List for the complete knowledge collection.
+- `mex wiki upgrade` previews a bounded review of existing broad code-linked entities for one fact per entity. `--apply` starts an interactive review using the same agent chooser as `mex sync`; `--tool` optionally overrides it. Without an installed CLI, copy the preview prompt into your coding agent. Review requires a fresh code graph and refuses flagged candidate groundings until check/sync has reviewed them. It preserves existing ids as overviews and does not rerun setup. Opening Hub or updating MEX never rewrites project knowledge automatically.
+
+`mex wiki query` and `mex wiki for-code` are how agents find that knowledge; `--health changed` lists what check flags.
 
 Use `mex capabilities --json` for machine-readable capability discovery and `mex commands` for the concise CLI map.
 

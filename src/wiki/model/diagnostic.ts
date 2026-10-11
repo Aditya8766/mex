@@ -207,6 +207,16 @@ export const WIKI_DIAGNOSTICS = {
     remediation: "Node id and fingerprint must come from live graph output. MEX will not accept caller-supplied values.",
   },
   /**
+   * A command that resolves groundings ran without a code graph it could
+   * trust (#232): the checkout's graph is stale, needs a rebuild, is corrupt,
+   * or changed during the pass. Info, because the command still did its work;
+   * it says how much of it was checked, not that the scaffold is wrong.
+   */
+  CODE_GRAPH_UNAVAILABLE: {
+    severity: "info",
+    remediation: "Run `mex graph` to bring the code graph up to date, then run this command again.",
+  },
+  /**
    * Groundings split between a root `grounds_to` and the file-level `mex` map
    * (#226). Info, because both are read and the root ones belong to the
    * file-level entity; raised to a warning where the two keys ground one node
@@ -327,6 +337,42 @@ export const WIKI_DIAGNOSTICS = {
   GENERATED_VIEW_DRIFT: {
     severity: "info",
     remediation: "A generated section no longer matches the index. Regenerate it.",
+  },
+  KNOWLEDGE_NOT_ADOPTED: {
+    severity: "warning",
+    remediation: "Run `mex wiki migrate` to adopt it; `mex wiki migrate --dry-run` shows the plan first.",
+  },
+  KNOWLEDGE_UNTYPED: {
+    severity: "warning",
+    remediation:
+      "Declare what the file is with a root `type` key in its frontmatter, for example `type: component`, then run `mex wiki migrate`.",
+  },
+
+  // -- Query (#235) ------------------------------------------------------------
+
+  /**
+   * A search found nothing, said rather than left as an empty list.
+   *
+   * An agent reads a bare empty result as "there is no knowledge about this",
+   * when the knowledge may sit in a file the Wiki does not index, or under
+   * different words. Info, because an empty answer is a valid answer.
+   */
+  WIKI_QUERY_NO_MATCH: {
+    severity: "info",
+    remediation:
+      "`wiki query` matches words, not meaning. Retry with the distinctive keywords or an entity title, read `ROUTER.md` for the scaffold's own map of its knowledge, or run `mex graph scope \"<task>\"` to start from the code.",
+  },
+  /** Hits whose groundings were never resolved against a fresh code graph. */
+  WIKI_HEALTH_UNCHECKED: {
+    severity: "info",
+    remediation:
+      "Run `mex graph` (or `mex graph refresh`), then `mex wiki rebuild-index`, so grounding health is resolved against the current code before relying on an unflagged hit.",
+  },
+  /** No entity contained every query term, so the hits are the broader, some-terms match. */
+  WIKI_QUERY_PARTIAL_MATCH: {
+    severity: "info",
+    remediation:
+      "Each hit lists the terms it matched in `matchedTerms`. Check that a hit answers the question before relying on it, or narrow the query to the keywords that matter.",
   },
 
   // -- Synthesis (§12) --------------------------------------------------------

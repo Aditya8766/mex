@@ -191,6 +191,18 @@ function remediationFor(code: DriftIssue["code"]): string | null {
       return "Fix the link target path or remove the broken Markdown link.";
     case "GROUNDING_MOVED_BY_NEIGHBORS":
       return "Not scored. Confirm the new node is the same function; `mex sync` rewrites the reference.";
+    case "GROUNDING_COMMENT_DRIFT":
+      return "Not scored. Only comments changed; check whether the prose relied on them, then accept the new body in `mex sync`.";
+    case "GROUNDING_NEARBY_DRIFT":
+      return "Not scored. The change is away from everything the fact names; `mex sync` asks you to confirm it.";
+    case "GROUNDING_MOVED":
+      return "Not scored. The code moved without changing; `mex sync` rewrites the reference.";
+    case "GROUNDING_NO_BASELINE":
+      return "Only structural change is seen. Re-record the link with `mex sync` (or `mex graph ground`) to store its body hash.";
+    case "KNOWLEDGE_NOT_ADOPTED":
+      return "Run `mex wiki migrate` to add it to the Wiki; `--dry-run` shows the plan first.";
+    case "KNOWLEDGE_UNTYPED":
+      return "Declare the file's type with a root `type` key in its frontmatter (for example `type: component`), then run `mex wiki migrate`.";
     default:
       return null;
   }

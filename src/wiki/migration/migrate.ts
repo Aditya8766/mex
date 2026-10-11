@@ -33,6 +33,8 @@ import type { AbsorbableRootKey, WikiActor, WikiOperation } from "../model/opera
 import type { WikiEntityType } from "../model/entity.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
+import { resolveGrounding } from "../grounding/resolve.js";
+import type { GroundingResolver } from "../index/write.js";
 import { applyOperation, applyPlannedOperationSequence, type ApplyOptions } from "../operations/apply.js";
 import { planOperation, type WikiPatchPlan } from "../operations/plan.js";
 import { createParseCache } from "../operations/locate.js";
@@ -66,6 +68,8 @@ export interface MigrateOptions {
   registry?: EntityTypeRegistry;
   /** The code graph, for backfilling a moved grounding's `bodyHash`. */
   graph?: GroundingGraph | null;
+  /** The checkout root, which keys the cached grounding baselines backfill reads; defaults to the scaffold's parent. */
+  projectRoot?: string;
   /** Where `wiki.db` lives, when there is one. Absent is normal. */
   indexPath?: string;
   actor?: WikiActor;
@@ -191,10 +195,18 @@ function projectLegacyTopics(
   };
 }
 
-function absorbedRootKeys(hasGroundings: boolean, hasMappedTopics: boolean): AbsorbableRootKey[] {
+function absorbedRootKeys(
+  hasGroundings: boolean,
+  hasMappedTopics: boolean,
+  hasDeclaredType: boolean,
+): AbsorbableRootKey[] {
   const keys: AbsorbableRootKey[] = [];
   if (hasGroundings) keys.push("grounds_to");
   if (hasMappedTopics) keys.push("topics");
+  // The classifier offers a file-level candidate on a file with a root `type`
+  // only when it accepted that declaration (#227), so its value is now
+  // `mex.type` and the root key would be a second store of it.
+  if (hasDeclaredType) keys.push("type");
   return keys;
 }
 
@@ -338,6 +350,7 @@ function migrationReportFromInventory(
     classifications,
     (path) => classifications.get(path)?.candidates ?? [],
     options.graph ?? null,
+    options.projectRoot,
   );
   report.groundingsMoved = [...groundings.moved.values()].reduce((sum, list) => sum + list.length, 0)
     + [...groundings.absorbed.values()].reduce((sum, entry) => sum + entry.count, 0);
@@ -489,6 +502,7 @@ function migrateScaffoldHeld(options: MigrateOptions & { maintenanceLease: WikiM
     ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
     ...(options.graph === undefined || options.graph === null ? {} : { graph: options.graph }),
+    ...groundingResolverFor(options.graph ?? null),
     ...(options.indexPath === undefined ? {} : { indexPath: options.indexPath }),
     ...(options.onFileWritten === undefined ? {} : { onFileWritten: options.onFileWritten }),
     ...(options.beforeFileRename === undefined ? {} : { beforeFileRename: options.beforeFileRename }),
@@ -512,6 +526,7 @@ function migrateScaffoldHeld(options: MigrateOptions & { maintenanceLease: WikiM
     classifications,
     (path) => classifications.get(path)?.candidates ?? [],
     options.graph ?? null,
+    options.projectRoot,
   );
   report.groundingsAmbiguous = groundingPlan.diagnostics.length;
   report.diagnostics.push(...groundingPlan.diagnostics);
@@ -543,7 +558,11 @@ function migrateScaffoldHeld(options: MigrateOptions & { maintenanceLease: WikiM
 
     for (const candidate of ordered) {
       const isFileLevel = candidate.target.at === "file";
-      const absorbRootKeys = absorbedRootKeys(moved !== undefined, isFileLevel && legacyTopics.absorb);
+      const absorbRootKeys = absorbedRootKeys(
+        moved !== undefined,
+        isFileLevel && legacyTopics.absorb,
+        isFileLevel && file.parsed.legacy.type !== undefined,
+      );
       const payload: Record<string, unknown> = {
         file: candidate.file,
         adopt:
@@ -670,6 +689,11 @@ function diffsFor(options: MigrateOptions, changed: Set<string>): string[] {
 }
 
 /** Render a report the way section 13.6 asks, for a caller that wants text. */
+/** Health for the index refresh after each write, from the graph migration was given (#232). */
+function groundingResolverFor(graph: GroundingGraph | null): { resolveGrounding?: GroundingResolver } {
+  return graph === null ? {} : { resolveGrounding: (grounding, context) => resolveGrounding(grounding, graph, context) };
+}
+
 export function renderMigrationReport(report: MigrationReport): string {
   const lines: string[] = [];
   lines.push(report.dryRun ? "Migration dry run" : "Migration applied");
@@ -820,6 +844,7 @@ export function planPinnedMigration(options: MigrateOptions): PinnedMigrationPla
     classifications,
     (path) => classifications.get(path)?.candidates ?? [],
     options.graph ?? null,
+    options.projectRoot,
   );
 
   for (const file of inventory.files) {
@@ -830,7 +855,11 @@ export function planPinnedMigration(options: MigrateOptions): PinnedMigrationPla
     const ids: EntityId[] = [];
     for (const candidate of orderForAdoption(classification.candidates)) {
       const isFileLevel = candidate.target.at === "file";
-      const absorbRootKeys = absorbedRootKeys(moved !== undefined, isFileLevel && legacyTopics.absorb);
+      const absorbRootKeys = absorbedRootKeys(
+        moved !== undefined,
+        isFileLevel && legacyTopics.absorb,
+        isFileLevel && file.parsed.legacy.type !== undefined,
+      );
       const payload: Record<string, unknown> = {
         file: candidate.file,
         adopt: candidate.target.at === "file"
@@ -1018,6 +1047,7 @@ function applyPinnedMigrationHeld(
     ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
     ...(options.graph === undefined || options.graph === null ? {} : { graph: options.graph }),
+    ...groundingResolverFor(options.graph ?? null),
     ...(options.indexPath === undefined ? {} : { indexPath: options.indexPath }),
     ...(options.onFileWritten === undefined ? {} : { onFileWritten: options.onFileWritten }),
     ...(options.beforeFileRename === undefined ? {} : { beforeFileRename: options.beforeFileRename }),

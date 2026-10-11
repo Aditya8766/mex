@@ -27,14 +27,14 @@
  * that creates one. Walking and parsing to answer a question is not "a read
  * that rebuilds": nothing is written, and validate never creates `wiki.db`.
  *
- * ## Two deliberate asymmetries
+ * ## Code links are not checked here
  *
- * **A missing code graph degrades rather than fails.** P4's write path refuses
- * every grounding when the graph is absent, because minting a permanent
- * canonical reference unverified is worse than not minting it (handoff §38).
- * A read is the opposite: a CI box with no `graph.db` still gets §14.1 and
- * §14.2 in full, and its grounding checks report `unverified` — a verdict of
- * "nobody looked", not a claim that anything is wrong.
+ * Whether linked code changed is decided once, by the shared verdict
+ * (`src/wiki/grounding/verdict.ts`), and reported by `mex check`. Validate
+ * covers the Wiki's own structure — ids, relations, evidence, anchors — and
+ * needs no code graph, so a CI box without `graph.db` gets all of it.
+ *
+ * ## A deliberate asymmetry
  *
  * **Nothing here fetches a URL** (§19). External evidence is reported as
  * unresolved, which is a diagnostic, not a network call. The resolver is an
@@ -65,11 +65,9 @@ import {
   type TopicMemberSubject,
 } from "../model/topic.js";
 import { findDuplicateSources, reportUnresolvedSources, type WikiSource } from "../model/source.js";
-import type { WikiGrounding } from "../model/grounding.js";
-import type { GroundingGraph } from "../grounding/adapter.js";
-import { resolveGrounding } from "../grounding/resolve.js";
 import { inventoryScaffold, type InventoryFile, type ScaffoldInventory } from "../migration/inventory.js";
 import { planGeneratedView } from "../migration/generated.js";
+import { findAdoptionGaps } from "../migration/adoption-gaps.js";
 import { createParseCache } from "../operations/locate.js";
 import { readAuditLog } from "../operations/audit.js";
 import { resolveBounds, type BoundsInput } from "../query/budget.js";
@@ -87,8 +85,6 @@ export interface ValidateOptions extends BoundsInput {
   projectRoot?: string;
   exclude?: readonly string[];
   registry?: EntityTypeRegistry;
-  /** Null or absent degrades every grounding check to `unverified`. */
-  graph?: GroundingGraph | null;
   /**
    * Does this external reference resolve?
    *
@@ -109,29 +105,6 @@ export interface ValidationReport {
   counts: Record<DiagnosticSeverity, number>;
   /** True when a bound stopped the diagnostic list. Data, never a diagnostic. */
   truncated: boolean;
-  /**
-   * True when there were groundings and not one of them produced a verdict.
-   *
-   * Distinct from "every grounding is fine": the caller has to be able to tell
-   * a clean bill of health from an unread one.
-   *
-   * **It has two causes, and this flag does not say which.** Either no code
-   * graph was available, or the graph was there and nothing could be compared
-   * against it — an undecodable committed fingerprint, a node the graph holds
-   * no fingerprint for, a rebind onto a node it cannot produce. Pair it with
-   * {@link codeGraphAvailable} to tell them apart before telling a user where
-   * to look.
-   */
-  groundingsUnverified: boolean;
-  /**
-   * Whether a code graph was supplied for this pass.
-   *
-   * The discriminator for {@link groundingsUnverified}, and it has to be
-   * carried rather than inferred: the grounding diagnostics that would hint at
-   * it are subject to the same bound as every other diagnostic, so a truncated
-   * report could lose the evidence and leave a reader guessing.
-   */
-  codeGraphAvailable: boolean;
 }
 
 /** Commit shape: a hex object name, abbreviated or full. */
@@ -144,7 +117,6 @@ export function validateScaffold(options: ValidateOptions): ValidationReport {
   const scaffoldRoot = resolve(options.scaffoldRoot);
   const projectRoot = resolve(options.projectRoot ?? dirname(scaffoldRoot));
   const exists = options.fileExists ?? ((absolutePath: string) => existsSync(absolutePath));
-  const graph = options.graph ?? null;
 
   const inventory = inventoryScaffold({
     scaffoldRoot,
@@ -182,10 +154,11 @@ export function validateScaffold(options: ValidateOptions): ValidationReport {
   collected.push(...referentialChecks(entities));
   collected.push(...sourceChecks(entities, projectRoot, exists, options.isExternalResolved));
 
-  const groundingResults = groundingChecks(entities, graph);
-  collected.push(...groundingResults.diagnostics);
+  // Code links are checked by `mex check`, with the verdict the Wiki index
+  // stores; validate covers the Wiki's own structure.
   collected.push(...anchorChecks(inventory));
   collected.push(...generatedViewChecks(inventory));
+  collected.push(...adoptionChecks(inventory));
   collected.push(...operationLogChecks(scaffoldRoot));
 
   const bounds = resolveBounds(options);
@@ -201,8 +174,6 @@ export function validateScaffold(options: ValidateOptions): ValidationReport {
     diagnostics: kept,
     counts,
     truncated: ordered.length > kept.length,
-    groundingsUnverified: groundingResults.unverified,
-    codeGraphAvailable: graph !== null,
   };
 }
 
@@ -431,88 +402,6 @@ function sourceChecks(
   return diagnostics;
 }
 
-/** §14.3, grounding half — resolution against the live graph, and the blind ones. */
-function groundingChecks(
-  entities: readonly { entity: WikiEntity; file: string }[],
-  graph: GroundingGraph | null,
-): { diagnostics: WikiDiagnostic[]; unverified: boolean } {
-  const diagnostics: WikiDiagnostic[] = [];
-  let sawGrounding = false;
-  let sawVerdict = false;
-
-  for (const { entity, file } of entities) {
-    for (let index = 0; index < entity.groundsTo.length; index += 1) {
-      const grounding: WikiGrounding = entity.groundsTo[index]!;
-      const path = `groundsTo[${index}]`;
-      sawGrounding = true;
-
-      // Finding 39: a grounding with no committed body hash falls back to the
-      // structural comparator, which is blind to a changed constant or a
-      // renamed local — so it reports `fresh` straight through a literal edit.
-      // Everything mex writes carries one; a hand-authored or pre-P4 grounding
-      // does not, and until now nothing anywhere said so.
-      if (grounding.bodyHash === undefined) {
-        diagnostics.push(
-          diagnostic(
-            "MALFORMED_GROUNDING",
-            `The grounding on ${entity.id} for ${grounding.node} carries no body hash, so drift in the grounded code cannot be detected — only a change to its structure.`,
-            {
-              file,
-              entityId: entity.id,
-              path,
-              severity: "warning",
-              // `MALFORMED_GROUNDING` covers six different problems and its
-              // registry remediation is written for the first two — a missing
-              // node id or fingerprint. This case has both, and telling a
-              // reader to supply them sends them looking for a field that is
-              // already in the file. Say what is actually absent and what
-              // writes it. Reported on a real scaffold where all sixteen
-              // warnings carried advice that did not apply to any of them.
-              remediation:
-                "The node id and fingerprint are present; only the baseline body hash is missing, and nothing you can hand-write supplies it. A grounding capture records it from the graph — `mex graph ground` on an existing scaffold, or `mex sync`. Until then drift is compared structurally.",
-            },
-          ),
-        );
-      }
-
-      const resolution = resolveGrounding(grounding, graph);
-      if (resolution.health !== "unverified") sawVerdict = true;
-
-      if (resolution.state === "missing") {
-        diagnostics.push(
-          diagnostic("GROUNDING_MISSING", `${grounding.node} no longer exists in the code graph. ${resolution.reason}`, {
-            file,
-            entityId: entity.id,
-            path,
-          }),
-        );
-        continue;
-      }
-      if (resolution.state === "unresolved" && graph !== null) {
-        diagnostics.push(
-          diagnostic("GROUNDING_UNRESOLVED", `${grounding.node} could not be resolved. ${resolution.reason}`, {
-            file,
-            entityId: entity.id,
-            path,
-          }),
-        );
-        continue;
-      }
-      if (resolution.health === "changed") {
-        diagnostics.push(
-          diagnostic("GROUNDING_STALE", `The code under ${grounding.node} changed since ${entity.id} was grounded to it.`, {
-            file,
-            entityId: entity.id,
-            path,
-          }),
-        );
-      }
-    }
-  }
-
-  return { diagnostics, unverified: sawGrounding && !sawVerdict };
-}
-
 /**
  * §14.3, last clause — an inline anchor disagreeing with the entity's grounding
  * *where they are declared equivalent*.
@@ -576,6 +465,17 @@ function generatedViewTypeFor(file: InventoryFile): "pattern" | "decision" | nul
   if (/(^|\/)patterns\/(INDEX|README)\.md$/.test(file.path)) return "pattern";
   if (/(^|\/)decisions?\.md$/.test(file.path)) return "decision";
   return null;
+}
+
+/**
+ * Knowledge files outside the Wiki (#227): files migration would adopt, and
+ * context files nothing types. Read off migration's own classifier, so this
+ * reports exactly what `mex wiki migrate` would do or decline to do.
+ */
+function adoptionChecks(inventory: ScaffoldInventory): WikiDiagnostic[] {
+  return findAdoptionGaps(inventory).map((gap) =>
+    diagnostic(gap.kind === "not-adopted" ? "KNOWLEDGE_NOT_ADOPTED" : "KNOWLEDGE_UNTYPED", gap.message, { file: gap.file }),
+  );
 }
 
 /** §14.1 — malformed operation-log entries. The Markdown is unaffected by these. */

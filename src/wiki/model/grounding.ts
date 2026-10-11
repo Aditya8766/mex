@@ -51,7 +51,8 @@ export interface WikiGrounding {
   /** Code-graph node id. Produced by the graph, never invented. */
   node: string;
   /**
-   * Serialized MinHash fingerprint, `mh:<K>:<hex>`. Produced by the graph.
+   * Serialized MinHash fingerprint, `mh2:<K>:<base64url>` (or `mh:<K>:<hex>`
+   * before #233). Produced by the graph.
    *
    * This is an **identity** signal, not a change signal. It is what finds a
    * symbol again after it moves — see {@link groundingComparator} for why that
@@ -68,6 +69,13 @@ export interface WikiGrounding {
    * carries it.
    */
   bodyHash?: string;
+  /**
+   * Hash of the node's code with comments set aside, captured at the same
+   * moment as `bodyHash` (#236). It does not decide whether a body changed;
+   * it tells a comment-only change from a code change. Kept here so a wiki
+   * write carries it through rather than dropping it as an unknown key.
+   */
+  codeHash?: string;
   /** Repository-relative path, cached for display when the graph is unavailable. */
   file?: string;
   commit?: string;
@@ -84,6 +92,13 @@ export interface WikiGrounding {
  * the other four are properties of one grounding reference.
  */
 export type GroundingState = "fresh" | "stale" | "missing" | "unresolved" | "ungrounded";
+
+/** Why a changed body still resolved fresh. */
+export interface GroundingDriftNote {
+  kind: "comment-only" | "layout-only" | "changed-nearby";
+  /** For `changed-nearby`: the tokens of the fact that the change left alone. */
+  anchors?: string[];
+}
 
 /** Derived, per-checkout health. Never written to Markdown. */
 export type GroundingHealth = "fresh" | "changed" | "missing" | "ambiguous" | "unverified";
@@ -115,6 +130,12 @@ export type GroundingResolution =
       /** True when reconciliation rebound a moved symbol. */
       rebound: boolean;
       bodyHash: string;
+      /**
+       * Set when the body differs from the committed hash in a way that does
+       * not reach the fact: only comments, only layout, or lines away from
+       * everything the fact names. Information for a reviewer, not a warning.
+       */
+      drift?: GroundingDriftNote;
     }
   | {
       state: "stale";
@@ -185,7 +206,7 @@ export function compareGroundingHealth(left: GroundingHealth, right: GroundingHe
 }
 
 /**
- * Shape of a serialized fingerprint: `mh:<K>:<hex>`.
+ * Shape of a serialized fingerprint in the original encoding: `mh:<K>:<hex>`.
  *
  * Shape only. The canonical codec lives in `src/graph/fingerprint.ts`, and the
  * model layer deliberately does not import it — the model must stay free of the
@@ -194,8 +215,12 @@ export function compareGroundingHealth(left: GroundingHealth, right: GroundingHe
  */
 export const FINGERPRINT_PATTERN = /^mh:\d+:(?:[0-9a-f]{2})+$/i;
 
+/** Shape of the compact encoding written since #233: `mh2:<K>:<base64url>`. Case is data here. */
+export const COMPACT_FINGERPRINT_PATTERN = /^mh2:\d+:[A-Za-z0-9_-]+$/;
+
 export function isFingerprintShaped(value: unknown): value is string {
-  return typeof value === "string" && FINGERPRINT_PATTERN.test(value);
+  return typeof value === "string"
+    && (FINGERPRINT_PATTERN.test(value) || COMPACT_FINGERPRINT_PATTERN.test(value));
 }
 
 /**
@@ -246,6 +271,7 @@ const shapeValidator = validateShape<WikiGrounding>({
   node: validateString(),
   fingerprint: validateString(),
   bodyHash: optional(validateString()),
+  codeHash: optional(validateString()),
   file: optional(validateString()),
   commit: optional(validateString()),
   verifiedAt: optional(validateString()),
@@ -287,7 +313,7 @@ export const validateGrounding: Validator<WikiGrounding> = (value, context) => {
   }
   if (!isFingerprintShaped(grounding.fingerprint)) {
     diagnostics.push(
-      contextDiagnostic(context, "MALFORMED_GROUNDING", `"${grounding.fingerprint}" is not a serialized fingerprint (mh:<K>:<hex>).`),
+      contextDiagnostic(context, "MALFORMED_GROUNDING", `"${grounding.fingerprint}" is not a serialized fingerprint (mh2:<K>:<base64url> or mh:<K>:<hex>).`),
     );
   }
   if (grounding.file !== undefined && !isCanonicalRepoPath(grounding.file)) {

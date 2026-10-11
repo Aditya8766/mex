@@ -41,6 +41,8 @@ import { fts5UnavailableDiagnostic } from "../index/fts5.js";
 import { isTeamOwnedReadOnlyPath } from "../model/team-owned-paths.js";
 import { estimateTokens } from "./budget.js";
 import { healthRank, LIFECYCLE_RANK, MATCH_FIELD_RANK, type MatchField } from "./rank.js";
+import { findSomeTermsMatches, planWikiSearch } from "./search-plan.js";
+import type { SearchMatch } from "./session.js";
 
 const DEFAULT_PAGE_LIMIT = 25;
 const MAX_PAGE_LIMIT = 100;
@@ -153,6 +155,7 @@ export interface ContractGrounding {
   requestedNode: string;
   fingerprint: string;
   bodyHash?: string;
+  codeHash?: string;
   file?: string;
   commit?: string;
   verifiedAt?: string;
@@ -196,6 +199,17 @@ export interface ContractSearchRequest extends ContractListRequest {
 export interface ContractSearchHit {
   entity: ContractEntitySummary;
   matchedFields: readonly MatchField[];
+  /** Every query term, or only some of them (#235); see `search-plan.ts`. */
+  match: SearchMatch;
+  /** For a `some_terms` hit: the query terms it matched, in query order. */
+  matchedTerms?: readonly string[];
+  /** For a `some_terms` hit: its coverage of the query, higher first. Never comparable across indexes. */
+  score?: number;
+  /**
+   * FTS5 `bm25()`, lower first: in its best matched field for an `all_terms`
+   * hit, over every field for a `some_terms` hit (the tie-break after score).
+   */
+  relevance?: number;
 }
 
 export interface ContractRelationRequest {
@@ -892,38 +906,68 @@ class ContractSession implements WikiContractReadSession {
     normalized: ReturnType<typeof normalizeSearchRequest>,
   ): ContractSearchCandidates {
     const filter = entityFilterSql(normalized, "e");
-    const byId = new Map<string, { row: EntityRow; fields: Set<MatchField> }>();
-    const add = (rows: EntityRow[], field: MatchField): void => {
+    const byId = new Map<string, { row: EntityRow; fields: Set<MatchField>; relevance?: number }>();
+    // Fields arrive best first, so an entity's relevance is its best field's.
+    const add = (rows: (EntityRow & { relevance?: number })[], field: MatchField): void => {
       for (const row of rows) {
         const existing = byId.get(row.id);
         if (existing) existing.fields.add(field);
-        else byId.set(row.id, { row, fields: new Set([field]) });
+        else byId.set(row.id, { row, fields: new Set([field]), ...(row.relevance === undefined ? {} : { relevance: Number(row.relevance) }) });
       }
     };
     add(this.db.prepare(
       `SELECT ${ENTITY_COLUMNS} FROM wiki_entities e WHERE e.id = ? AND ${filter.sql} LIMIT 1`,
     ).all(normalized.query, ...filter.params) as EntityRow[], "id");
-    const expression = matchExpression(normalized.query);
+    const plan = planWikiSearch(normalized.query);
+    const expression = plan.allTermsExpression;
     let safetyTruncated = false;
     if (expression !== null) {
       for (const [columns, field] of [
         ["title", "title"], ["summary", "summary"], ["body aliases meta", "body"],
       ] as const) {
         const rows = this.db.prepare(
-          `SELECT ${ENTITY_COLUMNS} FROM wiki_fts f
+          `SELECT ${ENTITY_COLUMNS}, round(bm25(wiki_fts), 6) AS relevance FROM wiki_fts f
             JOIN wiki_entities e ON e.entity_key = f.entity_key
            WHERE wiki_fts MATCH ? AND ${filter.sql}
-           ORDER BY e.title, e.id LIMIT ?`,
-        ).all(`{${columns}} : (${expression})`, ...filter.params, MAX_SEARCH_RESULTS + 1) as EntityRow[];
+           ORDER BY relevance, e.title, e.id LIMIT ?`,
+        ).all(`{${columns}} : (${expression})`, ...filter.params, MAX_SEARCH_RESULTS + 1) as (EntityRow & { relevance: number })[];
         if (rows.length > MAX_SEARCH_RESULTS) safetyTruncated = true;
         add(rows.slice(0, MAX_SEARCH_RESULTS), field);
       }
     }
     const summaries = new Map(this.summaries([...byId.values()].map((value) => value.row)).map((item) => [item.id, item]));
-    const hits = [...byId.entries()].map(([id, value]) => ({
+    const hits: ContractSearchHit[] = [...byId.entries()].map(([id, value]) => ({
       entity: summaries.get(id)!,
       matchedFields: [...value.fields].sort((left, right) => MATCH_FIELD_RANK[left] - MATCH_FIELD_RANK[right]),
+      match: "all_terms",
+      ...(value.relevance === undefined ? {} : { relevance: value.relevance }),
     }));
+    if (plan.terms.length === 0 || hits.length >= MAX_SEARCH_RESULTS) return { items: hits, truncated: safetyTruncated };
+
+    // Entities matching only some of the terms follow every all-terms hit
+    // (#235), ordered as the CLI session orders them.
+    const broader = findSomeTermsMatches(this.db, plan.terms, filter, MAX_SEARCH_RESULTS);
+    if (broader.truncated) safetyTruncated = true;
+    const room = broader.matches.slice(0, MAX_SEARCH_RESULTS);
+    const rows = room.length === 0 ? [] : this.db.prepare(
+      `SELECT ${ENTITY_COLUMNS} FROM wiki_entities e WHERE e.entity_key IN (${placeholders(room.length)}) AND ${filter.sql} LIMIT ?`,
+    ).all(...room.map((match) => match.entityKey), ...filter.params, room.length) as EntityRow[];
+    const rowsByKey = new Map(rows.map((row) => [row.entity_key, row]));
+    const unseen = room.filter((match) => rowsByKey.has(match.entityKey) && !byId.has(rowsByKey.get(match.entityKey)!.id));
+    const fresh = unseen.slice(0, MAX_SEARCH_RESULTS - hits.length);
+    if (unseen.length > fresh.length) safetyTruncated = true;
+    const freshSummaries = new Map(this.summaries(fresh.map((match) => rowsByKey.get(match.entityKey)!)).map((item) => [item.id, item]));
+    for (const match of fresh) {
+      hits.push({
+        entity: freshSummaries.get(rowsByKey.get(match.entityKey)!.id)!,
+        matchedFields: [match.field],
+        match: "some_terms",
+        matchedTerms: match.matchedTerms,
+        score: match.score,
+        relevance: match.relevance,
+      });
+    }
+    if (broader.matches.length > room.length) safetyTruncated = true;
     return { items: hits, truncated: safetyTruncated };
   }
 
@@ -1166,7 +1210,7 @@ class ContractSession implements WikiContractReadSession {
 
   private groundings(key: string): ContractGrounding[] {
     const rows = this.db.prepare(
-      `SELECT node_id, fingerprint, body_hash, file, commit_sha, verified_at, reason, resolution
+      `SELECT node_id, fingerprint, body_hash, code_hash, file, commit_sha, verified_at, reason, resolution
          FROM wiki_groundings WHERE entity_key = ? ORDER BY ordinal LIMIT ?`,
     ).all(key, MAX_RELATIONS_PER_ENTITY + 1) as Array<Record<string, string | null>>;
     this.assertCanonicalMetadataBound(rows, "groundings");
@@ -1174,6 +1218,7 @@ class ContractSession implements WikiContractReadSession {
       requestedNode: row["node_id"]!,
       fingerprint: row["fingerprint"]!,
       ...(row["body_hash"] === null ? {} : { bodyHash: row["body_hash"]! }),
+      ...(row["code_hash"] === null ? {} : { codeHash: row["code_hash"]! }),
       ...(row["file"] === null ? {} : { file: row["file"]! }),
       ...(row["commit_sha"] === null ? {} : { commit: row["commit_sha"]! }),
       ...(row["verified_at"] === null ? {} : { verifiedAt: row["verified_at"]! }),
@@ -1756,7 +1801,7 @@ const EXPECTED_TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   wiki_entity_topics: ["entity_key", "ordinal", "topic_entity_id"],
   wiki_sources: ["entity_key", "ordinal", "type", "ref", "note", "repository", "commit_sha", "captured_at", "identity", "metadata"],
   wiki_groundings: [
-    "entity_key", "ordinal", "node_id", "fingerprint", "body_hash", "file", "commit_sha", "verified_at", "reason",
+    "entity_key", "ordinal", "node_id", "fingerprint", "body_hash", "code_hash", "file", "commit_sha", "verified_at", "reason",
     "state", "resolved_node", "health", "resolution",
   ],
   wiki_diagnostics: [
@@ -1803,7 +1848,7 @@ const INDEX_TEXT_FIELDS: Readonly<Record<string, readonly StoredTextField[]>> = 
   ],
   wiki_groundings: [
     ["entity_key", 4_128], ["node_id", 4_096], ["fingerprint", WIKI_CORPUS_LIMITS.maxFileBytes], ["body_hash", 256, true],
-    ["file", 4_096, true], ["commit_sha", 256, true], ["verified_at", 256, true],
+    ["code_hash", 256, true], ["file", 4_096, true], ["commit_sha", 256, true], ["verified_at", 256, true],
     ["reason", 65_536, true], ["state", 32, true], ["resolved_node", 4_096, true],
     ["health", 32, true], ["resolution", 65_536, true],
   ],
@@ -1975,7 +2020,7 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
 
     let groundingRowCount = 0;
     const groundingRows = db.prepare(
-      `SELECT node_id, fingerprint, body_hash, file, commit_sha, verified_at, reason, state, resolved_node, health, resolution
+      `SELECT node_id, fingerprint, body_hash, code_hash, file, commit_sha, verified_at, reason, state, resolved_node, health, resolution
          FROM wiki_groundings ORDER BY entity_key, ordinal LIMIT 100001`,
     ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of groundingRows) {
@@ -1983,7 +2028,8 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
       if (groundingRowCount > 100_000) return "The wiki index grounding inventory exceeds its safety bound.";
       if (!isBoundedString(row["node_id"], 4096, 1)
         || !isBoundedString(row["fingerprint"], WIKI_CORPUS_LIMITS.maxFileBytes, 1)
-        || !isBoundedNullableString(row["body_hash"], 256) || (row["file"] !== null && !isSafeRepoPath(row["file"]))
+        || !isBoundedNullableString(row["body_hash"], 256) || !isBoundedNullableString(row["code_hash"], 256)
+        || (row["file"] !== null && !isSafeRepoPath(row["file"]))
         || !isBoundedNullableString(row["commit_sha"], 256) || !isBoundedNullableString(row["verified_at"], 256)
         || !isBoundedNullableString(row["reason"], 65_536) || !isBoundedNullableString(row["resolved_node"], 4096)
         || !validBoundedJson(row["resolution"])) {
@@ -2353,12 +2399,19 @@ function groundingPrecedence(value: GroundingHealth): number {
 }
 
 function compareSearchHits(left: ContractSearchHit, right: ContractSearchHit): number {
+  // Every all-terms hit before any some-terms hit; those by coverage (#235).
+  const tier = Number(left.match === "some_terms") - Number(right.match === "some_terms");
+  if (tier !== 0) return tier;
+  const coverage = (right.score ?? 0) - (left.score ?? 0);
+  if (coverage !== 0) return coverage;
   const field = MATCH_FIELD_RANK[left.matchedFields[0]!] - MATCH_FIELD_RANK[right.matchedFields[0]!];
   if (field !== 0) return field;
   const lifecycle = (LIFECYCLE_RANK[left.entity.lifecycleState] ?? 3) - (LIFECYCLE_RANK[right.entity.lifecycleState] ?? 3);
   if (lifecycle !== 0) return lifecycle;
   const health = healthRank(left.entity.groundingHealth) - healthRank(right.entity.groundingHealth);
-  return health !== 0 ? health : compareEntitySummary(left.entity, right.entity);
+  if (health !== 0) return health;
+  const relevance = (left.relevance ?? 0) - (right.relevance ?? 0);
+  return relevance !== 0 ? relevance : compareEntitySummary(left.entity, right.entity);
 }
 
 function compareEntitySummary(left: ContractEntitySummary, right: ContractEntitySummary): number {
@@ -2382,11 +2435,6 @@ function compareRelationHits(left: ContractRelationHit, right: ContractRelationH
 
 function compareString(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function matchExpression(text: string): string | null {
-  const terms = text.split(/[^\p{L}\p{N}_]+/u).map((term) => term.trim()).filter(Boolean);
-  return terms.length === 0 ? null : terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(" AND ");
 }
 
 function parseObject<T>(value: string | null): T | undefined {

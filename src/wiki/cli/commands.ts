@@ -41,6 +41,15 @@ import { resolve } from "node:path";
 import { tryEnsureSetupIgnoreProtection } from "../../setup/ignore.js";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
 import { inspectDirectWikiSpecMutation } from "./spec-authoring-boundary.js";
+import { wikiRegroundEntity } from "../service/reground.js";
+import { wikiLinkSections } from "../service/link-sections.js";
+import {
+  graphDiagnostics,
+  publishWithGraph,
+  readWithGraph,
+  writeWithGraph,
+  type WikiCliGroundingBridge,
+} from "./grounding.js";
 import {
   envelopeFor,
   exitCodeFor,
@@ -58,7 +67,7 @@ import {
   wikiList,
   wikiMigrate,
   wikiNeighborhood,
-  wikiRebuildIndex,
+  wikiPrepareRebuildIndex,
   wikiRegenerateViews,
   wikiSearch,
   wikiSynthesisBuild,
@@ -85,6 +94,13 @@ export interface CommandIo {
   codeGraph?: import("../grounding/adapter.js").SynthesisGraph | null;
   /** Grounding resolution, for the §12.4 gate. */
   graph?: import("../grounding/adapter.js").GroundingGraph | null;
+  /**
+   * The code graph for the commands that resolve groundings — validate,
+   * rebuild-index, migrate, apply and regenerate-views (#232). Reached only
+   * through one fresh, revocable snapshot per command; absent means this
+   * invocation has no graph, which every one of them tolerates.
+   */
+  groundingBridge?: WikiCliGroundingBridge | null;
   /** §12 scope knobs from `wiki.synthesis`. */
   synthesisScope?: SynthesisScope;
   /** Launch an agent with the playbook. Returns false when none is available. */
@@ -256,7 +272,7 @@ export function runBacklinks(io: CommandIo, id: string, flags: CommandFlags): vo
   });
 }
 
-export function runValidate(io: CommandIo, flags: CommandFlags): void {
+export async function runValidate(io: CommandIo, flags: CommandFlags): Promise<void> {
   const result = wikiValidate({
     ...serviceOptions(io),
     ...(io.projectRoot === undefined ? {} : { projectRoot: io.projectRoot }),
@@ -268,30 +284,7 @@ export function runValidate(io: CommandIo, flags: CommandFlags): void {
         `${data.counts.error} error, ${data.counts.warning} warning, ${data.counts.info} info`,
     );
     if (data.truncated) io.write(chalk.dim("… more diagnostics than the bound; raise --limit to see them"));
-    if (data.groundingsUnverified) {
-      // Not a diagnostic: it says how much was checked, not that anything is
-      // wrong, and a CI run needs to tell a clean report from an unread one.
-      //
-      // The flag has two causes and this line used to assert the first of them
-      // unconditionally, so a reader was sent to inspect a code graph nobody
-      // had looked at. Two corrections, and the second is the one that was
-      // costing something:
-      //
-      //  - When a graph *was* supplied and still produced no verdict, the fault
-      //    is in what the groundings committed, and the reader belongs in the
-      //    scaffold rather than in `mex graph`.
-      //  - When none was supplied, "no code graph in this checkout" is a claim
-      //    about the repository that this command never checked. `wiki
-      //    validate` does not load one — `serviceOptions` does not carry it —
-      //    so on the CLI this is always the branch taken, and it read as a
-      //    diagnosis of a fresh 7 MB `graph.db` sitting right there. Say what
-      //    was actually true of the pass, and name the command that does check.
-      io.write(chalk.dim(
-        data.codeGraphAvailable
-          ? "grounding checks did not run — the code graph is present, but no grounding could be compared against it"
-          : "grounding checks did not run — this pass was given no code graph; `mex check` is the grounding check",
-      ));
-    }
+    io.write(chalk.dim("Wiki structure only; `mex check` checks every code link."));
   });
 }
 
@@ -312,7 +305,7 @@ export function runGraph(io: CommandIo, flags: CommandFlags): void {
   });
 }
 
-export function runRebuildIndex(io: CommandIo, flags: CommandFlags): void {
+export async function runRebuildIndex(io: CommandIo, flags: CommandFlags): Promise<void> {
   // The only command that creates `wiki.db`, and it can run in a checkout that
   // never went through `mex setup` — which is how issue #110's reporter ended
   // up with an untracked database. Best effort: an unwritable `.gitignore` is
@@ -321,7 +314,12 @@ export function runRebuildIndex(io: CommandIo, flags: CommandFlags): void {
   const protection = tryEnsureSetupIgnoreProtection(projectRoot);
   if (!protection.ok) io.write(chalk.dim(`could not ignore local MEX data: ${protection.reason}`));
 
-  emit(io, wikiRebuildIndex(serviceOptions(io)), flags, (data) => {
+  const { value: rebuilt, unavailable } = await publishWithGraph(
+    io.groundingBridge,
+    (graph) => wikiPrepareRebuildIndex({ ...serviceOptions(io), graph }),
+  );
+  const result = { ...rebuilt, diagnostics: [...rebuilt.diagnostics, ...graphDiagnostics(unavailable)] };
+  emit(io, result, flags, (data) => {
     io.write(`Indexed ${data.entityCount} entities from ${data.fileCount} file(s) into ${data.indexPath}`);
     for (const swept of data.sweptTempFiles) io.write(chalk.dim(`removed a crashed build's temp index: ${swept}`));
   });
@@ -341,8 +339,12 @@ export function runRebuildIndex(io: CommandIo, flags: CommandFlags): void {
  * `--dry-run` is the default posture for anything an agent can call, so this
  * reports what has drifted unless it is told to write.
  */
-export function runRegenerateViews(io: CommandIo, flags: CommandFlags): void {
-  const result = wikiRegenerateViews({ ...serviceOptions(io), dryRun: flags.dryRun === true });
+export async function runRegenerateViews(io: CommandIo, flags: CommandFlags): Promise<void> {
+  const { value: regenerated, unavailable } = await writeWithGraph(
+    io.groundingBridge,
+    (graph) => wikiRegenerateViews({ ...serviceOptions(io), dryRun: flags.dryRun === true, graph }),
+  );
+  const result = { ...regenerated, diagnostics: [...regenerated.diagnostics, ...graphDiagnostics(unavailable)] };
   emit(io, result, flags, (data) => {
     if (data.examined.length === 0) {
       io.write("No generated sections in this scaffold.");
@@ -359,8 +361,19 @@ export function runRegenerateViews(io: CommandIo, flags: CommandFlags): void {
   });
 }
 
-export function runMigrate(io: CommandIo, flags: CommandFlags): void {
-  const result = wikiMigrate({ ...serviceOptions(io), dryRun: flags.dryRun === true });
+export async function runMigrate(io: CommandIo, flags: CommandFlags): Promise<void> {
+  const dryRun = flags.dryRun === true;
+  const migrate = (graph: import("../grounding/adapter.js").GroundingGraph | null) =>
+    wikiMigrate({
+      ...serviceOptions(io),
+      dryRun,
+      graph,
+      ...(io.projectRoot === undefined ? {} : { projectRoot: io.projectRoot }),
+    });
+  const { value: migrated, unavailable } = dryRun
+    ? await readWithGraph(io.groundingBridge, migrate)
+    : await writeWithGraph(io.groundingBridge, migrate);
+  const result = { ...migrated, diagnostics: [...migrated.diagnostics, ...graphDiagnostics(unavailable)] };
   emit(io, result, flags, (data) => {
     io.write(data.rendered);
     if (data.report.abstentions.length > 0) {
@@ -384,7 +397,7 @@ export function runMigrate(io: CommandIo, flags: CommandFlags): void {
  * prints the diff and writes nothing, which is the safe outcome when a caller
  * says nothing at all rather than something a caller has to opt into.
  */
-export function runApply(io: CommandIo, file: string, flags: CommandFlags): void {
+export async function runApply(io: CommandIo, file: string, flags: CommandFlags): Promise<void> {
   let envelope: unknown;
   try {
     envelope = JSON.parse(readFileSync(resolve(file), "utf-8"));
@@ -418,10 +431,16 @@ export function runApply(io: CommandIo, file: string, flags: CommandFlags): void
     return;
   }
 
-  const result = wikiApplyOperation(envelope, {
+  const write = flags.apply === true && flags.dryRun !== true;
+  const applyWith = (graph: import("../grounding/adapter.js").GroundingGraph | null) => wikiApplyOperation(envelope, {
     ...serviceOptions(io),
-    ...(flags.apply === true && flags.dryRun !== true ? { apply: true } : {}),
+    ...(write ? { apply: true } : {}),
+    graph,
   });
+  const { value: applied, unavailable } = write
+    ? await writeWithGraph(io.groundingBridge, applyWith)
+    : await readWithGraph(io.groundingBridge, applyWith);
+  const result = { ...applied, diagnostics: [...applied.diagnostics, ...graphDiagnostics(unavailable)] };
   emit(io, result, flags, (data) => {
     if (data.diff !== null) io.write(data.diff);
     if (data.applied) io.write(chalk.green(`applied ${data.opId} — ${data.changedFiles.join(", ")}`));
@@ -431,6 +450,46 @@ export function runApply(io: CommandIo, file: string, flags: CommandFlags): void
 }
 
 /** Exported for the exit-code table's test, which asserts the CLI uses it. */
+/**
+ * `mex wiki reground <id>` — re-record an entity's code links after review.
+ * Plans by default; writes only with `--apply`, like `wiki apply`.
+ */
+export async function runReground(io: CommandIo, id: string, flags: CommandFlags & { reason?: string }): Promise<void> {
+  const write = flags.apply === true && flags.dryRun !== true;
+  const reground = (graph: import("../grounding/adapter.js").GroundingGraph | null) => wikiRegroundEntity(id, {
+    ...serviceOptions(io),
+    ...(write ? { apply: true } : {}),
+    ...(flags.reason === undefined ? {} : { reason: flags.reason }),
+    graph,
+  });
+  const { value, unavailable } = write
+    ? await writeWithGraph(io.groundingBridge, reground)
+    : await readWithGraph(io.groundingBridge, reground);
+  const result = { ...value, diagnostics: [...value.diagnostics, ...graphDiagnostics(unavailable)] };
+  emit(io, result, flags, (data) => {
+    for (const link of data.links) {
+      const target = link.recordedNode !== undefined && link.recordedNode !== link.node ? ` → ${link.recordedNode}` : "";
+      io.write(`${link.node}${target}: ${link.verdict}`);
+    }
+    if (data.apply?.applied) io.write(chalk.green(`re-recorded ${data.entityId} — ${data.apply.changedFiles.join(", ")}`));
+    else if (data.apply?.planned) io.write(chalk.dim("planned only — re-run with --apply to write"));
+  });
+}
+
+export async function runLinkSections(io: CommandIo, flags: CommandFlags): Promise<void> {
+  const write = flags.apply === true && flags.dryRun !== true;
+  const run = (graph: import("../grounding/adapter.js").GroundingGraph | null) =>
+    wikiLinkSections({ ...serviceOptions(io), graph, apply: write });
+  const { value, unavailable } = write
+    ? await writeWithGraph(io.groundingBridge, run)
+    : await readWithGraph(io.groundingBridge, run);
+  emit(io, { ...value, diagnostics: [...value.diagnostics, ...graphDiagnostics(unavailable)] }, flags, data => {
+    io.write(`${data.links.length} section connections${data.applied ? " written" : " planned"}`);
+    for (const link of data.links) io.write(`${link.source} → ${link.target} (${link.file})`);
+    if (!write && data.links.length) io.write("Re-run with --apply to write these relationships.");
+  });
+}
+
 export { WIKI_EXIT };
 
 // -- §12 synthesis: build, prepare, propose ----------------------------------

@@ -14,7 +14,7 @@ edges:
     condition: "when the value also lives in the graph database"
   - target: "context/conventions.md"
     condition: "when verifying the change"
-last_updated: 2026-09-07
+last_updated: 2026-10-02
 mex:
   id: mx_01M1M0CJK5ZTSHCDDWB3NTSEBF
   type: pattern
@@ -131,3 +131,19 @@ Two distinct kinds of value, and the difference decides where each one lives:
   actually receives before believing a message about what it found.
 - A diagnostic that names a cause nobody checked costs more than no diagnostic.
   If a flag has two causes, carry the discriminator rather than asserting one.
+- A committed value can have more than one spelling. Fingerprints are written
+  as `mh2:` but scaffolds still hold `mh:` (#233), so compare them with
+  `sameFingerprint()` or `canonicalFingerprint()`, never `===`. A string
+  comparison makes every older grounding read as changed: capture preserves
+  it, sync asks for a review, and the Wiki reports it stale. Re-encode an old
+  value only when its file's groundings are being rewritten anyway.
+- A second committed hash must describe the same moment as the first.
+  `codeHash` (#236) is written only while `bodyHash` equals the current
+  code's, and renewed only with it. Otherwise "the code is unchanged" would
+  compare against a different baseline from "the body changed". Writing them
+  together is not enough, because an older version or a hand edit can renew
+  one and not the other. So the value carries a prefix of the `bodyHash` it
+  was captured with, and a mismatched pair is read as absent. When the
+  baseline's comment-free hash is unknown, the answer is the warning, not a
+  guess. Classify comments with the file's own grammar: a regex that misreads
+  code as a comment downgrades a real change.
