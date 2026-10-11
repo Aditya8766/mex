@@ -18,7 +18,7 @@ edges:
     condition: when refreshing the release README, badges, community links, or architecture illustrations
   - target: patterns/hub-first-run-onboarding.md
     condition: when adding or changing the Hub first-run tour or its checkout-local completion state
-last_updated: 2026-10-08
+last_updated: 2026-10-11
 ---
 
 # Session Bootstrap
@@ -30,6 +30,10 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- PR #250 review fixes are implemented on `fix/206-nested-dependency-manifests`:
+  recursive manifest discovery preserves root precedence, skips symlinks, and
+  abstains when bounded discovery or reads cannot complete. These changes are
+  validated by 137 focused tests and typecheck after main integration; see [dependency-manifest-discovery.md](patterns/dependency-manifest-discovery.md) for regression guidance.
 - Local work on `fix/knowledge-drift-precision` adds `mex wiki link-sections`:
   preview or explicitly apply missing section-to-parent `refines` relationships
   without changing claim text or groundings. Setup/GROW guidance preserves those
