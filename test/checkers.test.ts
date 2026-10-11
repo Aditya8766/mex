@@ -421,9 +421,38 @@ describe("checkCommands", () => {
       claim({ kind: "command", value: "pnpm install" }),
       claim({ kind: "command", value: "pnpm add typescript" }),
       claim({ kind: "command", value: "pnpm dlx create-vite" }),
+      claim({ kind: "command", value: "pnpm i" }),
+      claim({ kind: "command", value: "pnpm rm typescript" }),
+      claim({ kind: "command", value: "pnpm uninstall typescript" }),
+      claim({ kind: "command", value: "pnpm ls" }),
+      claim({ kind: "command", value: "pnpm up" }),
+      claim({ kind: "command", value: "yarn audit" }),
+      claim({ kind: "command", value: "yarn publish" }),
+      claim({ kind: "command", value: "yarn upgrade" }),
     ];
 
     expect(checkCommands(claims, tmpDir)).toHaveLength(0);
+  });
+
+  it.each(["yarn", "pnpm"])("checks %s explicit and shorthand scripts, including builtin names", (manager) => {
+    writeFileSync(join(tmpDir, "package.json"), JSON.stringify({ scripts: { build: "tsc" } }));
+    for (const value of [`${manager} missing`, `${manager} run missing`, `${manager} run install`]) {
+      const issues = checkCommands([claim({ kind: "command", value })], tmpDir);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].code).toBe("DEAD_COMMAND");
+    }
+    for (const value of [`${manager} build`, `${manager} run build`, `${manager} run`, `${manager} --version`, `${manager} run --help`]) {
+      expect(checkCommands([claim({ kind: "command", value })], tmpDir)).toHaveLength(0);
+    }
+  });
+
+  it.each(["yarn", "pnpm"])("preserves bounded brace expansion for %s scripts", (manager) => {
+    writeFileSync(join(tmpDir, "package.json"), JSON.stringify({ scripts: { "test:node": "vitest" } }));
+    for (const prefix of [manager, `${manager} run`]) {
+      const issues = checkCommands([claim({ kind: "command", value: `${prefix} test:{node,missing}` })], tmpDir);
+      expect(issues.map((issue) => issue.message)).toEqual(['Script "test:missing" not found in package.json scripts']);
+      expect(checkCommands([claim({ kind: "command", value: `${prefix} ${"{a,b}".repeat(7)}` })], tmpDir)).toHaveLength(0);
+    }
   });
 
   it("reports dead make targets", () => {
@@ -809,6 +838,38 @@ edges:
     expect(
       issues.filter((issue) => issue.code === "INDEX_MISSING_ENTRY")
     ).toHaveLength(0);
+  });
+
+  it.each(["foo.md#details", "./foo.md", "patterns/foo.md"])("resolves INDEX edge %s to the actual pattern", (target) => {
+    mkdirSync(join(tmpDir, "patterns"));
+    writeFileSync(join(tmpDir, "patterns/foo.md"), "# Foo");
+    writeFileSync(join(tmpDir, "patterns/INDEX.md"), `---\nedges:\n  - target: ${target}\n---\n# Index\n`);
+    expect(checkIndexSync(tmpDir, tmpDir)).toEqual([]);
+  });
+
+  it("does not misidentify an existing context edge as a pattern", () => {
+    mkdirSync(join(tmpDir, "patterns"));
+    mkdirSync(join(tmpDir, "context"));
+    writeFileSync(join(tmpDir, "context/architecture.md"), "# Architecture");
+    writeFileSync(join(tmpDir, "patterns/architecture.md"), "# Separate pattern");
+    writeFileSync(join(tmpDir, "patterns/INDEX.md"), "---\nedges:\n  - target: ../context/architecture.md\n---\n# Index\n");
+    const issues = checkIndexSync(tmpDir, tmpDir);
+    expect(issues.map((issue) => issue.code)).toEqual(["INDEX_MISSING_ENTRY"]);
+  });
+
+  it("retains missing edge directories even when a same-named sibling exists", () => {
+    mkdirSync(join(tmpDir, "patterns"));
+    writeFileSync(join(tmpDir, "patterns/foo.md"), "# Foo");
+    writeFileSync(join(tmpDir, "patterns/INDEX.md"), "---\nedges:\n  - target: missing/foo.md\n---\n# Index\n");
+    expect(checkIndexSync(tmpDir, tmpDir).map((issue) => issue.code)).toEqual(["INDEX_MISSING_ENTRY", "INDEX_ORPHAN_ENTRY"]);
+  });
+
+  it("ignores malformed INDEX edges and resolves deployed scaffold targets", () => {
+    const scaffold = join(tmpDir, ".mex");
+    mkdirSync(join(scaffold, "patterns"), { recursive: true });
+    writeFileSync(join(scaffold, "patterns/foo.md"), "# Foo");
+    writeFileSync(join(scaffold, "patterns/INDEX.md"), '---\nedges:\n  - null\n  - target: 42\n  - target: ""\n  - target: patterns/foo.md\n---\n# Index\n');
+    expect(checkIndexSync(tmpDir, scaffold)).toEqual([]);
   });
 
   it("ignores references inside HTML comments", () => {

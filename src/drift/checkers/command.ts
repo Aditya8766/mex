@@ -4,59 +4,94 @@ import type { Claim, DriftIssue } from "../../types.js";
 
 const YARN_BUILTINS = new Set([
   "add",
+  "audit",
+  "autoclean",
   "bin",
   "cache",
+  "check",
   "ci",
   "config",
+  "constraints",
   "create",
+  "dedupe",
   "dlx",
   "exec",
+  "generate-lock-entry",
   "global",
+  "help",
   "import",
   "info",
   "init",
   "install",
   "link",
+  "list",
+  "login",
+  "logout",
   "node",
   "pack",
   "patch",
   "plugin",
+  "policies",
+  "publish",
   "remove",
   "run",
+  "self-update",
   "set",
   "stage",
+  "unlink",
   "unplug",
   "up",
+  "upgrade",
+  "upgrade-interactive",
   "version",
   "why",
   "workspace",
+  "workspaces",
 ]);
 
 const PNPM_BUILTINS = new Set([
   "add",
+  "approve-builds",
   "audit",
   "config",
   "create",
+  "dedupe",
   "deploy",
   "dlx",
+  "env",
   "exec",
   "fetch",
+  "help",
+  "i",
+  "ignored-builds",
   "import",
   "init",
   "install",
   "licenses",
   "link",
   "list",
+  "ls",
+  "outdated",
   "patch",
+  "patch-commit",
+  "patch-remove",
   "prune",
   "publish",
   "rebuild",
   "remove",
+  "rm",
   "root",
   "run",
+  "self-update",
+  "server",
+  "setup",
   "store",
   "test",
+  "un",
+  "uninstall",
+  "up",
   "update",
+  "upgrade",
   "why",
 ]);
 
@@ -76,16 +111,20 @@ export function checkCommands(
   for (const claim of commandClaims) {
     const cmd = claim.value.trim();
 
-    // npm run <script> / bun run <script>
-    const npmMatch = cmd.match(
-      /^(?:npm\s+run|bun\s+run)\s+(\S+)/
+    // Explicit run always names a script, even when its name is a builtin.
+    const explicitMatch = cmd.match(/^(?:npm|bun|yarn|pnpm)\s+run\s+(\S+)/);
+    const shorthandMatch = cmd.match(/^(yarn|pnpm)\s+(\S+)/);
+    const builtins = shorthandMatch?.[1] === "yarn" ? YARN_BUILTINS : PNPM_BUILTINS;
+    const scriptName = explicitMatch?.[1] ?? (
+      shorthandMatch && !builtins.has(shorthandMatch[2]) && !shorthandMatch[2].startsWith("-")
+        ? shorthandMatch[2] : null
     );
 
-    if (npmMatch) {
+    if (scriptName && !scriptName.startsWith("-")) {
       // `bun run test:{node,workerd}` runs one script per alternative. A name
       // still holding braces after expansion is a placeholder like `{script}`,
       // and a word naming too many scripts is skipped the same way.
-      for (const script of new Set(expandBraces(npmMatch[1]) ?? [])) {
+      for (const script of new Set(expandBraces(scriptName) ?? [])) {
         if (/[{}]/.test(script)) continue;
         if (pkgScripts && !pkgScripts.has(script)) {
           issues.push({
@@ -94,50 +133,6 @@ export function checkCommands(
             file: claim.source,
             line: claim.line,
             message: `Script "${script}" not found in package.json scripts`,
-            claim,
-          });
-        }
-      }
-
-      continue;
-    }
-
-    // yarn <command> / yarn <script>
-    const yarnMatch = cmd.match(/^yarn\s+(\S+)/);
-
-    if (yarnMatch) {
-      const command = yarnMatch[1];
-
-      if (!YARN_BUILTINS.has(command)) {
-        if (pkgScripts && !pkgScripts.has(command)) {
-          issues.push({
-            code: "DEAD_COMMAND",
-            severity: "error",
-            file: claim.source,
-            line: claim.line,
-            message: `Script "${command}" not found in package.json scripts`,
-            claim,
-          });
-        }
-      }
-
-      continue;
-    }
-
-    // pnpm <command> / pnpm <script>
-    const pnpmMatch = cmd.match(/^pnpm\s+(\S+)/);
-
-    if (pnpmMatch) {
-      const command = pnpmMatch[1];
-
-      if (!PNPM_BUILTINS.has(command)) {
-        if (pkgScripts && !pkgScripts.has(command)) {
-          issues.push({
-            code: "DEAD_COMMAND",
-            severity: "error",
-            file: claim.source,
-            line: claim.line,
-            message: `Script "${command}" not found in package.json scripts`,
             claim,
           });
         }
