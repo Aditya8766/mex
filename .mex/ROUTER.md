@@ -18,7 +18,7 @@ edges:
     condition: when refreshing the release README, badges, community links, or architecture illustrations
   - target: patterns/hub-first-run-onboarding.md
     condition: when adding or changing the Hub first-run tour or its checkout-local completion state
-last_updated: 2026-10-10
+last_updated: 2026-10-12
 ---
 
 # Session Bootstrap
@@ -30,6 +30,21 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- Benchmark-gap fixes are isolated on `codex/benchmark-gap-fixes`, based on
+  release-preparation commit `a86f9b6e`. Shared grounding now retains changed
+  baselines after moves, exposes missing baselines as unverified, and never
+  writes historical-body caches on ordinary reads. Complete/default/negative
+  claims require review; small h018 CORS and rename-plus-literal regressions
+  pass. Wiki index v5 uses authored description/triggers, query hits expose
+  bounded per-link health, and synthesis adopts fresh immutable source/Graph
+  evidence before exact atomic publication. Graph fixes cover assignment names,
+  location targeting, bounded callback navigation, EOL portability, and useful
+  file impact with optional call-edge direction at unchanged default budgets.
+  Long sync briefs use private files. This is working-tree implementation,
+  not a published release. Full typecheck exceeded the local 768 MiB test cap;
+  major verification and decisions are in
+  `docs/design/benchmark-gap-implementation.md`. The original checkout's
+  unrelated work remains separate.
 - Release preparation for 0.8.4 is on `codex/release-0.8.4`, based on main
   `54f7d7a`, and includes the terminal setup overhaul and default-routing work.
   Current package metadata, capability fixtures, README installation examples,
@@ -424,8 +439,9 @@ Then read this file fully before doing anything else in this session.
   but the underlying compiler memory pressure is not fixed by HUD animation
   or process isolation. Investigate it without changing canonical signatures
   or increasing production heap/resource budgets merely to pass the example.
-- Graph construction still rebuilds the full eligible corpus after source
-  changes and has no peak-memory quota. The branch's actual Hub probe peaked at
+- Graph refresh now has content-hash reuse and incremental publication; importer
+  and augmentation closures still require conservative re-extraction. Full
+  TypeScript construction has no peak-memory quota. The historical Hub probe peaked at
   about 1,963 MiB combined RSS and retained multi-second pauses around initial
   checks and validation/publication despite responsive compiler-phase polling.
   Fatal parent exit may leave owned temporary artifacts. The historical
@@ -443,12 +459,16 @@ Then read this file fully before doing anything else in this session.
   appear only when a stable status observation makes the requested operation
   safe; migration-required or unstable Wiki observations never fabricate a
   repair action.
-- The Wiki CLI's graph-aware commands (validate, rebuild-index, migrate, apply,
-  regenerate-views) reach the graph only through the repository graph port's
+- The Wiki CLI's graph-aware commands (rebuild-index, migrate, apply, reground,
+  link-sections, regenerate-views) reach the graph only through the repository graph port's
   fresh snapshot (#232). A stale or changing graph is not used: the command
   runs without it and reports `CODE_GRAPH_UNAVAILABLE`, so `mex graph` must be
-  current for Wiki grounding verdicts. Synthesis (`wiki build/prepare/propose`)
-  still opens `graph.db` directly, without that freshness proof.
+  current for Wiki grounding verdicts. `wiki validate` checks structure only;
+  use `mex check` for current code-link verdicts. Production synthesis
+  (`wiki build/prepare/propose`) now adopts a strict fresh immutable Graph/source
+  snapshot, withholds output after a failed final proof, and publishes exact
+  prepared operation batches only after revalidation. Incomplete durable intents
+  require exact operation recovery; synthesis refuses to remint identities.
 
 ## Routing Table
 

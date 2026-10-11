@@ -30,6 +30,14 @@ beforeAll(async () => {
       + "pub fn invoke_imported() -> u8 { imported_helper() }\n"
       + "pub fn invoke_alias() -> u8 { aliased_helper() }\n",
   );
+  writeFileSync(join(root, "src/recursive.rs"), [
+    "pub struct Worker;",
+    "impl Worker {",
+    "  pub fn repeat(&self) { self.repeat(); }",
+    "  pub fn inspect(&self, other: &Worker) { other.repeat(); }",
+    "}",
+    "",
+  ].join("\n"));
   engine = createGraphEngine({ rootDir: root });
   await engine.build(root);
 });
@@ -40,6 +48,18 @@ afterAll(() => {
 });
 
 describe("Rust graph discovery", () => {
+  it("binds unique self recursion and retains unverified object receivers", () => {
+    const repeat = engine.searchNodes("repeat").find((node) => node.name === "repeat")!;
+    const inspect = engine.searchNodes("inspect").find((node) => node.name === "inspect")!;
+    expect(engine.getCallees(repeat.id).map((node) => node.id)).toContain(repeat.id);
+    expect(engine.getCallees(inspect.id)).toEqual([]);
+    const db = openSqlite(join(root, ".mex", "graph.db"));
+    try {
+      expect(db.prepare("SELECT reference_name, receiver, status FROM unresolved_refs WHERE from_node_id = ? AND reference_kind = 'calls'")
+        .get(inspect.id)).toMatchObject({ reference_name: "other.repeat", receiver: "other", status: "unresolved" });
+    } finally { db.close(); }
+  });
+
   it("indexes Rust files during a full graph build", () => {
     expect(engine.searchNodes("User").some((node) => (
       node.name === "User" && node.language === "rust"

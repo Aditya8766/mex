@@ -177,10 +177,9 @@ export function resolveReferences(
     if (!candidates || candidates.length === 0) continue;
 
     const allowedKinds = TARGET_KINDS[ref.referenceKind] ?? [];
-    // A recursive C# call is still a candidate for itself. Removing it can
+    // A recursive call is still a candidate for itself. Removing it can
     // turn an unresolved overload set into a false, confident sibling edge.
-    const allowSelf = ref.language === "csharp"
-      && (ref.referenceKind === "calls" || ref.referenceKind === "function_ref");
+    const allowSelf = ref.referenceKind === "calls" || ref.referenceKind === "function_ref";
     const filtered = candidates.filter((node) =>
       (allowedKinds.length === 0 || allowedKinds.includes(node.kind))
       && (allowSelf || node.id !== ref.fromNodeId),
@@ -196,6 +195,7 @@ export function resolveReferences(
       fromNode,
       ref,
       provenFiles.size > 0 ? provenFiles : importsByFile.get(fromNode.filePath),
+      qualifierBindings.length > 0,
     );
     if (!target) continue;
 
@@ -232,6 +232,7 @@ function pickBest(
   fromNode: GraphNode,
   ref: UnresolvedRefRecord,
   importedFiles: Set<string> | undefined,
+  explicitQualifier = false,
 ): GraphNode | null {
   const receiver = ref.receiver ?? ref.referenceName.split(".").slice(0, -1).join(".");
   // A C# qualifier may name an object, namespace, type, or alias. Syntax alone
@@ -243,6 +244,10 @@ function pickBest(
     const isQualified = receiver.trim() !== "" || ref.referenceName.includes("::");
     if (isQualified && !isThisCall) return null;
   }
+  // Rust member-call extraction retains the receiver. Only `self` proves a
+  // lexical impl owner; a same-named method in that file does not type `other`.
+  // Explicit imported module qualifiers can still bind in their own file.
+  if (ref.language === "rust" && receiver && receiver !== "self" && !explicitQualifier) return null;
 
   const sameFile = candidates.filter((n) => n.filePath === fromNode.filePath);
   if (sameFile.length > 0) {

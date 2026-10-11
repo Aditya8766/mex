@@ -570,13 +570,14 @@ graphCommand
 
 graphCommand
   .command("query <relation> <target>")
-  .description("Query graph structure: who-calls, what-calls, or where-defined")
+  .description("Query who-calls, what-calls, or where-defined by symbol, node id, or indexed file:line")
   .option("--detail <level>", "minimal | standard | source", "minimal")
   .option("--max-nodes <n>", "maximum results to return")
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
-  .action((relation, target, options) => {
-    return import("./graph/cli-agent.js").then(({ runGraphQuery }) => runGraphQuery(relation, target, process.cwd(), {}, options));
+  .action(async (relation, target, options) => {
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return import("./graph/cli-agent.js").then(({ runGraphQuery }) => runGraphQuery(relation, target, process.cwd(), { write: createGraphCliWriter() }, options));
   });
 
 graphCommand
@@ -601,7 +602,8 @@ graphCommand
             knowledgeRecordsFor(nodeIds).map((record) => ({ ...record })),
         }))
       : {};
-    return runGraphScope(task.join(" "), process.cwd(), deps, options);
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return runGraphScope(task.join(" "), process.cwd(), { ...deps, write: createGraphCliWriter() }, options);
   });
 
 // ── Wiki ──
@@ -807,40 +809,24 @@ wikiCommand
  */
 async function synthesisIo(): Promise<import("./wiki/cli/commands.js").CommandIo> {
   const base = wikiIo();
-  const config = loadConfig();
-  const { resolve } = await import("node:path");
-  const { existsSync } = await import("node:fs");
-  const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
-  if (!existsSync(dbPath)) return base;
+  const config = findConfig();
 
   const [
-    { createGroundingGraph, createSynthesisGraph },
-    { openGraphDatabase },
-    { createGraphEngine },
-    { MinHashReconciler },
-    { FingerprintStore },
+    { createRepositoryGraphPort },
     { AI_TOOLS },
     { isCliAvailable },
     { runToolInteractive },
   ] = await Promise.all([
-    import("./wiki/grounding/adapter.js"),
-    import("./graph/db/database.js"),
-    import("./graph/engine-impl.js"),
-    import("./graph/reconcile-engine.js"),
-    import("./graph/fingerprint-store.js"),
+    import("./graph/application-adapter.js"),
     import("./types.js"),
     import("./cli-tools.js"),
     import("./sync/index.js"),
   ]);
 
-  await (await import("./graph/code-hash.js")).prepareCodeHashing().catch(() => undefined);
-  const db = openGraphDatabase(dbPath);
-  const engine = createGraphEngine({ rootDir: config.projectRoot, dbPath });
   return {
     ...base,
     repoRoot: config.projectRoot,
-    codeGraph: createSynthesisGraph(engine, db),
-    graph: createGroundingGraph(engine, new MinHashReconciler(new FingerprintStore(db)), db, { projectRoot: config.projectRoot }),
+    synthesisBridge: createRepositoryGraphPort(config.projectRoot),
     ...(config.wiki?.synthesis === undefined ? {} : { synthesisScope: config.wiki.synthesis }),
     launchAgent: (playbook: string) => {
       // mex's own launcher, not a second one: six tools, cross-platform
@@ -867,7 +853,7 @@ wikiCommand
   .option("--json", "emit one enveloped JSON object; never launches an agent")
   .action(async (options) => {
     const { runBuild } = await import("./wiki/cli/commands.js");
-    runBuild(await synthesisIo(), { ...options, print: options.print === true || options.json === true });
+    await runBuild(await synthesisIo(), { ...options, print: options.print === true || options.json === true });
   });
 
 wikiCommand
@@ -878,7 +864,7 @@ wikiCommand
   .option("--json", "emit one enveloped JSON object")
   .action(async (options) => {
     const { runPrepare } = await import("./wiki/cli/commands.js");
-    runPrepare(await synthesisIo(), options);
+    await runPrepare(await synthesisIo(), options);
   });
 
 wikiCommand
@@ -891,7 +877,7 @@ wikiCommand
   .option("--json", "emit one enveloped JSON object")
   .action(async (file: string, options) => {
     const { runPropose } = await import("./wiki/cli/commands.js");
-    runPropose(await synthesisIo(), file, options);
+    await runPropose(await synthesisIo(), file, options);
   });
 
 wikiCommand
@@ -915,8 +901,9 @@ graphCommand
   .option("--detail <level>", "source (get always returns source)", "source")
   .option("--max-source-lines <n>", "per-node source line cap")
   .option("--max-output-tokens <n>", "hard output token ceiling")
-  .action((ids: string[], options) => {
-    return import("./graph/cli-agent.js").then(({ runGraphGet }) => runGraphGet(ids, process.cwd(), {}, options));
+  .action(async (ids: string[], options) => {
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return import("./graph/cli-agent.js").then(({ runGraphGet }) => runGraphGet(ids, process.cwd(), { write: createGraphCliWriter() }, options));
   });
 
 graphCommand
@@ -976,14 +963,16 @@ graphCommand
 
 program
   .command("impact <target>")
-  .description("Show transitive code and scaffold blast radius for a symbol or file")
+  .description("Show transitive code and scaffold blast radius for a symbol, node id, file, or indexed file:line")
+  .addOption(new Option("--direction <direction>", "proven call edges: callers (default), callees, or both").choices(["callers", "callees", "both"]))
   .option("--detail <level>", "minimal | standard | source", "minimal")
-  .option("--depth <n>", "transitive caller depth", "2")
+  .option("--depth <n>", "transitive call-edge depth", "2")
   .option("--max-nodes <n>", "maximum impacted nodes to return")
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
-  .action((target, options) => {
-    return import("./graph/cli-agent.js").then(({ runImpact }) => runImpact(target, process.cwd(), {}, options));
+  .action(async (target, options) => {
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return import("./graph/cli-agent.js").then(({ runImpact }) => runImpact(target, process.cwd(), { write: createGraphCliWriter() }, options));
   });
 
 // ── Agent Memory Events ──

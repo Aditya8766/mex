@@ -12,19 +12,21 @@
  *
  * Given the entity's text, the body it was grounded to and the body now:
  *
- * 1. Collect the fact's anchors: code-like tokens from its text that also
+ * 1. Keep defaults, exclusions, negative and complete-set claims flagged: token
+ *    presence cannot establish what is absent or whether a list is complete.
+ * 2. Collect the fact's anchors: code-like tokens from its text that also
  *    occur in the old body below its declaration line (the symbol's own name
  *    locates the grounding, not the fact). Fewer than {@link MIN_ANCHORS},
  *    no verdict.
- * 2. Diff the two bodies line by line and widen every changed line to the
+ * 3. Diff the two bodies line by line and widen every changed line to the
  *    whole list, call or object literal it sits in (an array gaining an
  *    element touches only the new line, yet changes the array), plus
  *    {@link CONTEXT_LINES} unchanged lines on each side.
- * 3. If any widened region, old side or new side, contains an anchor, the
+ * 4. If any widened region, old side or new side, contains an anchor, the
  *    fact's own lines were touched: `touched`.
- * 4. If any anchor occurs fewer times in the new body than in the old one,
+ * 5. If any anchor occurs fewer times in the new body than in the old one,
  *    something the fact names went away: `touched`.
- * 5. Otherwise the change was elsewhere in the symbol: `nearby`.
+ * 6. Otherwise the change was elsewhere in the symbol: `nearby`.
  *
  * ## Failing safe
  *
@@ -175,10 +177,13 @@ function changedLines(oldLines: readonly string[], newLines: readonly string[]):
  * an element changes what "METHODS lists six methods" means even though the
  * new line names nothing. Statement blocks (`{` opening a function, `if` or
  * loop body) are not expression brackets, or every change in a function would
- * belong to its first line. Strings and line comments are skipped; anything
- * unbalanced simply widens less, and the line context still applies.
+ * belong to its first line. Strings and line comments are skipped; uncertain
+ * expression boundaries refuse a nearby verdict.
  */
-function expressionSpans(lines: readonly string[]): ([number, number] | null)[] {
+function expressionSpans(lines: readonly string[]): ([number, number] | null)[] | null {
+  // A line scanner cannot place brackets inside multiline templates/comments
+  // with enough certainty to downgrade a warning.
+  if (lines.some((line) => line.includes("`") || line.includes("/*") || line.includes("*/"))) return null;
   const spans: ([number, number] | null)[] = lines.map(() => null);
   const stack: { char: string; line: number; expression: boolean }[] = [];
   let previous = "";
@@ -204,20 +209,23 @@ function expressionSpans(lines: readonly string[]): ([number, number] | null)[] 
         stack.push({ char, line: lineIndex, expression: /[=(,:[?]$|return$/.test(previous) });
       } else if (char === ")" || char === "]" || char === "}") {
         const open = stack.pop();
+        if (open === undefined || open.char !== ({ ")": "(", "]": "[", "}": "{" } as Record<string, string>)[char]) return null;
         if (open !== undefined && open.expression && !stack.some((entry) => entry.expression)) {
           for (let k = open.line; k <= lineIndex; k++) spans[k] = [open.line, lineIndex];
         }
       }
       if (!/\s/.test(char)) previous = /[A-Za-z_$]/.test(char) ? (previous.match(/[A-Za-z_$]+$/)?.[0] ?? "") + char : char;
     }
+    if (quote !== null) return null;
   }
-  return spans;
+  return stack.length === 0 ? spans : null;
 }
 
 /** The changed lines of one side, each widened by its expression and {@link CONTEXT_LINES}. */
-function widened(lines: readonly string[], changed: readonly number[]): string {
+function widened(lines: readonly string[], changed: readonly number[]): string | null {
   const keep = new Set<number>();
   const spans = expressionSpans(lines);
+  if (spans === null) return null;
   for (const index of changed) {
     const span = spans[index];
     const from = Math.min(index, span?.[0] ?? index) - CONTEXT_LINES;
@@ -234,6 +242,12 @@ function widened(lines: readonly string[], changed: readonly number[]): string {
  * See the module note for the rule and why every doubt says `touched`.
  */
 export function factDrift(fact: string, oldBody: string, newBody: string): FactDrift {
+  // A named-token diff cannot prove a closed set, absence, or a default. A new
+  // branch far from the old anchors can override a default or add the excluded
+  // behavior while every old token remains. These facts always need review.
+  if (/\b(?:only|exactly|complete|exhaustive|exclusive|all|every|always|never|none|no|not|without|except|exclude[sd]?|excluding|default[s]?|fallback|otherwise)\b|\b(?:doesn['’]t|isn['’]t|hasn['’]t|cannot|can['’]t)\b/i.test(fact)) {
+    return { kind: "touched", anchors: [], reason: "Defaults, exclusions, negative and complete-set claims require semantic review." };
+  }
   // The declaration line names the symbol, which locates the grounding, not
   // the fact: "parse() returns the last value" anchored only to `parse` would
   // call any change to parse's body nearby. Only anchors inside the body count.
@@ -259,7 +273,18 @@ export function factDrift(fact: string, oldBody: string, newBody: string): FactD
     return { kind: "touched", anchors, reason: "The grounded code is too large to compare line by line." };
   }
   const { removed, added } = changedLines(oldLines, newLines);
-  const region = `${widened(oldLines, removed)}\n${widened(newLines, added)}`;
+  // Branches, exits, loops and await/yield can change whether untouched anchor
+  // lines ever execute. Their effect is not confined to nearby source lines.
+  const edits = [...removed.map((index) => oldLines[index]), ...added.map((index) => newLines[index])].join("\n");
+  if (/\b(?:if|else|switch|case|for|while|do|return|throw|try|catch|finally|break|continue|await|yield)\b/.test(edits)) {
+    return { kind: "touched", anchors, reason: "The edit changes control flow that may affect the fact's unchanged lines." };
+  }
+  const oldRegion = widened(oldLines, removed);
+  const newRegion = widened(newLines, added);
+  if (oldRegion === null || newRegion === null) {
+    return { kind: "touched", anchors, reason: "The edit's expression boundaries cannot be placed safely." };
+  }
+  const region = `${oldRegion}\n${newRegion}`;
   const hit = anchors.find((anchor) => occurrences(region, anchor) > 0);
   if (hit !== undefined) {
     return { kind: "touched", anchors, reason: `The change touches a line naming \`${hit}\`.` };

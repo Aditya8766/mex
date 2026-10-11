@@ -11,12 +11,12 @@
  *
  * `graph.db` holds a baseline — the node's source and body hash as of the last
  * grounding — and it is tempting to resolve by comparing the current node
- * against it. That is the bug. The baseline is re-captured every time the graph
- * is rebuilt or re-grounded, so after any ordinary `mex graph` the comparison
- * is current-against-current, every entity reports `fresh`, and drift
- * disappears at precisely the moment a user does the most routine thing
- * available to them. The cached baseline is for *showing* a reviewer the old
- * side of a diff. It decides nothing.
+ * against it. That would make a disposable cache authoritative. A lost or
+ * refreshed cache cannot establish what the fact previously accepted, nor
+ * recreate old source from current code. Historical source is evidence for a
+ * diff only while it matches the committed hash; absent source keeps finer
+ * review conservative. The committed baseline survives either index being
+ * deleted and rebuilt.
  *
  * Both values this file compares are canonical: the current node, read live,
  * and the entity's committed reference, read from Git-tracked Markdown.
@@ -27,11 +27,11 @@
  * |---|---|---|
  * | node found, committed reference matches | `fresh` | `fresh` |
  * | node found, committed reference diverges | `stale` | `changed` |
- * | Tier-1 miss → `MOVED`, rebound structure matches | `fresh` (rebound) | `fresh` |
- * | Tier-1 miss → `MOVED`, rebound structure diverges | `stale` (rebound) | `changed` |
+ * | Tier-1 miss → `MOVED`, committed body or verified rename-only source matches | `fresh` (rebound) | `fresh` |
+ * | Tier-1 miss → `MOVED`, committed body differs without safe source evidence | `stale` (rebound) | `changed` |
  * | Tier-1 miss → `AMBIGUOUS` | `unresolved` | `ambiguous` |
  * | Tier-1 miss → `GONE` | `missing` | `missing` |
- * | no graph, or nothing to compare against | `unresolved` | `unverified` |
+ * | no graph, absent change baseline/current body, or nothing to compare against | `unresolved` | `unverified` |
  * | entity has no grounding at all | `ungrounded` | `unverified` |
  *
  * Two rows differ from the brief's version, both in the direction of seeing
@@ -42,14 +42,16 @@
  * literals and identifiers by grammar kind alone, so `3600` becoming `7200`
  * leaves it byte-identical. {@link groundingComparator} carries the measurement.
  * A grounding that committed a body hash is checked against that; one that did
- * not falls back to the fingerprint and can only see structural change.
+ * not falls back to the fingerprint and can only see structural change. A
+ * matching fingerprint with no body baseline therefore leaves linked code
+ * unverified rather than claiming that its literals are unchanged.
  *
  * The second is the `MOVED` row, which the brief resolves to `fresh` outright.
  * A move alone is still not drift — the entity id never changes and a rebound
- * symbol whose structure matches is `fresh` — but a symbol can move *and* be
+ * symbol whose committed body matches is `fresh` — but a symbol can move *and* be
  * rewritten in one commit, and calling that fresh would let real drift through
- * the rename door. So the rebound node is compared, by fingerprint (see
- * {@link compare} for why it cannot be by body hash).
+ * the rename door. The committed body hash remains the change signal after a
+ * rebind; only verified old/new source can establish a declaration-only rename.
  *
  * Whether a resolution was rebound is visible as `resolvedNode !== node` on
  * every variant, and as `rebound` on the fresh one.
@@ -160,22 +162,18 @@ function compare(
   const currentBodyHash = node.bodyHash ?? "";
   const rebound = node.id !== declaredNode;
 
-  // **A rebind is compared by fingerprint, never by body hash.** A symbol's
-  // name is part of its body, so renaming it changes the body hash by
-  // construction — measured, not assumed. Comparing it here would make
-  // `fresh` with `rebound: true` unreachable and every rename would read as
-  // drift, which is the brief's `MOVED` row inverted. Identity has already
-  // been re-established by fingerprint at this point, so fingerprint is the
-  // honest thing to compare.
-  //
-  // The residual, stated because it is real: a commit that renames a symbol
-  // *and* edits a constant inside it resolves fresh, since neither signal can
-  // see it. It does not stay hidden — the rebind means Markdown still names a
-  // node that no longer exists, so it has to be rewritten by an operation, and
-  // that write re-derives the body hash from the current node.
-  if (!rebound && groundingComparator(grounding) === "bodyHash") {
+  // Identity reconciliation finds the node; it never accepts its new body.
+  // A rename and a literal change can have the same structural fingerprint.
+  // Compare the committed change baseline even after a move, and relax only
+  // with verified old/new source evidence (including a declaration-only rename).
+  if (groundingComparator(grounding) === "bodyHash") {
+    if (currentBodyHash === "") {
+      return {
+        state: "unresolved", health: "unverified", node: declaredNode, resolvedNode: node.id,
+        reason: "The graph has no current body hash, so the committed change baseline cannot be compared.",
+      };
+    }
     if (grounding.bodyHash === currentBodyHash) {
-      graph.rememberBody?.(node.id, currentBodyHash);
       return {
         state: "fresh",
         health: "fresh",
@@ -194,7 +192,7 @@ function compare(
         resolvedNode: node.id,
         rebound,
         bodyHash: currentBodyHash,
-        drift,
+        ...(drift === "rename-only" ? {} : { drift }),
       };
     }
     return {
@@ -209,29 +207,8 @@ function compare(
     };
   }
 
-  // **A rebind whose body is byte-identical is fresh.** The graph answers a
-  // declared id through a compatibility alias when ids are re-minted (#240),
-  // and reconciliation rebinds a moved symbol; either way, a body equal to the
-  // committed hash is the code the entity described. Neighbour ids inside
-  // the fingerprint were renumbered by the re-mint, so comparing structure
-  // here reported `changed` for code that had not changed by one byte —
-  // where `mex check`, comparing bodies, rightly called it fresh. A body that
-  // differs still goes to the fingerprint below, so a rename stays fresh.
-  if (rebound && grounding.bodyHash !== undefined && grounding.bodyHash === currentBodyHash) {
-    graph.rememberBody?.(node.id, currentBodyHash);
-    return {
-      state: "fresh",
-      health: "fresh",
-      node: declaredNode,
-      resolvedNode: node.id,
-      rebound,
-      bodyHash: currentBodyHash,
-    };
-  }
-
-  // Structure: either the grounding committed no body hash, or the symbol was
-  // rebound. This sees a symbol being rewritten and misses a constant being
-  // edited, which is why anything mex writes commits a body hash.
+  // Legacy references without a change baseline can still reveal structural
+  // edits. A structural match cannot establish freshness for a code body.
   const currentFingerprint = graph.getFingerprint(node.id);
   if (currentFingerprint === null) {
     return {
@@ -248,28 +225,11 @@ function compare(
   // `changed` for groundings whose every token was the same.
   if (sameFingerprintCode(currentFingerprint, grounding.fingerprint)) {
     return {
-      state: "fresh",
-      health: "fresh",
-      node: declaredNode,
-      resolvedNode: node.id,
-      rebound,
-      bodyHash: currentBodyHash,
+      state: "unresolved", health: "unverified", node: declaredNode, resolvedNode: node.id,
+      reason: "No committed body baseline; matching structure cannot verify unchanged literals or signatures. Review the fact before recording a baseline.",
     };
   }
-  // A moved symbol whose code differs only in comments, layout or lines the
-  // fact does not name is the same fact in a new place.
-  const movedDrift = rebound ? explainDrift(grounding, graph, node.id, context) : null;
-  if (movedDrift !== null) {
-    return {
-      state: "fresh",
-      health: "fresh",
-      node: declaredNode,
-      resolvedNode: node.id,
-      rebound,
-      bodyHash: currentBodyHash,
-      drift: movedDrift,
-    };
-  }
+
   return {
     state: "stale",
     health: "changed",
@@ -292,11 +252,12 @@ function explainDrift(
   graph: GroundingGraph,
   nodeId: string,
   context: GroundingContext,
-): GroundingDriftNote | null {
+): GroundingDriftNote | "rename-only" | null {
   const evidence = graph.explainChange?.(grounding, nodeId) ?? null;
   if (evidence === null) return null;
   if (evidence.commentOnly) return { kind: "comment-only" };
   if (evidence.layoutOnly) return { kind: "layout-only" };
+  if (grounding.node !== nodeId && evidence.renameOnly === true) return "rename-only";
   if (context.fact === undefined || evidence.oldBody === null || evidence.newBody === null) return null;
   const verdict = factDrift(context.fact, evidence.oldBody, evidence.newBody);
   return verdict.kind === "nearby" ? { kind: "changed-nearby", anchors: verdict.anchors } : null;

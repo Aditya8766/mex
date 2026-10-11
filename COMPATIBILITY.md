@@ -52,6 +52,41 @@ shipping new versions.
 If you only use the `mex` CLI, most of this still applies, but CLI flags
 themselves are best-effort (see [CLI surface](#cli-surface) below).
 
+## Unreleased benchmark fixes
+
+The `codex/benchmark-gap-fixes` implementation is awaiting full owner
+verification; it is not a published release or a new version selection.
+The package-root exports and canonical Markdown grounding format are unchanged.
+Graph schema remains v4. Extractor/resolver identity changes require an explicit
+Graph refresh; preserve the prior graph for alias continuity. Wiki index v5
+adds file-level description/triggers to derived search text and requires an
+explicit `mex wiki rebuild-index`. Ordinary reads do neither operation.
+
+A structurally matching grounding without a committed body baseline is now
+`unverified`, including declarations without body evidence. A known resolved
+identity remains navigable; explicit reviewed regrounding can establish a
+baseline only when current body evidence exists. Rebinding a moved symbol does
+not accept a changed body. Declaration-only rename tolerance requires verified
+old/current source; missing source keeps the warning. Current whitespace-based
+body hashes still have ASI/indentation limits documented in the
+[implementation report](docs/design/benchmark-gap-implementation.md).
+
+Graph JSONL errors now cause a nonzero executable exit. Targeted query/impact
+accept indexed `file:line`; equally narrow impact targets remain ambiguous.
+File impact prioritizes external callers at unchanged default limits.
+`impact --direction callees` and `--direction both` optionally walk proven call
+edges, emitting `callee` or `dependency` records and direction metadata. Default
+caller behavior is preserved. Anonymous callers may carry `enclosingSymbol`
+as bounded navigation context; it does not assert an enclosing-function call.
+
+Wiki query hits may contain bounded explanations of cached per-link health
+verdicts; ordinary queries do not revalidate current code through Graph. Optional
+details never displace ranked hits, and truncation is reported when they do not
+fit. Synthesis uses immutable fresh Graph/source evidence, validates before
+atomic publication, and refuses incomplete durable intents until exact operation
+recovery; it never remints those identities. Sync briefs over 1,024 UTF-8 bytes
+use private prompt files; input over 1 MiB refuses instead of truncating.
+
 ## Upgrading to 0.8.4
 
 Release preparation is dated October 9, 2026; 0.8.4 remains unpublished until
