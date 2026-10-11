@@ -18,7 +18,7 @@ edges:
     condition: when refreshing the release README, badges, community links, or architecture illustrations
   - target: patterns/hub-first-run-onboarding.md
     condition: when adding or changing the Hub first-run tour or its checkout-local completion state
-last_updated: 2026-09-28
+last_updated: 2026-10-11
 ---
 
 # Session Bootstrap
@@ -30,6 +30,10 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- PR #250 review fixes are implemented on `fix/206-nested-dependency-manifests`:
+  recursive manifest discovery preserves root precedence, skips symlinks, and
+  abstains when bounded discovery or reads cannot complete. These changes are
+  validated by 122 focused tests and typecheck; see [dependency-manifest-discovery.md](patterns/dependency-manifest-discovery.md) for regression guidance.
 
 - Release preparation for 0.8.3 is on `codex/release-0.8.3`, based on main
   `490ffe5`. The maintainer selected 0.8.3, including documented additive API

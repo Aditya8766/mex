@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { globSync } from "glob";
+import { opendirSync, openSync, readSync, closeSync, fstatSync, constants } from "node:fs";
+import { resolve, relative, sep } from "node:path";
 import type { Claim, DriftIssue } from "../../types.js";
 
 /** Runtimes, platforms, databases, protocols, and architectural terms that appear in stack docs but aren't installable packages */
@@ -162,6 +161,60 @@ function findDependency(deps: DepEntry[], claimed: string): DepEntry | undefined
   return deps.find((d) => d.normalizes && normalizeName(d.name) === normalized);
 }
 
+// Discovery may recurse arbitrarily deep, but must not retain or read an
+// unlimited corpus. Exceeding a budget abstains instead of checking a partial list.
+const MAX_DISCOVERY_ENTRIES = 100_000;
+const MAX_MANIFESTS = 1_024;
+const MAX_MANIFEST_BYTES = 1_048_576;
+const MAX_TOTAL_MANIFEST_BYTES = 8_388_608;
+
+function discoverManifests(projectRoot: string): string[] | null {
+  const pending = [resolve(projectRoot)];
+  const manifests: string[] = [];
+  let inspected = 0;
+  try {
+    while (pending.length) {
+      const directory = opendirSync(pending.pop()!);
+      try {
+        for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+          if (++inspected > MAX_DISCOVERY_ENTRIES) return null;
+          // Preserve glob's hidden-directory exclusion and avoid installed
+          // dependencies, Git metadata, directory junctions and file symlinks.
+          if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.isSymbolicLink()) continue;
+          const path = resolve(directory.path, entry.name);
+          if (entry.isDirectory()) pending.push(path);
+          else if (entry.isFile() && (entry.name === "package.json" || entry.name === "pyproject.toml")) {
+            manifests.push(path);
+            if (manifests.length > MAX_MANIFESTS) return null;
+          }
+        }
+      } finally { directory.closeSync(); }
+    }
+  } catch {
+    return null;
+  }
+  const rank = (path: string) => path === resolve(projectRoot, "package.json") ? 0
+    : path === resolve(projectRoot, "pyproject.toml") ? 1 : 2;
+  const key = (path: string) => relative(projectRoot, path).split(sep).join("/");
+  return manifests.sort((a, b) => rank(a) - rank(b) || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+}
+
+function readManifest(path: string, remaining: number): string | null {
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!fstatSync(descriptor).isFile()) return null;
+    const limit = Math.min(MAX_MANIFEST_BYTES, remaining);
+    const bytes = Buffer.alloc(limit + 1);
+    let count = 0;
+    while (count < bytes.length) {
+      const read = readSync(descriptor, bytes, count, bytes.length - count, null);
+      if (!read) break;
+      count += read;
+    }
+    return count > limit ? null : bytes.subarray(0, count).toString("utf-8");
+  } finally { closeSync(descriptor); }
+}
+
 function loadAllDependencies(projectRoot: string): DepEntry[] | null {
   const entries: DepEntry[] = [];
 
@@ -169,23 +222,17 @@ function loadAllDependencies(projectRoot: string): DepEntry[] | null {
   // Discover dependency manifests recursively, while ignoring dependency
   // directories and Git metadata so we only inspect manifests belonging to
   // the repository itself.
-  const manifests = [
-    ...globSync("**/package.json", {
-      cwd: projectRoot,
-      ignore: ["**/node_modules/**", "**/.git/**"],
-    }),
-    ...globSync("**/pyproject.toml", {
-      cwd: projectRoot,
-      ignore: ["**/node_modules/**", "**/.git/**"],
-    }),
-  ];
+  const manifests = discoverManifests(projectRoot);
+  if (!manifests) return null;
+  let remaining = MAX_TOTAL_MANIFEST_BYTES;
 
   for (const manifest of manifests) {
-    const manifestPath = resolve(projectRoot, manifest);
-
     try {
+      const content = readManifest(manifest, remaining);
+      if (content === null) return null;
+      remaining -= Buffer.byteLength(content, "utf-8");
       if (manifest.endsWith("package.json")) {
-        const pkg = JSON.parse(readFileSync(manifestPath, "utf-8"));
+        const pkg = JSON.parse(content);
 
         for (const [name, version] of Object.entries(pkg.dependencies ?? {})) {
           entries.push({ name, version: String(version) });
@@ -196,11 +243,12 @@ function loadAllDependencies(projectRoot: string): DepEntry[] | null {
         }
       } else {
         entries.push(
-          ...parsePyprojectDependencies(readFileSync(manifestPath, "utf-8"))
+          ...parsePyprojectDependencies(content)
         );
       }
     } catch {
-      // Skip malformed or unreadable manifests.
+      // An unreadable or malformed manifest makes the corpus incomplete.
+      return null;
     }
   }
 
