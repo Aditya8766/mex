@@ -1,6 +1,5 @@
 import { basename, resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { AI_TOOLS, type AiTool } from "../types.js";
 import { loadConfiguredAiTools } from "../config.js";
@@ -17,6 +16,7 @@ import { selectSetupAgent } from "./population.js";
 import { formatSetupGraphActivity, setupGraphActivity } from "./graph-progress.js";
 import type { TerminalSetupAction, TerminalSetupView } from "./terminal-ui.js";
 import { appendTerminalSetupEvent } from "./terminal-events.js";
+import { waitForTerminalReturn } from "./terminal-return.js";
 
 const CONTINUE = "Run `mex setup` to continue. Existing authored files are preserved.";
 
@@ -98,29 +98,28 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
         return;
       }
       if (action.type === "link" && view.hubUrl) {
-        void showHubLink();
+        // Suspend only after Ink's input handler returns. Unmounting inside it
+        // leaves Ink's read loop to start a cooked read that steals the Enter.
+        queueMicrotask(() => void showHubLink());
         return;
       }
       pending?.(action);
     });
+    // Setup can finish in the browser while the link is shown; closing releases the wait.
+    let linkWait: AbortController | undefined;
     const showHubLink = async () => {
-      let rl: ReturnType<typeof createInterface> | undefined;
-      const closeInput = () => cancel();
+      const release = new AbortController();
+      linkWait = release;
       try {
         await ui.suspend();
-        stdin.ref();
         // Outside the frame, terminal wrapping adds no border characters to a copy.
         console.log(`\nHub link (keep it private):\n${view.hubUrl}\n`);
-        // The suspended HUD leaves a cooked terminal. Avoid readline's keypress
-        // decoder, which otherwise consumes the first key after Ink remounts.
-        rl = createInterface({ input: stdin, output: stdout, terminal: false });
-        rl.once("SIGINT", closeInput);
-        await rl.question("Press Enter to return to MEX…", { signal: abort.signal });
+        if (await pressEnterToReturn(AbortSignal.any([abort.signal, release.signal])) === "cancel"
+          && !abort.signal.aborted && !release.signal.aborted) cancel();
       } catch (error) {
         if (!abort.signal.aborted) update({ detail: error instanceof Error ? error.message : "Could not show the Hub link." });
       } finally {
-        rl?.off("SIGINT", closeInput);
-        rl?.close();
+        if (linkWait === release) linkWait = undefined;
         ui.resume(view);
       }
     };
@@ -212,22 +211,11 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
                       : launched.message ?? `The agent ${launched.status === "cancelled" ? "was interrupted" : "failed"}. Reopen it or use the manual prompt.`;
                   } else if (action.type === "prompt") {
                     await ui.suspend();
-                    // Ink releases its stdin reference on unmount. Readline alone
-                    // does not restore it, so keep the process alive for this question.
-                    stdin.ref();
-                    let rl: ReturnType<typeof createInterface> | undefined;
-                    const closeInput = () => cancel();
                     try {
                       console.log(`\nCopy this prompt into your AI tool:\n\n${input.prompt}\n`);
-                      rl = createInterface({ input: stdin, output: stdout, terminal: false });
-                      rl.once("SIGINT", closeInput);
-                      rl.once("close", closeInput);
-                      await rl.question("Press Enter to return to MEX…", { signal: abort.signal });
+                      if (await pressEnterToReturn(abort.signal) === "cancel" && !abort.signal.aborted) cancel();
                     }
                     finally {
-                      rl?.off("SIGINT", closeInput);
-                      rl?.off("close", closeInput);
-                      rl?.close();
                       ui.resume(view);
                     }
                   } else if (action.type === "check") {
@@ -285,6 +273,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
       }
     } finally {
       notifyCancel = () => {};
+      linkWait?.abort();
       await ui.close();
       for (const note of anchorNotes) console.log(`Action needed: ${note}`);
     }
@@ -302,6 +291,11 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
     process.removeListener("SIGTERM", terminate);
     stdin.removeListener("end", endInput);
   }
+}
+
+function pressEnterToReturn(signal: AbortSignal): Promise<"return" | "cancel"> {
+  stdout.write("Press Enter to return to MEX…");
+  return waitForTerminalReturn(signal);
 }
 
 function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", tools: AiTool[], explicit: boolean): SetupRunResult {

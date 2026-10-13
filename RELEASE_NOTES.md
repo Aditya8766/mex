@@ -24,7 +24,8 @@ setup without agent output no longer creates an empty background-session panel.
 Press `d` to review retained setup notices and diagnostics; `l` on the finishing
 screen shows a clean copyable Hub link, including in a narrow terminal. Finish
 later remains a paused outcome after an agent failure, and the final message
-reflects a setup commit completed in the browser.
+reflects a setup commit completed in the browser. On Windows, returning from
+the manual prompt or the Hub link view no longer leaves the HUD without input.
 
 After interactive preparation, the browser handles setup-file review, the
 explicit local commit checkpoint, and completion. MEX never pushes. Use
@@ -72,7 +73,8 @@ earlier cannot read that encoding.**
   incomplete parse permits exact grounding from fully parsed files; targets
   in incomplete files remain unverified with named remediation. Source or
   configuration drift still blocks grounding, and missing targets are not
-  reconciled against an incomplete corpus.
+  reconciled against an incomplete corpus. `mex check` applies the same rule:
+  one unparseable file no longer skips every grounding check.
 - Natural-language Wiki queries ignore question/stop words, rank exact-term
   answers ahead of broader matches, and explain partial or empty results. Hub
   search uses the same ranking and identifies unchecked health.
@@ -84,7 +86,9 @@ earlier cannot read that encoding.**
   code-linked facts, with an agent or manual prompt for explicit application.
   It requires a fresh graph and refuses flagged candidate links.
 - Staleness counts commits affecting referenced paths, and script/dependency
-  checks avoid brace-expansion and command-prose false positives. CLI discovery
+  checks avoid brace-expansion and command-prose false positives. Dependency
+  checks find nested `package.json` and `pyproject.toml` manifests, and Yarn or
+  pnpm built-in commands are no longer reported as dead scripts. CLI discovery
   verifies MEX rather than trusting an executable's name. Hub groups repeated
   Wiki diagnostics with expandable detail.
 

@@ -18,7 +18,7 @@ edges:
     condition: when refreshing the release README, badges, community links, or architecture illustrations
   - target: patterns/hub-first-run-onboarding.md
     condition: when adding or changing the Hub first-run tour or its checkout-local completion state
-last_updated: 2026-10-12
+last_updated: 2026-10-13
 ---
 
 # Session Bootstrap
@@ -61,6 +61,13 @@ Then read this file fully before doing anything else in this session.
   remains unverified, and source/configuration drift still refuses. Windows
   packed CLI discovery compares canonical paths. Release performance limits
   remain unchanged; the final exact-head CI run is still required.
+- The Windows follow-up waits for Enter after the manual prompt and Hub link
+  view in a short-lived child process. A parent console read between HUD mounts
+  left the next HUD without input on Windows. `mex check` now checks groundings
+  when the graph's only faults are incomplete parses (and/or changed source).
+  Partial-file and missing targets are unverified with the files named, and
+  configuration drift still skips grounding. Main's #250/#251 checker fixes are
+  merged into the release branch.
 - Local terminal setup is the default for `mex setup` and bare `mex` in
   incomplete projects, with the lowercase ASCII `mex` banner in cyan.
   `setup --browser` explicitly opens browser setup; `--cli` remains supported.
@@ -83,6 +90,10 @@ Then read this file fully before doing anything else in this session.
   Wiki failures in the browser. Raw diagnostics remain terminal-only, and
   unexpected exceptions retain the generic fallback. This working-tree change
   leaves the setup completion rules and private response schema unchanged.
+- PR #250's nested dependency-manifest fixes are merged into main:
+  recursive manifest discovery preserves root precedence, skips symlinks, and
+  abstains when bounded discovery or reads cannot complete. These changes are
+  validated by 137 focused tests and typecheck after main integration; see [dependency-manifest-discovery.md](patterns/dependency-manifest-discovery.md) for regression guidance.
 - Local work on `fix/knowledge-drift-precision` adds `mex wiki link-sections`:
   preview or explicitly apply missing section-to-parent `refines` relationships
   without changing claim text or groundings. Setup/GROW guidance preserves those
