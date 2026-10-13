@@ -46,6 +46,13 @@ Then read this file fully before doing anything else in this session.
   remains unverified, and source/configuration drift still refuses. Windows
   packed CLI discovery compares canonical paths. Release performance limits
   remain unchanged; the final exact-head CI run is still required.
+- The Windows follow-up waits for Enter after the manual prompt and Hub link
+  view in a short-lived child process. A parent console read between HUD mounts
+  left the next HUD without input on Windows. `mex check` now checks groundings
+  when the graph's only faults are incomplete parses (and/or changed source).
+  Partial-file and missing targets are unverified with the files named, and
+  configuration drift still skips grounding. Main's #250/#251 checker fixes are
+  merged into the release branch.
 - Local terminal setup is the default for `mex setup` and bare `mex` in
   incomplete projects, with the lowercase ASCII `mex` banner in cyan.
   `setup --browser` explicitly opens browser setup; `--cli` remains supported.
