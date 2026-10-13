@@ -39,6 +39,9 @@ const TARGET_KINDS: Record<string, NodeKind[]> = {
   function_ref: ["function", "method"],
 };
 
+/** Receivers that lexically name the calling body's own instance or class. */
+const LEXICAL_SELF_RECEIVERS = new Set(["self", "this", "cls"]);
+
 /**
  * Resolve every unresolved reference against the full node set. Returns the
  * reference edges to persist (`contains` edges are already resolved by the
@@ -179,7 +182,16 @@ export function resolveReferences(
     const allowedKinds = TARGET_KINDS[ref.referenceKind] ?? [];
     // A recursive call is still a candidate for itself. Removing it can
     // turn an unresolved overload set into a false, confident sibling edge.
-    const allowSelf = ref.referenceKind === "calls" || ref.referenceKind === "function_ref";
+    // Outside C#, only an unimported bare name inside a function, or a
+    // lexical self receiver inside a method, can name the calling body:
+    // `super().save()`, `other.save()`, or an imported `dumps` inside a
+    // method of the same name each name a different body.
+    const selfReceiver = (ref.receiver ?? ref.referenceName.split(".").slice(0, -1).join(".")).trim();
+    const lexicalSelfCall = directBindings.length === 0 && (selfReceiver === ""
+      ? fromNode.kind === "function"
+      : fromNode.kind === "method" && LEXICAL_SELF_RECEIVERS.has(selfReceiver));
+    const allowSelf = (ref.referenceKind === "calls" || ref.referenceKind === "function_ref")
+      && (ref.language === "csharp" || lexicalSelfCall);
     const filtered = candidates.filter((node) =>
       (allowedKinds.length === 0 || allowedKinds.includes(node.kind))
       && (allowSelf || node.id !== ref.fromNodeId),

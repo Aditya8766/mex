@@ -37,4 +37,12 @@ describe("proven lexical recursive calls", () => {
     expect(resolveReferences([run, inspect], [reference(inspect, "self.run", "self")]))
       .toEqual([expect.objectContaining({ source: inspect.id, target: run.id, kind: "calls" })]);
   });
+  it("never reads a super, foreign-receiver, or bare call inside a method as recursion", () => {
+    const save = { ...node("method:save", "save", "python", "class:model"), kind: "method" as const };
+    for (const [name, receiver] of [["super().save", "super()"], ["other.save", "other"], ["save", undefined]] as const) {
+      expect(resolveReferences([save], [reference(save, name, receiver)]), name).toEqual([]);
+    }
+    expect(resolveReferences([save], [reference(save, "self.save", "self")]))
+      .toEqual([expect.objectContaining({ source: save.id, target: save.id, kind: "calls" })]);
+  });
 });
