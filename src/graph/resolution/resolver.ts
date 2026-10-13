@@ -134,11 +134,26 @@ export function resolveReferences(
     }
   }
 
+  const csharp = createCSharpScope(nodes, refs, byId);
+
   // Pass 2: symbol references (calls, extends, implements, instantiates, …).
   for (const ref of refs) {
     if (ref.referenceKind === "imports") continue;
     const fromNode = byId.get(ref.fromNodeId);
     if (!fromNode) continue;
+
+    // C# types are visible through the enclosing namespaces and `using`
+    // directives, never by name alone: bind a type reference, or a call on a
+    // type-named receiver, only when exactly one visible type answers it.
+    if (ref.language === "csharp") {
+      const target = csharp.resolve(ref, fromNode);
+      if (target) {
+        const kind = ref.referenceKind === "function_ref" ? "references" : ref.referenceKind as EdgeKind;
+        push(ref.fromNodeId, target.id, kind, ref, "lexical", 1,
+          target.filePath === fromNode.filePath ? "lexical-scope" : "namespace-scope");
+        continue;
+      }
+    }
 
     const frameworkResolution = framework?.resolvers
       .filter((resolver) => !resolver.languages || resolver.languages.includes(ref.language))
@@ -288,6 +303,129 @@ function pickBest(
 }
 
 /** The segment after the last `.` (`obj.method` → `method`; `free` → `free`). */
+const CSHARP_TYPE_KINDS = new Set<string>(["class", "interface", "struct", "enum"]);
+
+/** C# namespace visibility: enclosing namespaces plus `using` directives, per file. */
+function createCSharpScope(
+  nodes: GraphNode[],
+  refs: UnresolvedRefRecord[],
+  byId: Map<string, GraphNode>,
+): { resolve(ref: UnresolvedRefRecord, fromNode: GraphNode): GraphNode | null } {
+  const typesByName = new Map<string, GraphNode[]>();
+  const usingsByFile = new Map<string, Set<string>>();
+  const namespaceOf = new Map<string, string>();
+  const childrenByContainer = new Map<string, GraphNode[]>();
+  const membersCache = new Map<string, Map<string, GraphNode[]>>();
+  const usings = (file: string): Set<string> => {
+    let set = usingsByFile.get(file);
+    if (!set) usingsByFile.set(file, (set = new Set()));
+    return set;
+  };
+  const enclosingNamespace = (node: GraphNode): string => {
+    const known = namespaceOf.get(node.id);
+    if (known !== undefined) return known;
+    const names: string[] = [];
+    for (let current = byId.get(node.containerId ?? ""); current; current = byId.get(current.containerId ?? "")) {
+      if (current.kind === "namespace") names.unshift(current.name);
+    }
+    const name = names.join(".");
+    namespaceOf.set(node.id, name);
+    return name;
+  };
+  let any = false;
+  for (const node of nodes) {
+    if (node.language !== "csharp") continue;
+    any = true;
+    if (node.containerId) {
+      const siblings = childrenByContainer.get(node.containerId);
+      if (siblings) siblings.push(node); else childrenByContainer.set(node.containerId, [node]);
+    }
+    if (CSHARP_TYPE_KINDS.has(node.kind)) {
+      const list = typesByName.get(node.name);
+      if (list) list.push(node); else typesByName.set(node.name, [node]);
+    }
+  }
+  if (!any) return { resolve: () => null };
+  for (const ref of refs) {
+    if (ref.language !== "csharp" || ref.referenceKind !== "imports") continue;
+    const name = ref.referenceName.replace(/^global::/, "").trim();
+    if (name.startsWith("static ") || name.includes("=")) continue;
+    usings(ref.filePath).add(name);
+  }
+
+  /** C# lookup order: enclosing types, then each enclosing namespace inward-out, then usings and the global namespace. */
+  const resolveType = (raw: string, fromNode: GraphNode): GraphNode | null => {
+    const explicitGlobal = raw.trim().startsWith("global::");
+    const name = raw.replace(/^\s*global::/, "").replace(/<.*$/s, "").replace(/\?$/, "").trim();
+    if (!/^[A-Za-z_][\w.]*$/.test(name)) return null;
+    const dot = name.lastIndexOf(".");
+    const simple = dot < 0 ? name : name.slice(dot + 1);
+    const qualifier = dot < 0 ? "" : name.slice(0, dot);
+    const candidates = typesByName.get(simple) ?? [];
+    if (candidates.length === 0) return null;
+    const unique = (list: GraphNode[]): GraphNode | null | undefined =>
+      list.length === 1 ? list[0]! : list.length > 1 ? null : undefined;
+    const within = (namespace: string) => candidates.filter((type) =>
+      enclosingNamespace(type) === namespace && !CSHARP_TYPE_KINDS.has(byId.get(type.containerId ?? "")?.kind ?? ""));
+    if (explicitGlobal) return unique(within(qualifier)) ?? null;
+    if (qualifier === "") {
+      const ancestors = new Set<string>();
+      for (let node = byId.get(fromNode.containerId ?? ""); node; node = byId.get(node.containerId ?? "")) ancestors.add(node.id);
+      ancestors.add(fromNode.id);
+      const nested = unique(candidates.filter((type) => type.containerId !== undefined && ancestors.has(type.containerId)
+        && byId.get(type.containerId)?.kind !== "namespace"));
+      if (nested !== undefined) return nested;
+    }
+    const enclosing = enclosingNamespace(fromNode);
+    const parts = enclosing === "" ? [] : enclosing.split(".");
+    for (let length = parts.length; length > 0; length -= 1) {
+      const prefix = parts.slice(0, length).join(".");
+      const found = unique(within(qualifier === "" ? prefix : `${prefix}.${qualifier}`));
+      if (found !== undefined) return found;
+    }
+    if (qualifier !== "") return unique(within(qualifier)) ?? null;
+    const imported = usings(fromNode.filePath);
+    return unique(candidates.filter((type) => {
+      const namespace = enclosingNamespace(type);
+      return (namespace === "" || imported.has(namespace)) && !CSHARP_TYPE_KINDS.has(byId.get(type.containerId ?? "")?.kind ?? "");
+    })) ?? null;
+  };
+
+  return {
+    resolve(ref, fromNode) {
+      if (ref.referenceKind === "extends" || ref.referenceKind === "implements" || ref.referenceKind === "instantiates") {
+        const type = resolveType(ref.referenceName, fromNode);
+        return type && type.id !== fromNode.id ? type : null;
+      }
+      if (ref.referenceKind !== "calls") return null;
+      const dot = ref.referenceName.lastIndexOf(".");
+      if (dot < 0) return null;
+      const receiver = ref.referenceName.slice(0, dot);
+      if (receiver === "this" || receiver === "base") return null;
+      const type = resolveType(receiver, fromNode);
+      if (!type) return null;
+      const method = ref.referenceName.slice(dot + 1);
+      const members = membersByType(type.id).get(method) ?? [];
+      return members.length > 0 && members.every((member) => member.qualifiedName === members[0]!.qualifiedName)
+        ? members[0]!
+        : null;
+    },
+  };
+
+  function membersByType(typeId: string): Map<string, GraphNode[]> {
+    let members = membersCache.get(typeId);
+    if (members) return members;
+    members = new Map();
+    for (const node of childrenByContainer.get(typeId) ?? []) {
+      if (node.kind !== "method") continue;
+      const list = members.get(node.name);
+      if (list) list.push(node); else members.set(node.name, [node]);
+    }
+    membersCache.set(typeId, members);
+    return members;
+  }
+}
+
 function lastSegment(name: string): string {
   const dot = name.lastIndexOf(".");
   const rust = name.lastIndexOf("::");
