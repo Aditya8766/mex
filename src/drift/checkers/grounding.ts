@@ -34,14 +34,15 @@ export function movedByNeighborsMessage(oldId: string, newId: string, anchor = f
   return `${anchor ? "Inline anchor" : "Grounded node"} matched by callers and callees, not body: ${oldId} → ${newId}`;
 }
 
-/** What a snapshot stale only by changed source can still say about one node (#228). */
+/** What a snapshot stale by changed source (#228) or incomplete parses can still say about one node. */
 export type SourceDriftResolution =
   /** The node's body as a refresh would record it: from the snapshot when its
    *  file is unchanged, or re-derived exactly from the edited file. `codeHash`
    *  computes that body's comment-free hash on demand (#236). */
   | { kind: "current"; bodyHash: string | undefined; codeHash?: () => string | null }
-  /** Only a refresh can settle this node; `reason` says why. */
-  | { kind: "unverified"; reason: string };
+  /** Only a refresh can settle this node; `reason` says why. A parse gap is not
+   *  settled by a refresh, so it names its own condition in `until`. */
+  | { kind: "unverified"; reason: string; until?: string };
 
 /**
  * Grounding against a graph whose only fault is that source files changed.
@@ -120,7 +121,7 @@ export function makeGroundingChecker(
         const resolution = sourceDrift.resolve(grounding.node);
         if (resolution.kind === "unverified") {
           issues.push(withEntity(issue("GROUNDING_UNVERIFIED", "warning", source,
-            `Grounded node cannot be verified until \`mex graph refresh\`: ${grounding.node} (${resolution.reason})`), entity));
+            `Grounded node cannot be verified ${resolution.until ?? "until `mex graph refresh`"}: ${grounding.node} (${resolution.reason})`), entity));
           continue;
         }
         target = sourceDriftLinkGraph(shared, grounding.node, resolution, codeHashing);
@@ -154,7 +155,7 @@ export function makeGroundingChecker(
         const resolution = sourceDrift.resolve(anchor.nodeId);
         if (resolution.kind === "unverified") {
           issues.push(issue("GROUNDING_UNVERIFIED", "warning", source,
-            `Inline anchor cannot be verified until \`mex graph refresh\`: ${anchor.nodeId} (${resolution.reason})`));
+            `Inline anchor cannot be verified ${resolution.until ?? "until `mex graph refresh`"}: ${anchor.nodeId} (${resolution.reason})`));
         }
         continue;
       }
