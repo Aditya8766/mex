@@ -127,16 +127,19 @@ export function createGroundingEvidence(options: {
       let commentOnly = committedCode !== null
         && committedCode === codeHash(current.filePath, current.file, current.startLine, current.endLine);
       let layoutOnly = commentOnly;
-      let renameOnly = false;
+      let renameOnly: boolean | undefined;
       if (oldBody !== null) {
         const oldCode = bodyTokenHash(current.filePath, oldBody, false);
         commentOnly ||= oldCode !== null && oldCode === bodyTokenHash(current.filePath, current.body, false);
         const oldLayout = bodyTokenHash(current.filePath, oldBody, true);
         layoutOnly ||= commentOnly || (oldLayout !== null && oldLayout === bodyTokenHash(current.filePath, current.body, true));
         const oldRename = declarationRenameHash(current.filePath, oldBody);
-        renameOnly = oldRename !== null && oldRename === declarationRenameHash(current.filePath, current.body);
+        const newRename = declarationRenameHash(current.filePath, current.body);
+        // Undefined, not false, when either side cannot be hashed: an unproven
+        // rename is no evidence either way.
+        renameOnly = oldRename === null || newRename === null ? undefined : oldRename === newRename;
       }
-      return { commentOnly, layoutOnly, renameOnly, oldBody, newBody: current.body };
+      return { commentOnly, layoutOnly, ...(renameOnly === undefined ? {} : { renameOnly }), oldBody, newBody: current.body };
     },
     rememberBody(nodeId, bodyHash) {
       const path = pathFor(bodyHash);

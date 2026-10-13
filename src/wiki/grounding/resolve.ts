@@ -174,6 +174,10 @@ function compare(
       };
     }
     if (grounding.bodyHash === currentBodyHash) {
+      // Keep the body the committed hash names, content-addressed, so a later
+      // edit can be diffed against it. Without it the comment, layout, rename
+      // and nearby relaxations have no old side and every edit reads changed.
+      graph.rememberBody?.(node.id, currentBodyHash);
       return {
         state: "fresh",
         health: "fresh",
@@ -184,7 +188,16 @@ function compare(
       };
     }
     const drift = explainDrift(grounding, graph, node.id, context);
-    if (drift !== null) {
+    // A rebound symbol whose old body this checkout never saw keeps the #229
+    // rule: identity was re-established by structure, so matching structure
+    // is the same code in a new place. With the old body, its evidence decides.
+    if (drift === "no-baseline" && rebound) {
+      const currentFingerprint = graph.getFingerprint(node.id);
+      if (currentFingerprint !== null && sameFingerprintCode(currentFingerprint, grounding.fingerprint)) {
+        return { state: "fresh", health: "fresh", node: declaredNode, resolvedNode: node.id, rebound, bodyHash: currentBodyHash };
+      }
+    }
+    if (drift !== null && drift !== "no-baseline") {
       return {
         state: "fresh",
         health: "fresh",
@@ -207,8 +220,9 @@ function compare(
     };
   }
 
-  // Legacy references without a change baseline can still reveal structural
-  // edits. A structural match cannot establish freshness for a code body.
+  // Legacy references without a change baseline are compared by structure:
+  // this sees a symbol being rewritten and misses a constant being edited,
+  // which is why anything mex writes commits a body hash.
   const currentFingerprint = graph.getFingerprint(node.id);
   if (currentFingerprint === null) {
     return {
@@ -224,10 +238,7 @@ function compare(
   // re-minted (#240), and reading that as this node's code changing reported
   // `changed` for groundings whose every token was the same.
   if (sameFingerprintCode(currentFingerprint, grounding.fingerprint)) {
-    return {
-      state: "unresolved", health: "unverified", node: declaredNode, resolvedNode: node.id,
-      reason: "No committed body baseline; matching structure cannot verify unchanged literals or signatures. Review the fact before recording a baseline.",
-    };
+    return { state: "fresh", health: "fresh", node: declaredNode, resolvedNode: node.id, rebound, bodyHash: currentBodyHash };
   }
 
   return {
@@ -252,13 +263,16 @@ function explainDrift(
   graph: GroundingGraph,
   nodeId: string,
   context: GroundingContext,
-): GroundingDriftNote | "rename-only" | null {
+): GroundingDriftNote | "rename-only" | "no-baseline" | null {
   const evidence = graph.explainChange?.(grounding, nodeId) ?? null;
-  if (evidence === null) return null;
+  if (evidence === null) return "no-baseline";
   if (evidence.commentOnly) return { kind: "comment-only" };
   if (evidence.layoutOnly) return { kind: "layout-only" };
   if (grounding.node !== nodeId && evidence.renameOnly === true) return "rename-only";
-  if (context.fact === undefined || evidence.oldBody === null || evidence.newBody === null) return null;
+  // A rebind whose rename cannot be proven either way has no evidence.
+  if (grounding.node !== nodeId && evidence.renameOnly === undefined) return "no-baseline";
+  if (evidence.oldBody === null || evidence.newBody === null) return "no-baseline";
+  if (context.fact === undefined) return null;
   const verdict = factDrift(context.fact, evidence.oldBody, evidence.newBody);
   return verdict.kind === "nearby" ? { kind: "changed-nearby", anchors: verdict.anchors } : null;
 }

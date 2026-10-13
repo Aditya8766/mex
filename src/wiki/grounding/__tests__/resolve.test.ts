@@ -144,7 +144,7 @@ describe("the resolution table", () => {
     expect(resolveGrounding(legacyGrounding, stubGraph({
       nodes: { [NODE]: node(NODE, "body-9") },
       fingerprints: { [NODE]: renumbered },
-    }))).toMatchObject({ state: "unresolved", health: "unverified", resolvedNode: NODE });
+    }))).toMatchObject({ state: "fresh", health: "fresh" });
     // A rewritten body changes the sketch, and that is still drift.
     const rewritten = serializeFingerprint({ ...code, minhash: code.minhash.map((value) => value + 1), neighbors: [] });
     expect(resolveGrounding(legacyGrounding, stubGraph({
@@ -153,20 +153,22 @@ describe("the resolution table", () => {
     }))).toMatchObject({ state: "stale", health: "changed" });
   });
 
-  it("does not accept a mismatched moved body on structural identity alone", () => {
+  it("compares a rebind by structure without old source, and by its evidence with it", () => {
+    // Renaming a symbol always moves its body hash, since the name is part of
+    // the body. Without the old body, identity re-established by structure is
+    // the only signal, and a rename reads fresh (#229).
     const options: StubOptions = {
-      nodes: { [MOVED_NODE]: node(MOVED_NODE, "body-after-rename-and-literal-edit") },
+      nodes: { [MOVED_NODE]: node(MOVED_NODE, "a-different-body-hash") },
       fingerprints: { [MOVED_NODE]: FINGERPRINT },
       reconcile: () => ({ kind: "MOVED", nodeId: MOVED_NODE }),
     };
-    expect(resolveGrounding(GROUNDED, stubGraph(options))).toMatchObject({
-      state: "stale", health: "changed", resolvedNode: MOVED_NODE, baselineBodyHash: "body-1",
-    });
-    // A compatibility alias answers a Tier-1 read with the new node; the rule
-    // must be identical to the explicit reconciliation path above.
+    expect(resolveGrounding(GROUNDED, stubGraph(options)))
+      .toMatchObject({ state: "fresh", health: "fresh", rebound: true, resolvedNode: MOVED_NODE });
+    // With the old body, a rename that also edits a literal is drift.
     expect(resolveGrounding(GROUNDED, stubGraph({ ...options,
-      nodes: { [NODE]: node(MOVED_NODE, "body-after-rename-and-literal-edit") },
-    }))).toMatchObject({ state: "stale", health: "changed", baselineBodyHash: "body-1" });
+      explainChange: () => ({ commentOnly: false, layoutOnly: false, renameOnly: false,
+        oldBody: "function oldName() { return 3600; }", newBody: "function newName() { return 7200; }" }),
+    }))).toMatchObject({ state: "stale", health: "changed", resolvedNode: MOVED_NODE, baselineBodyHash: "body-1" });
   });
 
   it("accepts a moved rename only when verified source proves it", () => {
@@ -263,10 +265,12 @@ describe("what is compared, and what it can see", () => {
 
     expect(resolveGrounding(GROUNDED, graph)).toMatchObject({ state: "stale", health: "changed" });
 
-    // A legacy grounding can still find the symbol, but its identity signal
-    // cannot establish that a literal did not change. It must say unverified.
+    // The same edit, seen by a grounding that committed no body hash: the
+    // fingerprint still matches, so it reads fresh. This is the blindness, and
+    // it is asserted rather than described so that removing the body-hash
+    // comparison cannot look like an improvement.
     expect(resolveGrounding({ node: NODE, fingerprint: FINGERPRINT }, graph))
-      .toMatchObject({ state: "unresolved", health: "unverified", resolvedNode: NODE });
+      .toMatchObject({ state: "fresh", health: "fresh" });
   });
 
   it("falls back to the fingerprint when Markdown committed no body hash", () => {
@@ -278,16 +282,16 @@ describe("what is compared, and what it can see", () => {
       .toMatchObject({ state: "stale", health: "changed", currentBodyHash: "body-2" });
   });
 
-  it("treats an empty committed body hash as absent and keeps bodyless signature facts unverified", () => {
-    // An interface/type alias with no body and an empty historical hash cannot
-    // be verified by identity alone. It stays navigable, without pretending
-    // either that its signature changed or that the signature is unchanged.
+  it("treats an empty committed body hash as absent rather than as a value", () => {
+    // A node with no body (an interface, a type alias) has no body hash. An
+    // empty string committed for it must not be compared as if it meant
+    // something, or every such grounding reads stale forever.
     const graph = stubGraph({
       nodes: { [NODE]: node(NODE, null) },
       fingerprints: { [NODE]: FINGERPRINT },
     });
     expect(resolveGrounding({ node: NODE, fingerprint: FINGERPRINT, bodyHash: "" }, graph))
-      .toMatchObject({ state: "unresolved", health: "unverified", resolvedNode: NODE });
+      .toMatchObject({ state: "fresh", health: "fresh" });
   });
 
   it("cannot compare when the graph has no fingerprint for the node either", () => {

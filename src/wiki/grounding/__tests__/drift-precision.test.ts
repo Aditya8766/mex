@@ -189,10 +189,10 @@ function graphWith(evidence: ChangeEvidence | null, current = "body-2"): Groundi
 const GROUNDED: WikiGrounding = { node: NODE, fingerprint: "mh:64:00", bodyHash: "body-1" };
 
 describe("resolution of a changed body with evidence", () => {
-  it("keeps resolution read-only even when a matching body can be remembered", () => {
+  it("remembers the body a fresh resolution saw, so a later edit has an old side", () => {
     const graph = graphWith(null, "body-1");
     expect(resolveGrounding(GROUNDED, graph).health).toBe("fresh");
-    expect(graph.remembered).toEqual([]);
+    expect(graph.remembered).toEqual([`${NODE}:body-1`]);
   });
 
   it("is fresh, with a note, when only comments changed", () => {
