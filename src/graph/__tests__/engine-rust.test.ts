@@ -38,6 +38,15 @@ beforeAll(async () => {
     "}",
     "",
   ].join("\n"));
+  for (const [path, text] of [
+    ["crates/walk/src/lib.rs", "pub mod types;\n"],
+    ["crates/walk/src/types.rs", "pub fn walk_types() -> u8 { 2 }\n"],
+    ["crates/cli/src/args.rs", "pub fn parse_args() -> u8 { 3 }\n"],
+    ["crates/cli/src/main.rs", "mod args;\nuse walk::types::walk_types;\nuse crate::args::parse_args;\nfn main() { walk_types(); parse_args(); }\n"],
+  ] as const) {
+    mkdirSync(join(root, dirname(path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
   engine = createGraphEngine({ rootDir: root });
   await engine.build(root);
 });
@@ -48,6 +57,12 @@ afterAll(() => {
 });
 
 describe("Rust graph discovery", () => {
+  it("resolves crate paths from a nested crate root and sibling workspace members", () => {
+    const main = engine.searchNodes("main").find((node) => node.name === "main" && node.filePath === "crates/cli/src/main.rs")!;
+    expect(engine.getCallees(main.id).map((node) => node.filePath).sort())
+      .toEqual(["crates/cli/src/args.rs", "crates/walk/src/types.rs"]);
+  });
+
   it("binds unique self recursion and retains unverified object receivers", () => {
     const repeat = engine.searchNodes("repeat").find((node) => node.name === "repeat")!;
     const inspect = engine.searchNodes("inspect").find((node) => node.name === "inspect")!;

@@ -352,11 +352,20 @@ function resolveRustModulePath(
   if (parts.length === 0) return null;
 
   const fromDir = posixDirname(fromFile);
-  const sourceRoot = fromFile.includes("/") ? fromFile.split("/", 1)[0]! : "";
+  const sourceRoot = rustCrateRoot(fromFile, fileNodeByPath)
+    ?? (fromFile.includes("/") ? fromFile.split("/", 1)[0]! : "");
   let base = fromDir;
+  const sibling = parts[0] === "crate" || parts[0] === "self" || parts[0] === "super"
+    ? null
+    : rustWorkspaceCrateRoot(parts[0]!, fileNodeByPath);
   if (parts[0] === "crate") {
     parts.shift();
     base = sourceRoot;
+  } else if (sibling !== null) {
+    // `use ignore::types::Types` from another workspace member names that
+    // member's library root, the unique indexed `<name>/src/lib.rs`.
+    parts.shift();
+    base = sibling;
   } else if (parts[0] === "self") {
     parts.shift();
     base = rustModuleDirectory(fromFile);
@@ -381,6 +390,31 @@ function resolveRustModulePath(
   }
   return null;
 }
+
+/** The nearest ancestor holding the crate root (`lib.rs` or `main.rs`). */
+function rustCrateRoot(fromFile: string, fileNodeByPath: Map<string, string>): string | null {
+  for (let dir = posixDirname(fromFile); ; dir = posixDirname(dir)) {
+    if (fileNodeByPath.has(posixJoin(dir, "lib.rs")) || fileNodeByPath.has(posixJoin(dir, "main.rs"))) return dir;
+    if (dir === "" || dir === ".") return null;
+  }
+}
+
+/** The library root of a workspace member whose directory names the crate, when unique. */
+function rustWorkspaceCrateRoot(crate: string, fileNodeByPath: Map<string, string>): string | null {
+  let members = rustMembersByIndex.get(fileNodeByPath);
+  if (members === undefined) {
+    members = new Map();
+    for (const path of fileNodeByPath.keys()) {
+      if (!path.endsWith("/src/lib.rs")) continue;
+      const memberDir = posixDirname(posixDirname(path));
+      const member = memberDir.slice(memberDir.lastIndexOf("/") + 1).replace(/-/g, "_");
+      members.set(member, members.has(member) ? null : posixDirname(path));
+    }
+    rustMembersByIndex.set(fileNodeByPath, members);
+  }
+  return members.get(crate) ?? null;
+}
+const rustMembersByIndex = new WeakMap<Map<string, string>, Map<string, string | null>>();
 
 function rustModuleDirectory(fromFile: string): string {
   const dir = posixDirname(fromFile);
