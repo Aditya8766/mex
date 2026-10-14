@@ -124,22 +124,23 @@ Two distinct kinds of value, and the difference decides where each one lives:
 
 ## Gotchas
 
-- A moved identity must still compare its committed body baseline. Structural
-  fingerprints ignore literal spellings, so rename plus a constant edit cannot
-  clear drift. Declaration-only rename evidence requires verified historical
-  source and the file's grammar; missing source keeps the warning.
+- A moved identity is judged by its old body when this checkout has cached
+  it: a rename that also edits a literal stays changed, and only a proven
+  declaration-only rename, layout or comment edit, or changed-nearby verdict
+  clears it. Without the old body, or when the rename cannot be hashed, it is
+  judged by structure as #229 settled.
 - A structural match without a committed change baseline is unverified, even
-  for a bodyless declaration. Keep known identity navigable, but never create a
-  baseline during a read. Current missing body evidence cannot erase a prior
-  baseline during explicit regrounding.
-- Historical body caches are private optional evidence. Reads and previews do
-  not populate them; explicit successful writes may cache through contained,
-  identity-bound, exclusive private files. Cache failure cannot undo the
-  canonical write, and existing or replaced paths are not cleanup targets.
-- An old method/export list remaining a subset of current code does not prove
-  a complete-list claim. Review defaults, exclusions and negative statements
-  as such; h018's CORS list becomes false when QUERY is added. Nearby-token
-  heuristics cannot establish these claims or accept renewed baselines.
+  for a bodyless declaration. Keep known identity navigable, and record a
+  baseline only through reviewed `wiki reground`.
+- Fresh reads cache the body their committed hash names, content-addressed,
+  through contained, identity-bound, exclusive private files. Without that old
+  side every relaxation is lost: removing it raised benchmark false alarms from
+  168 to 240 with no stale fact caught. Cache failure only leaves a later edit
+  reading changed.
+- Keyword guards (defaults, negatives, complete sets) and control-flow guards
+  on nearby were measured: 36 more false alarms, no stale fact caught. h018's
+  CORS list stays touched under the anchor-and-expression rule; complete-list
+  review belongs to sync, not to nearby.
 
 - A command that reports a captured count is not evidence it wrote a durable
   baseline. Verify that the matching Markdown `bodyHash` changed as intended.

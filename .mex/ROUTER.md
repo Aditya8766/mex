@@ -30,21 +30,19 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
-- Benchmark-gap fixes are isolated on `codex/benchmark-gap-fixes`, based on
-  release-preparation commit `a86f9b6e`. Shared grounding now retains changed
-  baselines after moves, exposes missing baselines as unverified, and never
-  writes historical-body caches on ordinary reads. Complete/default/negative
-  claims require review; small h018 CORS and rename-plus-literal regressions
-  pass. Wiki index v5 uses authored description/triggers, query hits expose
-  bounded per-link health, and synthesis adopts fresh immutable source/Graph
-  evidence before exact atomic publication. Graph fixes cover assignment names,
-  location targeting, bounded callback navigation, EOL portability, and useful
-  file impact with optional call-edge direction at unchanged default budgets.
-  Long sync briefs use private files. This is working-tree implementation,
-  not a published release. Full typecheck exceeded the local 768 MiB test cap;
-  major verification and decisions are in
-  `docs/design/benchmark-gap-implementation.md`. The original checkout's
-  unrelated work remains separate.
+- Benchmark-gap fixes (PR #274, unreleased): file impact lists external
+  callers first at unchanged default limits, with optional `--direction`;
+  graph errors exit nonzero; `file:line` targets; CRLF normalized before
+  tree-sitter parsing; `obj.x = function` assignments are named nodes; C#
+  resolves types and static calls through namespaces and `using` directives;
+  Rust resolves `crate::` paths from the crate root and workspace members.
+  Fresh reads cache the body the committed hash names, so comment, layout,
+  rename and changed-nearby checks have an old side; a moved symbol is judged
+  by that old body when present, otherwise by structure; groundings without a
+  body hash read unverified until reviewed `wiki reground`. Wiki index v5 uses
+  authored description/triggers, and query hits expose per-link health. Long
+  sync briefs use private prompt files. Extractor/resolver versions changed,
+  so the first refresh after upgrading rebuilds the graph.
 - Release preparation for 0.8.4 is on `codex/release-0.8.4`, based on main
   `54f7d7a`, and includes the terminal setup overhaul and default-routing work.
   Current package metadata, capability fixtures, README installation examples,

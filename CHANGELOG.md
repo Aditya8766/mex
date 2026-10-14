@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `mex impact --direction callers|callees|both` walks proven call edges in either direction, emitting `callee` and `dependency` records with direction metadata. The default stays `callers`. `mex impact` and `mex graph query` accept an indexed `file:line` target, resolving to the narrowest node at that line.
+- `mex wiki query` hits show the cached health of each code link, not only the entity's worst one. Managed agent instructions now tell agents to run `mex wiki query "<question>" --limit 5 --json` for project-knowledge questions.
+
+### Changed
+- File impact lists the callers of a file's symbols before the file's own definitions, so the default output limits no longer cut it off before the first caller. On 200 real co-change commits across 8 repositories, impact F1 at default limits rose from 0.010 to 0.250 (precision 0.275, recall 0.229).
+- C# types and static calls (`Type.Method()`) resolve through enclosing namespaces and `using` directives, binding only when exactly one visible type answers. Rust `crate::` paths resolve from the nearest crate root, and a leading segment naming a workspace member's library resolves into that member. Against the SCIP oracle, C# call F1 rose from 0.295 to 0.549 and C# file-dependency F1 from 0 to 0.293. Rust call F1 rose from 0.345 to 0.372 and Rust file-dependency F1 from 0.006 to 0.411. Both dependency planes have precision 1.000.
+- JS/TS assignments such as `app.init = function` or `module.exports.f = () => {}` become named function nodes that can be targeted. Links to code in such files may report a moved node until they are regrounded.
+- Wiki index v5 indexes a knowledge file's frontmatter `description` and `triggers` as search hints. Run `mex wiki rebuild-index` after upgrading. On Hono's evaluation questions, natural-language hit@1 rose from 0.50 to 0.58 and keyword hit@1 from 0.75 to 0.92; off-topic questions return no more hits than before.
+- A grounding with no committed body hash that still matches by structure reads `unverified` with `GROUNDING_NO_BASELINE`, because structure cannot see an edited literal. `mex wiki reground` records a reviewed baseline. A moved symbol is judged by its old body when the checkout has seen it, so a rename that also changes a literal is reported as changed.
+- The extractor and resolver versions changed, so the first `mex graph refresh` after upgrading rebuilds the graph.
+
+### Fixed
+- Graph commands exit nonzero when they emit an error record.
+- CRLF line endings no longer change the graph: sources are normalized to LF before tree-sitter parsing.
+- Wiki synthesis (`wiki build/prepare/propose`) reads the graph through a fresh, immutable snapshot.
+- On Windows, `mex sync` passes long briefs through a private prompt file instead of the command line.
+- A recursive call outside C# links to itself only for a bare name inside a function or a `self`/`this`/`cls` receiver inside a method, so `super().save()` and same-named imported calls no longer create false self-calls.
+
 ## [0.8.4] - 2026-10-09
 
 Unpublished release preparation. The date records preparation; merge, tagging,

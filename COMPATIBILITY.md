@@ -54,30 +54,32 @@ themselves are best-effort (see [CLI surface](#cli-surface) below).
 
 ## Unreleased benchmark fixes
 
-The `codex/benchmark-gap-fixes` implementation is awaiting full owner
-verification; it is not a published release or a new version selection.
 The package-root exports and canonical Markdown grounding format are unchanged.
-Graph schema remains v4. Extractor/resolver identity changes require an explicit
-Graph refresh; preserve the prior graph for alias continuity. Wiki index v5
-adds file-level description/triggers to derived search text and requires an
-explicit `mex wiki rebuild-index`. Ordinary reads do neither operation.
+Graph schema remains v4, but the extractor and resolver versions change, so the
+first `mex graph refresh` after upgrading rebuilds the graph. JS/TS assignments
+such as `app.init = function` now become named function nodes, so links to code
+in such files may be reported as moved until they are regrounded. Wiki index v5
+adds file-level `description` and `triggers` to derived search text and needs
+an explicit `mex wiki rebuild-index`. Ordinary reads do neither operation.
 
-A structurally matching grounding without a committed body baseline is now
-`unverified`, including declarations without body evidence. A known resolved
-identity remains navigable; explicit reviewed regrounding can establish a
-baseline only when current body evidence exists. Rebinding a moved symbol does
-not accept a changed body. Declaration-only rename tolerance requires verified
-old/current source; missing source keeps the warning. Current whitespace-based
-body hashes still have ASI/indentation limits documented in the
-[implementation report](docs/design/benchmark-gap-implementation.md).
+A grounding with no committed body hash that still matches by structure is now
+`unverified` (`GROUNDING_NO_BASELINE`), because structure cannot see an edited
+literal; `mex wiki reground` records a reviewed baseline. A moved symbol is
+judged by its old body when this checkout has seen it, so a rename that also
+edits a literal is reported as changed; without the old body it is judged by
+structure, as before. Comment-only, layout-only and changed-nearby verdicts are
+unchanged.
 
 Graph JSONL errors now cause a nonzero executable exit. Targeted query/impact
 accept indexed `file:line`; equally narrow impact targets remain ambiguous.
-File impact prioritizes external callers at unchanged default limits.
-`impact --direction callees` and `--direction both` optionally walk proven call
-edges, emitting `callee` or `dependency` records and direction metadata. Default
-caller behavior is preserved. Anonymous callers may carry `enclosingSymbol`
-as bounded navigation context; it does not assert an enclosing-function call.
+File impact lists external callers before the file's own definitions at
+unchanged default limits. `impact --direction callees` and `--direction both`
+optionally walk proven call edges, emitting `callee` or `dependency` records and
+direction metadata. Anonymous callers may carry `enclosingSymbol` as navigation
+context; it does not assert an enclosing-function call. C# resolves types and
+static calls through enclosing namespaces and `using` directives, and Rust
+resolves `crate::` paths from the crate root and sibling workspace members, so
+those graphs gain cross-file edges.
 
 Wiki query hits may contain bounded explanations of cached per-link health
 verdicts; ordinary queries do not revalidate current code through Graph. Optional
