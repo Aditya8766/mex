@@ -270,13 +270,15 @@ function explainDrift(
   if (evidence === null) return "no-baseline";
   if (evidence.commentOnly) return { kind: "comment-only" };
   if (evidence.layoutOnly) return { kind: "layout-only" };
-  if (grounding.node !== nodeId && evidence.renameOnly === true) return "rename-only";
-  // A rebind whose rename cannot be proven either way has no evidence.
-  if (grounding.node !== nodeId && evidence.renameOnly === undefined) return "no-baseline";
+  const rebound = grounding.node !== nodeId;
+  if (rebound && evidence.renameOnly === true) return "rename-only";
   if (evidence.oldBody === null || evidence.newBody === null) return "no-baseline";
-  if (context.fact === undefined) return null;
-  const verdict = factDrift(context.fact, evidence.oldBody, evidence.newBody);
-  return verdict.kind === "nearby" ? { kind: "changed-nearby", anchors: verdict.anchors } : null;
+  if (context.fact !== undefined) {
+    const verdict = factDrift(context.fact, evidence.oldBody, evidence.newBody);
+    if (verdict.kind === "nearby") return { kind: "changed-nearby", anchors: verdict.anchors };
+  }
+  // A rebind whose rename cannot be proven either way has no evidence for it.
+  return rebound && evidence.renameOnly === undefined ? "no-baseline" : null;
 }
 
 /** One entity's groundings, resolved together. */
