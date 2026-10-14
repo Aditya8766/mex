@@ -220,9 +220,8 @@ function compare(
     };
   }
 
-  // Legacy references without a change baseline are compared by structure:
-  // this sees a symbol being rewritten and misses a constant being edited,
-  // which is why anything mex writes commits a body hash.
+  // Legacy references without a change baseline can still reveal structural
+  // edits. A structural match cannot establish freshness for a code body.
   const currentFingerprint = graph.getFingerprint(node.id);
   if (currentFingerprint === null) {
     return {
@@ -238,7 +237,10 @@ function compare(
   // re-minted (#240), and reading that as this node's code changing reported
   // `changed` for groundings whose every token was the same.
   if (sameFingerprintCode(currentFingerprint, grounding.fingerprint)) {
-    return { state: "fresh", health: "fresh", node: declaredNode, resolvedNode: node.id, rebound, bodyHash: currentBodyHash };
+    return {
+      state: "unresolved", health: "unverified", node: declaredNode, resolvedNode: node.id,
+      reason: "No committed body baseline; matching structure cannot verify unchanged literals or signatures. Review the fact before recording a baseline.",
+    };
   }
 
   return {
