@@ -52,7 +52,7 @@ shipping new versions.
 If you only use the `mex` CLI, most of this still applies, but CLI flags
 themselves are best-effort (see [CLI surface](#cli-surface) below).
 
-## Unreleased benchmark fixes
+## Graph and Wiki changes in 0.8.4
 
 The package-root exports and canonical Markdown grounding format are unchanged.
 Graph schema remains v4, but the extractor and resolver versions change, so the
@@ -91,8 +91,8 @@ use private prompt files; input over 1 MiB refuses instead of truncating.
 
 ## Upgrading to 0.8.4
 
-Release preparation is dated October 9, 2026; 0.8.4 remains unpublished until
-merge, tagging, and publication. The commands below apply once it is available.
+0.8.4 is dated October 14, 2026. The commands below apply once the package is
+available on npm.
 
 **Upgrade everyone sharing a scaffold before committing new groundings.**
 0.8.4 writes lossless `mh2:` fingerprints; 0.8.3 and earlier cannot read them and
@@ -100,7 +100,8 @@ can report false missing or malformed grounding. Existing `mh:` fingerprints
 remain supported, compare by value, and are not rewritten by ordinary reads.
 `mex graph compact-fingerprints --dry-run` previews an optional explicit
 conversion; apply it only after the team's clients have been upgraded. Graph
-schema remains v4; Wiki and canonical Relay artifact versions are unchanged.
+schema remains v4; the disposable Wiki index advances to v5 and requires an
+explicit rebuild. Canonical Markdown and Relay artifact versions are unchanged.
 
 Install `mex-agent@0.8.4`, preserve the existing graph, then run:
 

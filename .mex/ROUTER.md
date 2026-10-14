@@ -18,7 +18,7 @@ edges:
     condition: when refreshing the release README, badges, community links, or architecture illustrations
   - target: patterns/hub-first-run-onboarding.md
     condition: when adding or changing the Hub first-run tour or its checkout-local completion state
-last_updated: 2026-10-13
+last_updated: 2026-10-14
 ---
 
 # Session Bootstrap
@@ -30,7 +30,16 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
-- Benchmark-gap fixes (PR #274, unreleased): file impact lists external
+- 0.8.4 release audit: main is at `cdb7712`, with PR #271 and #274 merged.
+  Exact-commit CI run `38535491639` passes Node 22/24, portability, browser,
+  packed-install, evaluators, and pinned performance. Release finalization
+  includes all merged fixes in 0.8.4, targets October 14, corrects the Wiki index
+  v5 rebuild requirement across English/translated upgrade prose, and credits
+  the verified contributors since 0.8.3. The maintainer authorized commit/push,
+  tagging, and GitHub publication after final-commit CI; actual npm publication
+  is reserved for the maintainer, with an agent-run dry run. See
+  `docs/design/0.8.4-release-plan.md` and `patterns/release-preparation.md`.
+- Benchmark-gap fixes (PR #274, merged into main for 0.8.4): file impact lists external
   callers first at unchanged default limits, with optional `--direction`;
   graph errors exit nonzero; `file:line` targets; CRLF normalized before
   tree-sitter parsing; `obj.x = function` assignments are named nodes; C#
@@ -43,13 +52,15 @@ Then read this file fully before doing anything else in this session.
   authored description/triggers, and query hits expose per-link health. Long
   sync briefs use private prompt files. Extractor/resolver versions changed,
   so the first refresh after upgrading rebuilds the graph.
-- Release preparation for 0.8.4 is on `codex/release-0.8.4`, based on main
-  `54f7d7a`, and includes the terminal setup overhaul and default-routing work.
+- Release preparation for 0.8.4 merged through PR #271 from
+  `codex/release-0.8.4`, originally based on main `54f7d7a`, and includes the
+  terminal setup overhaul and default-routing work.
   Current package metadata, capability fixtures, README installation examples,
   release notes, and upgrade guidance target 0.8.4. Historical release records
   retain their versions. Teams must upgrade together before sharing new `mh2:`
-  groundings; older clients cannot read them. Preparation and PR creation are
-  authorized; publication is still pending. Verification and known follow-ups
+  groundings; older clients cannot read them. GitHub publication is authorized;
+  actual npm publication is reserved for the maintainer. Verification and known
+  follow-ups
   are tracked in `docs/design/0.8.4-release-plan.md`.
 - PR #271 review fixes add final stdin shutdown, bounded terminal warning history,
   a clean copyable Hub link, width-aware control labels, explicit paused outcomes,
@@ -58,7 +69,7 @@ Then read this file fully before doing anything else in this session.
   is an unrelated incomplete parse; partial-file and missing-target evidence
   remains unverified, and source/configuration drift still refuses. Windows
   packed CLI discovery compares canonical paths. Release performance limits
-  remain unchanged; the final exact-head CI run is still required.
+  remain unchanged; the merged code's exact-commit CI passed as recorded above.
 - The Windows follow-up waits for Enter after the manual prompt and Hub link
   view in a short-lived child process. A parent console read between HUD mounts
   left the next HUD without input on Windows. `mex check` now checks groundings

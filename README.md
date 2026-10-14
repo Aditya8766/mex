@@ -397,7 +397,7 @@ For an already completed 0.8.0–0.8.3 setup, this refreshes the managed skills 
 > [!WARNING]
 > **Upgrade everyone sharing the scaffold to 0.8.4 before committing new or updated groundings.** This release writes compact `mh2:` fingerprints, which earlier versions—including 0.8.3—cannot read. Existing `mh:` fingerprints remain readable; upgrading alone neither rewrites files nor changes their grounding meaning.
 
-The Graph and Wiki index schemas are unchanged. The first graph refresh after upgrading re-extracts the corpus once for the new extraction cache. To convert existing fingerprints together, preview `mex graph compact-fingerprints --dry-run`, then run `mex graph compact-fingerprints` and review the diff before committing. See [Upgrading to 0.8.4](COMPATIBILITY.md#upgrading-to-084) for the full sequence.
+The Graph schema remains v4; the disposable Wiki index advances to v5, so run `mex wiki rebuild-index` after upgrading. The first graph refresh re-extracts the corpus once for the new extraction cache and extractor/resolver versions. To convert existing fingerprints together, preview `mex graph compact-fingerprints --dry-run`, then run `mex graph compact-fingerprints` and review the diff before committing. See [Upgrading to 0.8.4](COMPATIBILITY.md#upgrading-to-084) for the full sequence.
 
 **Keep your existing graph when upgrading from 0.8.2 or earlier.** The TypeScript identity changes introduced in 0.8.3 can change node IDs. Refresh before syncing so MEX can map the old IDs to their replacements:
 

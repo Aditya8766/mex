@@ -4,31 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-14
+
 ### Added
+
 - `mex impact --direction callers|callees|both` walks proven call edges in either direction, emitting `callee` and `dependency` records with direction metadata. The default stays `callers`. `mex impact` and `mex graph query` accept an indexed `file:line` target, resolving to the narrowest node at that line.
 - `mex wiki query` hits show the cached health of each code link, not only the entity's worst one. Managed agent instructions now tell agents to run `mex wiki query "<question>" --limit 5 --json` for project-knowledge questions.
-
-### Changed
-- File impact lists the callers of a file's symbols before the file's own definitions, so the default output limits no longer cut it off before the first caller. On 200 real co-change commits across 8 repositories, impact F1 at default limits rose from 0.010 to 0.250 (precision 0.275, recall 0.229).
-- C# types and static calls (`Type.Method()`) resolve through enclosing namespaces and `using` directives, binding only when exactly one visible type answers. Rust `crate::` paths resolve from the nearest crate root, and a leading segment naming a workspace member's library resolves into that member. Against the SCIP oracle, C# call F1 rose from 0.295 to 0.549 and C# file-dependency F1 from 0 to 0.293. Rust call F1 rose from 0.345 to 0.372 and Rust file-dependency F1 from 0.006 to 0.411. Both dependency planes have precision 1.000.
-- JS/TS assignments such as `app.init = function` or `module.exports.f = () => {}` become named function nodes that can be targeted. Links to code in such files may report a moved node until they are regrounded.
-- Wiki index v5 indexes a knowledge file's frontmatter `description` and `triggers` as search hints. Run `mex wiki rebuild-index` after upgrading. On Hono's evaluation questions, natural-language hit@1 rose from 0.50 to 0.58 and keyword hit@1 from 0.75 to 0.92; off-topic questions return no more hits than before.
-- A grounding with no committed body hash that still matches by structure reads `unverified` with `GROUNDING_NO_BASELINE`, because structure cannot see an edited literal. `mex wiki reground` records a reviewed baseline. A moved symbol is judged by its old body when the checkout has seen it, so a rename that also changes a literal is reported as changed.
-- The extractor and resolver versions changed, so the first `mex graph refresh` after upgrading rebuilds the graph.
-
-### Fixed
-- Graph commands exit nonzero when they emit an error record.
-- CRLF line endings no longer change the graph: sources are normalized to LF before tree-sitter parsing.
-- Wiki synthesis (`wiki build/prepare/propose`) reads the graph through a fresh, immutable snapshot.
-- On Windows, `mex sync` passes long briefs through a private prompt file instead of the command line.
-- A recursive call outside C# links to itself only for a bare name inside a function or a `self`/`this`/`cls` receiver inside a method, so `super().save()` and same-named imported calls no longer create false self-calls.
-
-## [0.8.4] - 2026-10-09
-
-Unpublished release preparation. The date records preparation; merge, tagging,
-and publication remain separate release steps.
-
-### Added
 - `mex wiki link-sections` previews missing `refines` relationships between existing section entities and their enclosing knowledge; `--apply` writes the structural links without changing facts or grounding baselines. The bounded Hub graph keeps a limited number of linked parents visible.
 - `mex wiki upgrade` previews a bounded review of broad code-linked knowledge for one fact per entity. `--apply` uses the sync agent chooser, with an optional `--tool` override and a manual prompt when no CLI is available. It requires a fresh graph, refuses flagged candidate groundings, preserves existing ids as overviews, and does not rerun setup. `mex wiki reground <id>` previews re-recording a reviewed entity's code links and requires `--apply` to write them.
 - `mex graph compact-fingerprints` re-encodes every committed `mh:` fingerprint as `mh2:` in one explicit pass, for a team that wants the smaller scaffold now rather than file by file. `--dry-run` reports the files and byte savings without writing, and `--json` returns the result. It needs no code graph, rewrites only the fingerprint values in root, `mex:` and section-entity `grounds_to` lists with their quoting kept, checks that every grounding decodes to the same fingerprint before publishing a file, skips Team records, and leaves a file edited during the pass untouched. On five populated scaffolds it re-encoded all 121 fingerprints, changing one line per fingerprint and nothing else, and a second run found nothing to do (#233).
@@ -38,6 +19,13 @@ and publication remain separate release steps.
 - `mex pattern add` adds the new pattern to the Wiki when the scaffold already uses it, through the same locked, audited migration `mex wiki migrate` runs, so its template edge also becomes a relation. A scaffold with no Wiki entity, or a path `wiki.exclude` hides, keeps the plain template, and a failure leaves the file in place and names `mex wiki migrate` (#227).
 
 ### Changed
+
+- File impact lists the callers of a file's symbols before the file's own definitions, so the default output limits no longer cut it off before the first caller. On 200 real co-change commits across 8 repositories, impact F1 at default limits rose from 0.010 to 0.250 (precision 0.275, recall 0.229).
+- C# types and static calls (`Type.Method()`) resolve through enclosing namespaces and `using` directives, binding only when exactly one visible type answers. Rust `crate::` paths resolve from the nearest crate root, and a leading segment naming a workspace member's library resolves into that member. Against the SCIP oracle, C# call F1 rose from 0.295 to 0.549 and C# file-dependency F1 from 0 to 0.293. Rust call F1 rose from 0.345 to 0.372 and Rust file-dependency F1 from 0.006 to 0.411. Both dependency planes have precision 1.000.
+- JS/TS assignments such as `app.init = function` or `module.exports.f = () => {}` become named function nodes that can be targeted. Links to code in such files may report a moved node until they are regrounded.
+- Wiki index v5 indexes a knowledge file's frontmatter `description` and `triggers` as search hints. Run `mex wiki rebuild-index` after upgrading. On Hono's evaluation questions, natural-language hit@1 rose from 0.50 to 0.58 and keyword hit@1 from 0.75 to 0.92; off-topic questions return no more hits than before.
+- A grounding with no committed body hash that still matches by structure reads `unverified` with `GROUNDING_NO_BASELINE`, because structure cannot see an edited literal. `mex wiki reground` records a reviewed baseline. A moved symbol is judged by its old body when the checkout has seen it, so a rename that also changes a literal is reported as changed.
+- The extractor and resolver versions changed, so the first `mex graph refresh` after upgrading rebuilds the graph.
 - `mex setup` now defaults to a keyboard-driven terminal HUD with an ASCII banner, tool selection before writes, real graph phase/file counts, and elapsed/quiet timers. Enter selects the highlighted tool and starts; Space selects additional integrations. Bare `mex` opens terminal setup for an incomplete project and keeps established code projects on Hub. Use `mex setup --browser` for browser setup, `mex hub` for Hub, and `mex tui` for the terminal dashboard; `--cli` remains a supported alias for the default setup route.
 - Interactive terminal population hands the real terminal to an available selected Claude Code or Codex CLI, then resumes MEX after that session exits. Incomplete work offers retry, a copyable manual prompt, file checks, or Finish later. Setup reports complete, paused, failed, and cancelled outcomes. `--yes`, piped input/output, and CI remain plain and never launch an agent or a long-lived Hub; repeatable `--tool` flags or `--tool none` select integrations without interaction. `--dry-run` stays read-only.
 - `mex check`, Wiki queries, and Hub views share one fact-aware code-link verdict. Comment-only and formatting-only edits remain fresh; changes proved away from the named fact report `changed-nearby`; missing or ambiguous links remain flagged. Setup/GROW guidance asks for one code-linked claim per entity, grounded to every dependency. `mex sync` reviews flagged Wiki facts in the same agent session, re-records only reviewed links, rebuilds the Wiki index, and checks again. `mex wiki validate` checks structure; use `mex check` for code-link health.
@@ -49,6 +37,12 @@ and publication remain separate release steps.
 - `STALE_FILE` no longer counts every repository commit. Its commit signal now counts only commits made since the file last changed that touched a path the file references: its path claims, and the files of the code it grounds (committed `file`, else the node's file in the graph, plus inline `mex://` anchors). A scaffold file that references no paths is judged by its age and `last_updated` alone. Paths that are scaffold knowledge, URLs, and anything that would match the whole repository are not counted. `SETUP.md`, `SYNC.md`, `patterns/README.md` and `patterns/INDEX.md` are text mex ships, kept current by `mex pattern add` and the index-sync check, so they are no longer reported. On mex's own scaffold, `STALE_FILE` findings fell from 16 to 1. The previous counts ran from 50 to 289 commits, and the same files now count 0 to 6 commits to their referenced paths. The day and commit thresholds are unchanged (#237).
 
 ### Fixed
+
+- Graph commands exit nonzero when they emit an error record.
+- CRLF line endings no longer change the graph: sources are normalized to LF before tree-sitter parsing.
+- Wiki synthesis (`wiki build/prepare/propose`) reads the graph through a fresh, immutable snapshot.
+- On Windows, `mex sync` passes long briefs through a private prompt file instead of the command line.
+- A recursive call outside C# links to itself only for a bare name inside a function or a `self`/`this`/`cls` receiver inside a method, so `super().save()` and same-named imported calls no longer create false self-calls.
 - Returning from terminal setup's manual prompt or Hub link view no longer hangs on Windows. A short-lived child process now waits for Enter on the inherited terminal, as the native agent handoff does, so MEX never reads the console between HUD mounts. Before, Enter left the HUD without input, and neither Ctrl+C nor another Enter released the process.
 - `mex check` now checks groundings when the graph's only fault is an incompletely parsed file. Before, one unparseable fixture skipped every grounding and still scored 100. Links in fully parsed files now get the same verdicts as on a fresh graph. A link into a partially parsed file, or to a node the graph lacks, is `GROUNDING_UNVERIFIED` and names the files to fix or exclude. Nothing is reconciled across the parse gap, and configuration drift still skips grounding.
 - `mex check` discovers `package.json` and `pyproject.toml` manifests at any depth, ignoring `node_modules` and `.git`, and the root manifest keeps precedence (#250). Yarn and pnpm built-in commands are no longer reported as `DEAD_COMMAND`, and `patterns/INDEX.md` frontmatter edges count toward index synchronization (#203, #251).
@@ -67,10 +61,10 @@ and publication remain separate release steps.
 
 ### Compatibility
 
-- `CODE_GRAPH_UNAVAILABLE` is an informational Wiki diagnostic for commands that require graph evidence; `wiki validate` no longer serves as a code-link health gate. Use `mex check` for that purpose, and run `mex wiki rebuild-index` after refreshing the graph to update existing indexed health. Graph schema remains v4; Wiki and canonical Relay artifact versions remain unchanged.
-- Earlier MEX versions cannot read `mh2:` fingerprints. On a Hono scaffold re-encoded to `mh2:`, 0.8.3 reported 10 groundings it could not reconcile as `GROUNDING_GONE`, and its Wiki rejected 11 groundings as malformed and 5 entities as unparseable, breaking 3 relations; capture also treats such a grounding as changed and asks for a review. Upgrade everyone who shares a scaffold before anyone commits new groundings. Graph and Wiki index schemas are unchanged (#233).
-- A root `type` key is optional and additive. Earlier versions ignore it and leave the file outside the Wiki as before; once migrated it is an ordinary `mex.type`. Adoption may now remove a root `type` key, alongside `grounds_to` and `topics`. `KNOWLEDGE_NOT_ADOPTED` and `KNOWLEDGE_UNTYPED` are new `IssueCode` values and new Wiki diagnostic codes. Graph and Wiki index schemas are unchanged (#227).
-- `codeHash` is an optional, additive `grounds_to` field; graph and Wiki index schemas are unchanged. Earlier versions read scaffolds that carry it, ignore it, and report every changed body as `GROUNDING_DRIFT` as before. `GROUNDING_COMMENT_DRIFT` is a new `IssueCode` value (#236).
+- `CODE_GRAPH_UNAVAILABLE` is an informational Wiki diagnostic for commands that require graph evidence; `wiki validate` no longer serves as a code-link health gate. Use `mex check` for that purpose, and run `mex wiki rebuild-index` after refreshing the graph to update existing indexed health. Graph schema remains v4; the disposable Wiki index advances to v5 and needs an explicit rebuild. Canonical Markdown and Relay artifact versions remain unchanged.
+- Earlier MEX versions cannot read `mh2:` fingerprints. On a Hono scaffold re-encoded to `mh2:`, 0.8.3 reported 10 groundings it could not reconcile as `GROUNDING_GONE`, and its Wiki rejected 11 groundings as malformed and 5 entities as unparseable, breaking 3 relations; capture also treats such a grounding as changed and asks for a review. Upgrade everyone who shares a scaffold before anyone commits new groundings. The fingerprint conversion itself changes neither index schema (#233).
+- A root `type` key is optional and additive. Earlier versions ignore it and leave the file outside the Wiki as before; once migrated it is an ordinary `mex.type`. Adoption may now remove a root `type` key, alongside `grounds_to` and `topics`. `KNOWLEDGE_NOT_ADOPTED` and `KNOWLEDGE_UNTYPED` are new `IssueCode` values and new Wiki diagnostic codes. Knowledge adoption itself changes neither index schema (#227).
+- `codeHash` is an optional, additive `grounds_to` field; adding it changes neither index schema. Earlier versions read scaffolds that carry it, ignore it, and report every changed body as `GROUNDING_DRIFT` as before. `GROUNDING_COMMENT_DRIFT` is a new `IssueCode` value (#236).
 
 - Public `DriftIssue` adds optional `entity` and `verdict` fields. `IssueCode` adds `GROUNDING_COMMENT_DRIFT`, `GROUNDING_NEARBY_DRIFT`, `GROUNDING_NO_BASELINE`, `GROUNDING_MOVED`, `KNOWLEDGE_NOT_ADOPTED`, and `KNOWLEDGE_UNTYPED`. No package-root export or required argument is removed. The maintainer-selected 0.8.4 release is a scoped exception to the usual minor-version rule for additive public fields; see [Compatibility](COMPATIBILITY.md#upgrading-to-084).
 

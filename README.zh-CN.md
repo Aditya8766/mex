@@ -364,7 +364,7 @@ mex skills sync
 > [!WARNING]
 > **提交新增或修改的代码关联前，请让所有共享脚手架的成员升级到 0.8.4。** 早期版本（包括 0.8.3）无法读取紧凑的 `mh2:` 指纹。现有 `mh:` 指纹仍受支持；仅升级软件包不会重写文件或改变代码关联的含义。
 
-Graph 和 Wiki 索引的 schema 不变。升级后首次运行 `mex graph refresh` 会为新的提取缓存重新提取一次代码。如需一次性转换现有指纹，先预览 `mex graph compact-fingerprints --dry-run`，再运行 `mex graph compact-fingerprints`，审阅差异后提交。完整步骤见[升级到 0.8.4](COMPATIBILITY.md#upgrading-to-084)。
+Graph 的 schema 保持 v4；可重新生成的 Wiki 索引升级到 v5，因此升级后请运行 `mex wiki rebuild-index`。首次运行 `mex graph refresh` 会为新的提取缓存及提取器和解析器版本重新提取一次代码。如需一次性转换现有指纹，先预览 `mex graph compact-fingerprints --dry-run`，再运行 `mex graph compact-fingerprints`，审阅差异后提交。完整步骤见[升级到 0.8.4](COMPATIBILITY.md#upgrading-to-084)。
 
 **如果从 0.8.2 或更早版本升级，请保留现有 Graph。** 0.8.3 引入的 TypeScript 标识变更可能改变节点 ID。先运行 `mex graph refresh`，再运行 `mex sync`，以保留新旧 ID 的映射。请检查有歧义或缺失的 grounding，通过 Git 提交 scaffold 变更。若 scaffold 已变更，请运行 `mex wiki rebuild-index` 刷新 Wiki 索引。新克隆或未保留旧 Graph 的重建只能依靠已提交的指纹进行匹配，可能需要手动重新关联代码。详见 [0.8.3 迁移步骤](COMPATIBILITY.md#upgrading-to-083)。
 

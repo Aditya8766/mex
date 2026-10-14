@@ -2,7 +2,7 @@
 edges:
   - target: syntax-extractor-review.md
     condition: when adding or reviewing syntax-only language extractors
-last_updated: 2026-10-11
+last_updated: 2026-10-14
 ---
 
 # Pattern Index
@@ -11,6 +11,7 @@ Lookup table for project-specific pattern files.
 
 | Pattern | Use when |
 |---------|----------|
+| [`release-preparation.md`](release-preparation.md) | Auditing merged release scope, exact-commit CI, version pins, upgrade notes, and package contents before publication |
 | [`dependency-manifest-discovery.md`](dependency-manifest-discovery.md) | Reviewing recursive dependency discovery, manifest precedence, containment, or corpus limits |
 | [`usage-telemetry.md`](usage-telemetry.md) | Changing CLI/Hub event coverage, opt-out, queue delivery, or usage measurement |
 | [`hub-first-run-onboarding.md`](hub-first-run-onboarding.md) | Adding or changing the checkout-local first-run Hub tour |

@@ -1,7 +1,6 @@
 # mex 0.8.4 — Terminal setup and clearer knowledge checks
 
-Prepared October 9, 2026. This release is unpublished until the reviewed changes
-are merged, tagged, and published.
+October 14, 2026.
 
 MEX 0.8.4 makes terminal setup the default, adds a native interactive agent
 handoff, and reports setup progress and failures more clearly. It also includes
@@ -92,9 +91,32 @@ earlier cannot read that encoding.**
   verifies MEX rather than trusting an executable's name. Hub groups repeated
   Wiki diagnostics with expandable detail.
 
+## Graph navigation and Wiki search fixes
+
+- File impact lists external callers before the file's own definitions at the
+  existing default limits. `mex impact --direction callers|callees|both` walks
+  proven call edges; the default remains callers. Impact and targeted Graph
+  queries accept an indexed `file:line` target.
+- C# resolves types and static calls through enclosing namespaces and `using`
+  directives. Rust resolves crate paths and sibling workspace libraries. Outside
+  C#, recursive calls link to themselves only when lexical evidence proves it.
+- JS/TS assignments such as `app.init = function` become named nodes. CRLF
+  sources produce the same graph as LF sources, and Graph error records now
+  cause a nonzero executable exit.
+- Wiki index v5 includes authored `description` and `triggers` in search text;
+  run `mex wiki rebuild-index` after upgrading. Query hits expose cached health
+  for each code link. Managed instructions point agents to bounded Wiki queries
+  for project-knowledge questions.
+- A grounding that matches only by structure and has no committed body hash
+  remains unverified until reviewed regrounding. When this checkout has the old
+  body, a moved symbol is judged
+  against it, so a rename that edits a literal is reported as changed.
+- Wiki synthesis uses a fresh immutable Graph snapshot. Long sync briefs use
+  private prompt files, avoiding Windows command-line limits.
+
 ## Upgrade an existing project
 
-After publication, install the pinned release and preserve your existing graph:
+Once 0.8.4 is available on npm, install the pinned release and preserve your existing graph:
 
 ```bash
 npm install -g mex-agent@0.8.4
@@ -118,7 +140,8 @@ skills are an alternative installer; do not overlay them on managed copies.
 A completed setup does not need to run again solely for this package upgrade.
 
 Node.js 22.5 or newer with SQLite FTS5 remains required. Graph schema stays v4;
-Wiki and canonical Relay artifact versions are unchanged. Public `DriftIssue`
+the disposable Wiki index advances to v5 and requires an explicit rebuild.
+Canonical Markdown and Relay artifact versions are unchanged. Public `DriftIssue`
 adds optional fields and `IssueCode` adds cases; exhaustive consumers should
 review [the API compatibility notes](COMPATIBILITY.md#additive-api-changes-in-084).
 
@@ -137,4 +160,14 @@ contract. These are separate follow-ups; this release does not claim every
 setup or completion path is reliable.
 
 **Full changelog:** [v0.8.3…v0.8.4](https://github.com/mex-memory/mex/compare/v0.8.3...v0.8.4).
-The comparison becomes available when the release tag is published.
+
+## Contributors
+
+Thanks to everyone who contributed code, tests, documentation, and integration
+work since 0.8.3:
+
+- @theyashasvipandey — graph refresh and Scope performance, compact fingerprints, Wiki search and adoption, grounding verdicts and maintenance, Windows setup fixes, and release integration ([#252](https://github.com/mex-memory/mex/pull/252), [#254](https://github.com/mex-memory/mex/pull/254), [#255](https://github.com/mex-memory/mex/pull/255), [#257](https://github.com/mex-memory/mex/pull/257), [#258](https://github.com/mex-memory/mex/pull/258), [#259](https://github.com/mex-memory/mex/pull/259), [#260](https://github.com/mex-memory/mex/pull/260), [#263](https://github.com/mex-memory/mex/pull/263), [#266](https://github.com/mex-memory/mex/pull/266), [#271](https://github.com/mex-memory/mex/pull/271), [#274](https://github.com/mex-memory/mex/pull/274)).
+- @MEETNANDA8107 — nested dependency-manifest discovery and checker false-positive fixes ([#250](https://github.com/mex-memory/mex/pull/250), [#251](https://github.com/mex-memory/mex/pull/251)).
+- @jamalkamaladdin — brace-expanded script names and command dependency claims ([#249](https://github.com/mex-memory/mex/pull/249)).
+- @nitesh32 — verified MEX CLI discovery instead of trusting an executable's name ([#262](https://github.com/mex-memory/mex/pull/262)).
+- @theDakshJaitly — terminal setup redesign, failure reporting, grounding/Wiki/Graph benchmark fixes, release verification, and finalization ([#271](https://github.com/mex-memory/mex/pull/271), [#274](https://github.com/mex-memory/mex/pull/274)).
