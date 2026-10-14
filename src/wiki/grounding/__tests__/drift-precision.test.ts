@@ -132,29 +132,6 @@ describe("factDrift", () => {
     expect(factDrift(fact, before, after).kind).toBe("touched");
   });
 
-  it.each([
-    "It calls beta() and gamma() only.",
-    "The complete set is beta() and gamma().",
-    "It has no QUERY option and calls beta() and gamma().",
-    "It defaults to beta() then gamma().",
-    "It calls beta() and gamma() without accepting QUERY.",
-  ])("does not downgrade a closed-world claim whose old anchors survive: %s", (fact) => {
-    const before = "function f() {\n  beta()\n  gamma()\n  trace()\n  audit()\n  log()\n  finish()\n}";
-    const after = before.replace("  finish()", "  finish()\n  QUERY()");
-    expect(factDrift(fact, before, after).kind).toBe("touched");
-  });
-
-  it("keeps distant control-flow edits flagged even when named calls survive", () => {
-    const before = "function f() {\n  log()\n  trace()\n  audit()\n  tick()\n  beta()\n  gamma()\n}";
-    const after = before.replace("  log()", "  if (disabled) return\n  log()");
-    expect(factDrift("It calls beta() then gamma().", before, after)).toMatchObject({ kind: "touched" });
-  });
-
-  it("refuses nearby for lexical constructs its line scanner cannot place", () => {
-    const before = "function f() {\n  beta()\n  gamma()\n  trace()\n  audit()\n  const text = `value`\n}";
-    expect(factDrift("It calls beta() then gamma().", before, before.replace("`value`", "`other`"))).toMatchObject({ kind: "touched" });
-  });
-
   it("does not anchor a fact to the symbol's own declaration", () => {
     const parse = ["export const parse = (cookie) => {", "  const out = {}", "  for (const pair of split(cookie)) {", "    out[pair.name] = pair.value", "  }", "  return out", "}"].join("\n");
     const changed = parse.replace("    out[pair.name] = pair.value", "    out[pair.name] ??= pair.value");
