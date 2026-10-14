@@ -30,14 +30,14 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
-- 0.8.4 release audit: main is at `cdb7712`, with PR #271 and #274 merged.
-  Exact-commit CI run `38535491639` passes Node 22/24, portability, browser,
-  packed-install, evaluators, and pinned performance. Release finalization
-  includes all merged fixes in 0.8.4, targets October 14, corrects the Wiki index
-  v5 rebuild requirement across English/translated upgrade prose, and credits
-  the verified contributors since 0.8.3. The maintainer authorized commit/push,
-  tagging, and GitHub publication after final-commit CI; actual npm publication
-  is reserved for the maintainer, with an agent-run dry run. See
+- 0.8.4 is tagged and published on GitHub at `v0.8.4`, commit `56db5cf`, dated
+  October 14. Exact-release CI run `38571566062` passed Node 22/24, portability,
+  browser, packed-install, evaluators, and pinned performance. Finalization
+  includes PR #271/#274, Wiki index v5 rebuild guidance across English and
+  translated READMEs, and verified contributors at the bottom of release notes.
+  The public/latest npm publish dry run passed on the verified tarball under
+  ignored `test-results/releases/0.8.4/`. npm remains at 0.8.3 at this completion
+  checkpoint; actual publication is reserved for the maintainer. See
   `docs/design/0.8.4-release-plan.md` and `patterns/release-preparation.md`.
 - Benchmark-gap fixes (PR #274, merged into main for 0.8.4): file impact lists external
   callers first at unchanged default limits, with optional `--direction`;
@@ -58,7 +58,7 @@ Then read this file fully before doing anything else in this session.
   Current package metadata, capability fixtures, README installation examples,
   release notes, and upgrade guidance target 0.8.4. Historical release records
   retain their versions. Teams must upgrade together before sharing new `mh2:`
-  groundings; older clients cannot read them. GitHub publication is authorized;
+  groundings; older clients cannot read them. GitHub publication is complete;
   actual npm publication is reserved for the maintainer. Verification and known
   follow-ups
   are tracked in `docs/design/0.8.4-release-plan.md`.
