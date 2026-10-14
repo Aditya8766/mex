@@ -31,6 +31,7 @@ import {
   MexPortError,
 } from "../team/contracts/shared.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
+import { GraphStore } from "./db/store.js";
 import type { GraphEngine, SourceChunkMatch } from "./engine.js";
 import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
 import { FingerprintStore } from "./fingerprint-store.js";
@@ -57,6 +58,9 @@ const MAX_CURSOR_BYTES = 4 * 1024;
 const MAX_QUERY_CHARS = 256;
 const MAX_SYMBOL_ID_CHARS = 512;
 const MAX_GROUNDING_SYMBOLS = 50;
+const MAX_SYNTHESIS_NODES = 100_000;
+const MAX_SYNTHESIS_EDGES = 500_000;
+const MAX_SYNTHESIS_METADATA_BYTES = 32 * 1024 * 1024;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_RELATION_RESULTS = 500;
 const MAX_SIGNATURE_CHARS = 4 * 1024;
@@ -181,6 +185,22 @@ export interface RepositoryGraphPreparedPublication<T> {
   preflight(): void | Promise<void>;
   commit(): T | Promise<T>;
   discard(): void | Promise<void>;
+}
+
+/** @internal Structural synthesis reader; no Wiki dependency or raw database escapes. */
+export interface RepositoryGraphSynthesisReader {
+  listFiles(): Array<{ path: string }>;
+  nodesInFile(path: string): Array<{ id: string; kind: string }>;
+  describeNode(id: string): GraphNode | null;
+  callersOf(id: string): string[];
+  calleesOf(id: string): string[];
+  outgoingEdges(id: string): Array<{ source: string; target: string; kind: string }>;
+  readFileLines(path: string): string[];
+}
+
+export interface RepositoryGraphSynthesisSnapshot {
+  codeGraph: RepositoryGraphSynthesisReader;
+  graph: RepositoryGraphGroundingSnapshot;
 }
 
 class GroundingSnapshotCallbackError {
@@ -371,6 +391,112 @@ export class RepositoryGraphPort implements GraphPort {
       if (error instanceof GroundingSnapshotCallbackError) throw error.cause;
       throw error;
     }
+  }
+
+  /** Synthesis requires a complete fresh corpus, including its source evidence. */
+  async withFreshSynthesisSnapshot<T>(
+    callback: (snapshot: RepositoryGraphSynthesisSnapshot) => T | Promise<T>,
+  ): Promise<T> {
+    try {
+      await prepareCodeHashing().catch(() => undefined);
+      return (await this.#withFresh(async (context) => {
+        const snapshot = this.#synthesisSnapshot(context);
+        try { return await callback(snapshot.value); }
+        catch (error) { throw new GroundingSnapshotCallbackError(error); }
+        finally { snapshot.revoke(); }
+      })).value;
+    } catch (error) {
+      if (error instanceof GroundingSnapshotCallbackError) throw error.cause;
+      throw error;
+    }
+  }
+
+  /** Publish exact prepared plans only after the complete Graph freshness proof. */
+  async withFreshSynthesisPublication<T>(
+    prepare: (snapshot: RepositoryGraphSynthesisSnapshot) => RepositoryGraphPreparedPublication<T> | Promise<RepositoryGraphPreparedPublication<T>>,
+  ): Promise<T> {
+    let prepared: RepositoryGraphPreparedPublication<T> | undefined;
+    let commitStarted = false;
+    let committed: T | undefined;
+    await prepareCodeHashing().catch(() => undefined);
+    try {
+      await this.#withFresh(async (context) => {
+        const snapshot = this.#synthesisSnapshot(context);
+        try {
+          prepared = await prepare(snapshot.value);
+          await prepared.preflight();
+          return prepared;
+        } catch (error) { throw new GroundingSnapshotCallbackError(error); }
+        finally { snapshot.revoke(); }
+      }, async (publication) => {
+        commitStarted = true;
+        committed = await publication.commit();
+      });
+      return committed!;
+    } catch (error) {
+      if (prepared !== undefined && !commitStarted) {
+        try { await prepared.discard(); } catch { /* Preserve the original refusal. */ }
+      }
+      if (error instanceof GroundingSnapshotCallbackError) throw error.cause;
+      throw error;
+    }
+  }
+
+  #synthesisSnapshot(context: FreshContext): { value: RepositoryGraphSynthesisSnapshot; revoke(): void } {
+    // Refuse oversized evidence before materializing it. Never silently omit
+    // a dependency that could make a proposed behavioral claim false.
+    const nodeColumns = ["id", "kind", "name", "qualified_name", "container_id", "identity_key", "file_path", "language",
+      "start_line", "end_line", "start_column", "end_column", "docstring", "signature", "visibility",
+      "is_exported", "is_async", "is_static", "is_abstract", "decorators", "type_parameters", "return_type", "body_hash", "updated_at"];
+    const edgeColumns = ["id", "source", "target", "kind", "metadata", "line", "col", "provenance", "confidence", "resolution_method", "evidence"];
+    // Compiler identity keys contain NUL separators. SQLite length(TEXT)
+    // stops there, so use byte lengths for every closed, internal column name.
+    const byteLengths = (columns: readonly string[]) => columns
+      .map(column => `coalesce(length(CAST(${column} AS BLOB)), 0)`).join(" + ");
+    const counts = context.session.db.prepare(`SELECT
+      (SELECT count(*) FROM nodes) AS nodes,
+      (SELECT count(*) FROM edges) AS edges,
+      (SELECT coalesce(sum(${byteLengths(nodeColumns)}), 0) FROM nodes)
+      + (SELECT coalesce(sum(${byteLengths(edgeColumns)}), 0) FROM edges) AS bytes`).get() as
+      { nodes: number; edges: number; bytes: number };
+    if (Number(counts.nodes) > MAX_SYNTHESIS_NODES || Number(counts.edges) > MAX_SYNTHESIS_EDGES
+      || Number(counts.bytes) > MAX_SYNTHESIS_METADATA_BYTES) {
+      throw invalid("The graph exceeds the bounded synthesis evidence limit. Narrow the indexed corpus before synthesis.");
+    }
+    // Match the complete NodeRow/EdgeRow materialized by GraphStore, including
+    // fields synthesis ignores but the shared grounding/neighbor readers decode.
+    const grounding = this.#groundingSnapshot(context);
+    let active = true;
+    let nodes: Map<string, GraphNode> | undefined;
+    let files: Map<string, Array<{ id: string; kind: string }>> | undefined;
+    const assertActive = () => {
+      if (!active) throw interruptedRead("The graph synthesis snapshot is no longer active.");
+    };
+    const load = () => {
+      assertActive();
+      if (nodes && files) return;
+      nodes = new Map();
+      files = new Map();
+      for (const node of new GraphStore(context.session.db).getAllNodes()) {
+        nodes.set(node.id, node);
+        const entries = files.get(node.filePath) ?? [];
+        entries.push({ id: node.id, kind: node.kind });
+        files.set(node.filePath, entries);
+      }
+    };
+    const codeGraph: RepositoryGraphSynthesisReader = {
+      listFiles() { load(); return [...files!.keys()].sort().map(path => ({ path })); },
+      nodesInFile(path) { load(); return files!.get(path) ?? []; },
+      describeNode(id) { load(); return nodes!.get(id) ?? null; },
+      callersOf(id) { assertActive(); return context.session.graph.getIncoming(id, ["calls"]).map(neighbor => neighbor.edge.source); },
+      calleesOf(id) { assertActive(); return context.session.graph.getOutgoing(id, ["calls"]).map(neighbor => neighbor.edge.target); },
+      outgoingEdges(id) { assertActive(); return context.session.graph.getOutgoing(id).map(({ edge }) => ({ source: edge.source, target: edge.target, kind: edge.kind })); },
+      readFileLines(path) { assertActive(); return readIndexedSource(context, path).split("\n"); },
+    };
+    return {
+      value: { codeGraph, graph: grounding.value },
+      revoke() { active = false; grounding.revoke(); nodes = undefined; files = undefined; },
+    };
   }
 
   /**

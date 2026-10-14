@@ -12,12 +12,12 @@ edges:
     condition: "when changing the graph data plane or its consumers"
   - target: "context/conventions.md"
     condition: "when verifying a graph implementation change"
-last_updated: 2026-10-10
+last_updated: 2026-10-12
 mex:
   id: mx_01M1M0CJP81C590FCKTSN5HA3Q
   type: pattern
   status: promoted
-  revision: 5
+  revision: 6
   title: safe-graph-snapshot-evolution
   grounds_to:
     - node: function:57e8797d70bfb28e3f0bb1d6e065a84b
@@ -95,6 +95,15 @@ only to explicit maintenance workflows.
     ownership; GraphStore hot statements belong to the store instance.
 
 ## Gotchas
+
+- Synthesis must bind source to the same immutable Graph snapshot, not re-read
+  live files while preparing a claim. Stage exact atomic Wiki plans, validate
+  the complete snapshot before publication, and revoke escaped readers.
+  Bound every field later materialized, including node/edge JSON and identities.
+- Batch conversion must preserve operation replay and recovery authority.
+  Completed creates return their original IDs; an incomplete intent cannot be
+  replanned with freshly minted IDs. Refuse with recovery instructions when an
+  exact saved operation/plan is required, and preserve canonical files/audit.
 
 - Size and mtime are hints, not content identity. Same-size edits can restore an
   mtime and still require reindexing.

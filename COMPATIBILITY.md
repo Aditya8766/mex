@@ -52,6 +52,43 @@ shipping new versions.
 If you only use the `mex` CLI, most of this still applies, but CLI flags
 themselves are best-effort (see [CLI surface](#cli-surface) below).
 
+## Unreleased benchmark fixes
+
+The package-root exports and canonical Markdown grounding format are unchanged.
+Graph schema remains v4, but the extractor and resolver versions change, so the
+first `mex graph refresh` after upgrading rebuilds the graph. JS/TS assignments
+such as `app.init = function` now become named function nodes, so links to code
+in such files may be reported as moved until they are regrounded. Wiki index v5
+adds file-level `description` and `triggers` to derived search text and needs
+an explicit `mex wiki rebuild-index`. Ordinary reads do neither operation.
+
+A grounding with no committed body hash that still matches by structure is now
+`unverified` (`GROUNDING_NO_BASELINE`), because structure cannot see an edited
+literal; `mex wiki reground` records a reviewed baseline. A moved symbol is
+judged by its old body when this checkout has seen it, so a rename that also
+edits a literal is reported as changed; without the old body it is judged by
+structure, as before. Comment-only, layout-only and changed-nearby verdicts are
+unchanged.
+
+Graph JSONL errors now cause a nonzero executable exit. Targeted query/impact
+accept indexed `file:line`; equally narrow impact targets remain ambiguous.
+File impact lists external callers before the file's own definitions at
+unchanged default limits. `impact --direction callees` and `--direction both`
+optionally walk proven call edges, emitting `callee` or `dependency` records and
+direction metadata. Anonymous callers may carry `enclosingSymbol` as navigation
+context; it does not assert an enclosing-function call. C# resolves types and
+static calls through enclosing namespaces and `using` directives, and Rust
+resolves `crate::` paths from the crate root and sibling workspace members, so
+those graphs gain cross-file edges.
+
+Wiki query hits may contain bounded explanations of cached per-link health
+verdicts; ordinary queries do not revalidate current code through Graph. Optional
+details never displace ranked hits, and truncation is reported when they do not
+fit. Synthesis uses immutable fresh Graph/source evidence, validates before
+atomic publication, and refuses incomplete durable intents until exact operation
+recovery; it never remints those identities. Sync briefs over 1,024 UTF-8 bytes
+use private prompt files; input over 1 MiB refuses instead of truncating.
+
 ## Upgrading to 0.8.4
 
 Release preparation is dated October 9, 2026; 0.8.4 remains unpublished until

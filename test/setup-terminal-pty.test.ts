@@ -121,7 +121,9 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
     const f = fixture("incomplete");
     const result = await terminal(f, [], [
       { expect: "Choose your AI tools", input: "\r" },
-      { expect: "MEX_PTY_CHILD_READY", quietMs: 1250, input: "hello native agent\n" },
+      // Consume the child's own line ending before the quiet window starts: the
+      // PTY may deliver it in a later read, and it is not MEX output.
+      { expect: "MEX_PTY_CHILD_READY\\r?\\n", regex: true, quietMs: 1250, input: "hello native agent\n" },
       { expect: "required scaffold placeholders remain", input: "\u001b[B" },
       { expect: "> Show setup prompt", input: "\u001b[B" },
       { expect: "> Check populated files", input: "\r" },

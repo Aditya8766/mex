@@ -30,6 +30,19 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- Benchmark-gap fixes (PR #274, unreleased): file impact lists external
+  callers first at unchanged default limits, with optional `--direction`;
+  graph errors exit nonzero; `file:line` targets; CRLF normalized before
+  tree-sitter parsing; `obj.x = function` assignments are named nodes; C#
+  resolves types and static calls through namespaces and `using` directives;
+  Rust resolves `crate::` paths from the crate root and workspace members.
+  Fresh reads cache the body the committed hash names, so comment, layout,
+  rename and changed-nearby checks have an old side; a moved symbol is judged
+  by that old body when present, otherwise by structure; groundings without a
+  body hash read unverified until reviewed `wiki reground`. Wiki index v5 uses
+  authored description/triggers, and query hits expose per-link health. Long
+  sync briefs use private prompt files. Extractor/resolver versions changed,
+  so the first refresh after upgrading rebuilds the graph.
 - Release preparation for 0.8.4 is on `codex/release-0.8.4`, based on main
   `54f7d7a`, and includes the terminal setup overhaul and default-routing work.
   Current package metadata, capability fixtures, README installation examples,
@@ -435,8 +448,9 @@ Then read this file fully before doing anything else in this session.
   but the underlying compiler memory pressure is not fixed by HUD animation
   or process isolation. Investigate it without changing canonical signatures
   or increasing production heap/resource budgets merely to pass the example.
-- Graph construction still rebuilds the full eligible corpus after source
-  changes and has no peak-memory quota. The branch's actual Hub probe peaked at
+- Graph refresh now has content-hash reuse and incremental publication; importer
+  and augmentation closures still require conservative re-extraction. Full
+  TypeScript construction has no peak-memory quota. The historical Hub probe peaked at
   about 1,963 MiB combined RSS and retained multi-second pauses around initial
   checks and validation/publication despite responsive compiler-phase polling.
   Fatal parent exit may leave owned temporary artifacts. The historical
@@ -454,12 +468,16 @@ Then read this file fully before doing anything else in this session.
   appear only when a stable status observation makes the requested operation
   safe; migration-required or unstable Wiki observations never fabricate a
   repair action.
-- The Wiki CLI's graph-aware commands (validate, rebuild-index, migrate, apply,
-  regenerate-views) reach the graph only through the repository graph port's
+- The Wiki CLI's graph-aware commands (rebuild-index, migrate, apply, reground,
+  link-sections, regenerate-views) reach the graph only through the repository graph port's
   fresh snapshot (#232). A stale or changing graph is not used: the command
   runs without it and reports `CODE_GRAPH_UNAVAILABLE`, so `mex graph` must be
-  current for Wiki grounding verdicts. Synthesis (`wiki build/prepare/propose`)
-  still opens `graph.db` directly, without that freshness proof.
+  current for Wiki grounding verdicts. `wiki validate` checks structure only;
+  use `mex check` for current code-link verdicts. Production synthesis
+  (`wiki build/prepare/propose`) now adopts a strict fresh immutable Graph/source
+  snapshot, withholds output after a failed final proof, and publishes exact
+  prepared operation batches only after revalidation. Incomplete durable intents
+  require exact operation recovery; synthesis refuses to remint identities.
 
 ## Routing Table
 
