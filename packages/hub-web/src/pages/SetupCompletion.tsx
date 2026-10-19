@@ -23,9 +23,12 @@ export function SetupCompletion({ api, agentMemory, pending, onOpen }: {
     enabled: Boolean(api.getContactPreference), retry: false, staleTime: Infinity });
   const install = useMutation({ mutationFn: () => api.installSetupGlobally!(),
     onSuccess: result => client.setQueryData(["setup", "installation"], result) });
+  const contactSubmitted = () => {
+    setEmail(""); setName(""); client.setQueryData(["contact", "preference"], { status: "submitted" });
+  };
   const send = useMutation({ mutationFn: () => api.submitSetupContact!({ email, name }),
     onSuccess: result => {
-      if (result.ok) { setEmail(""); setName(""); client.setQueryData(["contact", "preference"], { status: "submitted" }); }
+      if (result.ok) contactSubmitted();
     } });
   const skip = useMutation({ mutationFn: () => api.rememberContactPreference!({ status: "skipped" }),
     onSuccess: result => client.setQueryData(["contact", "preference"], result) });
@@ -84,7 +87,7 @@ export function SetupCompletion({ api, agentMemory, pending, onOpen }: {
       </section> : null}
       <section aria-label="What’s next">
         <h4>What’s next</h4>
-        <TeamAccessCard api={api} />
+        <TeamAccessCard api={api} preference={api.getContactPreference ? contact.data ?? null : undefined} onContactSent={contactSubmitted} />
       </section>
     </div>
     {skip.isError ? <p role="status">Your choice could not be saved on this computer. You can continue; the invitation may appear again.</p> : null}

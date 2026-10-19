@@ -9,7 +9,8 @@ import {
   __setWeb3FormsAccessKeyForTests,
 } from "../lib/team-access-lead";
 import type { HubApi } from "../api/client";
-import { TeamAccessCard, useTeamAccessReprompt } from "./TeamAccessCard";
+import { TeamAccessCard } from "./TeamAccessCard";
+import { useTeamAccessReprompt } from "../lib/team-access-reprompt";
 
 function postedBodies() {
   return vi.mocked(fetch).mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));

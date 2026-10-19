@@ -92,7 +92,8 @@ import {
 } from "../components/ui";
 import { boundedNextCursor, MAX_WORKBENCH_PAGES } from "../lib/bounds";
 import styles from "../styles/relay.module.css";
-import { TeamAccessCard, useTeamAccessReprompt } from "./TeamAccessCard";
+import { TeamAccessCard } from "./TeamAccessCard";
+import { useTeamAccessReprompt } from "../lib/team-access-reprompt";
 
 const PAGE_SIZE = 25;
 const OPEN_STATES: readonly RelayState[] = ["published", "acknowledged"];
