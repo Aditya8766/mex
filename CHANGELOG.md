@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- An interrupted `mex graph refresh`, `repair` or `rebuild` (Ctrl+C, a CI timeout, a crash) no longer leaves a full-size `graph.db.candidate-*` copy of the store in `.mex/` for good. Each maintenance run, once it holds the exclusive maintenance lease, removes candidate files (and their SQLite sidecars) that a previous run left behind; no concurrent run can own them at that point, and a run refused because another holds the lease removes nothing. Candidate-named symlinks are not followed. `graph.db.recovery-*` and `graph.db.rollback-*` files are not removed, since maintenance deliberately retains recovery copies of a replaced corrupt or incompatible store and after a failed rollback. `mex graph status` stays read-only and now reports `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) while a leftover candidate is present and no live maintenance run holds the lock, and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) while retained recovery files are present; the store's own status is unchanged (#205).
+- Locked orphan candidates no longer abort graph maintenance: files held open on Windows are left for the next run while other candidates are removed (#205).
+- Bare `mex graph` reuses a fresh index without writing, refreshes a compatible changed index, and rebuilds a missing, incompatible or unusable index. Use `--force` or `mex graph rebuild` for an unconditional full build. Setup uses the same routing on resume and finalize reruns, including background graph construction (#208).
+
+### Compatibility
+
+- `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) are new diagnostic codes in `mex graph status` output; the status value and exit code are unchanged. Graph schemas are unchanged (#205).
+- The bare graph summary adds `operation` (`unchanged`, `refresh` or `rebuild`) and refresh work counts when applicable. A fresh graph reports zero files indexed (#208).
+
 ## [0.8.4] - 2026-10-14
 
 ### Added
@@ -37,7 +48,6 @@ All notable changes to this project will be documented in this file.
 - `STALE_FILE` no longer counts every repository commit. Its commit signal now counts only commits made since the file last changed that touched a path the file references: its path claims, and the files of the code it grounds (committed `file`, else the node's file in the graph, plus inline `mex://` anchors). A scaffold file that references no paths is judged by its age and `last_updated` alone. Paths that are scaffold knowledge, URLs, and anything that would match the whole repository are not counted. `SETUP.md`, `SYNC.md`, `patterns/README.md` and `patterns/INDEX.md` are text mex ships, kept current by `mex pattern add` and the index-sync check, so they are no longer reported. On mex's own scaffold, `STALE_FILE` findings fell from 16 to 1. The previous counts ran from 50 to 289 commits, and the same files now count 0 to 6 commits to their referenced paths. The day and commit thresholds are unchanged (#237).
 
 ### Fixed
-- An interrupted `mex graph refresh`, `repair` or `rebuild` (Ctrl+C, a CI timeout, a crash) no longer leaves a full-size `graph.db.candidate-*` copy of the store in `.mex/` for good. Each maintenance run, once it holds the exclusive maintenance lease, removes candidate files (and their SQLite sidecars) that a previous run left behind; no concurrent run can own them at that point, and a run refused because another holds the lease removes nothing. Candidate-named symlinks are not followed. `graph.db.recovery-*` and `graph.db.rollback-*` files are not removed, since maintenance deliberately retains recovery copies of a replaced corrupt or incompatible store and after a failed rollback. `mex graph status` stays read-only and now reports `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) while a leftover candidate is present and no live maintenance run holds the lock, and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) while retained recovery files are present; the store's own status is unchanged (#205).
 - Graph commands exit nonzero when they emit an error record.
 - CRLF line endings no longer change the graph: sources are normalized to LF before tree-sitter parsing.
 - Wiki synthesis (`wiki build/prepare/propose`) reads the graph through a fresh, immutable snapshot.
@@ -61,7 +71,6 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
-- `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) are new diagnostic codes in `mex graph status` output; the status value and exit code are unchanged. Graph schemas are unchanged (#205).
 - `CODE_GRAPH_UNAVAILABLE` is an informational Wiki diagnostic for commands that require graph evidence; `wiki validate` no longer serves as a code-link health gate. Use `mex check` for that purpose, and run `mex wiki rebuild-index` after refreshing the graph to update existing indexed health. Graph schema remains v4; the disposable Wiki index advances to v5 and needs an explicit rebuild. Canonical Markdown and Relay artifact versions remain unchanged.
 - Earlier MEX versions cannot read `mh2:` fingerprints. On a Hono scaffold re-encoded to `mh2:`, 0.8.3 reported 10 groundings it could not reconcile as `GROUNDING_GONE`, and its Wiki rejected 11 groundings as malformed and 5 entities as unparseable, breaking 3 relations; capture also treats such a grounding as changed and asks for a review. Upgrade everyone who shares a scaffold before anyone commits new groundings. The fingerprint conversion itself changes neither index schema (#233).
 - A root `type` key is optional and additive. Earlier versions ignore it and leave the file outside the Wiki as before; once migrated it is an ordinary `mex.type`. Adoption may now remove a root `type` key, alongside `grounds_to` and `topics`. `KNOWLEDGE_NOT_ADOPTED` and `KNOWLEDGE_UNTYPED` are new `IssueCode` values and new Wiki diagnostic codes. Knowledge adoption itself changes neither index schema (#227).
