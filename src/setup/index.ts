@@ -32,6 +32,7 @@ export {
   type SetupMode,
 } from "./phases.js";
 import { finalizeSetupWiki } from "./wiki-finalize.js";
+import { finalizeWithRepair, type SetupFinalizeOptions } from "./finalize-repair.js";
 import { SetupError } from "./errors.js";
 import { classifySetupMaintenanceError, setupWikiFailureMessage } from "./maintenance-errors.js";
 export { findSetupProjectRoot } from "./entry.js";
@@ -299,6 +300,9 @@ export function installSetupAgentAssets(
  * message may retain fuller terminal diagnostics without exposing them there.
  */
 export class SetupFinalizationError extends SetupError {
+  groundingFailureCount?: number;
+  groundingFailures?: import("../graph/runtime.js").GroundingBaselineFailure[];
+  wikiDiagnostics?: import("../wiki/service.js").WikiDiagnostic[];
   constructor(message: string, options?: ErrorOptions & { userMessage?: string }) {
     super(message, options);
     this.name = "SetupFinalizationError";
@@ -309,7 +313,11 @@ export class SetupFinalizationError extends SetupError {
 const FINALIZATION_DETAIL_LIMIT = 2;
 const FINALIZATION_DETAIL_CHARS = 140;
 
-export async function finalizeCodeRepoSetup(projectRoot: string, mexDir: string, options: {
+export async function finalizeCodeRepoSetup(projectRoot: string, mexDir: string, options: SetupFinalizeOptions = {}) {
+  return finalizeWithRepair(projectRoot, mexDir, options, () => finalizeCodeRepoSetupOnce(projectRoot, mexDir, options));
+}
+
+async function finalizeCodeRepoSetupOnce(projectRoot: string, mexDir: string, options: {
   signal?: AbortSignal;
   onMessage?: (message: string) => void;
 } = {}): Promise<void> {
@@ -344,9 +352,9 @@ export async function finalizeCodeRepoSetup(projectRoot: string, mexDir: string,
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const detail = captureWarnings.length === 0 ? "" : ` ${captureWarnings.join(" ")}`;
-    throw new SetupFinalizationError(
+    throw Object.assign(new SetupFinalizationError(
       `Grounding finalization failed: ${message}${detail} Correct or remove those grounds_to entries or mex:// links, then rerun setup.`,
-    );
+    ), { groundingFailures: result.failures, groundingFailureCount: result.skipped });
   }
   if (result.captured > 0) ok(`Captured ${result.captured} grounding baseline(s)`);
   else info("No authored grounding baselines needed capture");
@@ -372,7 +380,7 @@ export async function finalizeCodeRepoSetup(projectRoot: string, mexDir: string,
     const codes = [...new Set(wiki.diagnostics.map((entry) => entry.code))].join(", ");
     const suffix = codes.length === 0 ? "" : ` (${codes})`;
     const userMessage = setupWikiFailureMessage(wiki.stage, wiki.diagnostics);
-    throw new SetupFinalizationError(`${wiki.reason ?? "Wiki setup did not finish."}${suffix} ${userMessage}`, { userMessage });
+    throw Object.assign(new SetupFinalizationError(`${wiki.reason ?? "Wiki setup did not finish."}${suffix} ${userMessage}`, { userMessage }), { wikiDiagnostics: wiki.diagnostics });
   }
   ok(`Wiki ready with ${wiki.indexedEntities} indexed entit${wiki.indexedEntities === 1 ? "y" : "ies"}`);
 }
