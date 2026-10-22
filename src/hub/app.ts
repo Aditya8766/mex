@@ -52,6 +52,8 @@ import {
   JobPageRequestSchema,
   JobPageResponseSchema,
   JobStartRequestSchema,
+  WikiMigrationJobPreviewSchema,
+  type WikiMigrationJobPreview,
   SearchRequestSchema,
   SearchResponseSchema,
   SessionResponseSchema,
@@ -321,7 +323,8 @@ export interface HubReadServices {
     request: CodeKnowledgeRequest,
   ): Promise<CodeKnowledgeResponse> | CodeKnowledgeResponse;
   health(): Promise<HealthResponse> | HealthResponse;
-  assertJobStartAllowed?(kind: HubJobKind): Promise<void> | void;
+  previewWikiMigration?(): Promise<WikiMigrationJobPreview>;
+  assertJobStartAllowed?(kind: HubJobKind, migrationPreview?: string): Promise<void> | void;
 }
 
 interface HubEnvironment {
@@ -997,6 +1000,13 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     });
   });
 
+  app.post("/api/v1/jobs/wiki-migration/preview", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    parseInput(JobCancelRequestSchema, await readBoundedJson(context.req.raw));
+    if (!options.services.previewWikiMigration) throw unavailable("Wiki migration is not connected in this build.");
+    return resourceResponse(WikiMigrationJobPreviewSchema, await options.services.previewWikiMigration());
+  });
+
   app.post("/api/v1/jobs", async (context) => {
     const jobs = requireJobs(options.jobs);
     const request = parseInput(
@@ -1004,7 +1014,7 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
       await readBoundedJson(context.req.raw),
     );
     return telemetry.action("job.start", "direct", async () => {
-      await options.services.assertJobStartAllowed?.(request.kind);
+      await options.services.assertJobStartAllowed?.(request.kind, request.migrationPreview);
       return resourceResponse(HubJobSnapshotSchema, await jobs.start(request), 202);
     });
   });

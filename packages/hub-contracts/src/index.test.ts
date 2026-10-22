@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import * as IdRuntime from "./ids.js";
 import { OverviewActivityPanelSchema } from "./overview.js";
 import * as RelayRuntime from "./relay.js";
+
 import {
   ActivityRequestSchema,
+  JobStartRequestSchema,
+  WikiMigrationJobPreviewSchema,
   ActivityResponseSchema,
   BootstrapRequestSchema,
   CodeWorkspaceRequestSchema,
@@ -61,6 +64,12 @@ import {
 } from "./index.js";
 
 describe("Hub API contracts", () => {
+  it("bounds migration previews and limits their use to Wiki rebuild jobs", () => {
+    expect(JobStartRequestSchema.safeParse({ kind: "wiki_rebuild", migrationPreview: "a".repeat(64) }).success).toBe(true);
+    expect(JobStartRequestSchema.safeParse({ kind: "graph_rebuild", migrationPreview: "a".repeat(64) }).success).toBe(false);
+    expect(WikiMigrationJobPreviewSchema.safeParse({ revision: "a".repeat(64), report: "x".repeat(16 * 1024 + 1), canApply: true }).success).toBe(false);
+  });
+
   it("keeps the private ID and Relay runtime entries on the canonical schema instances", () => {
     expect(IdRuntime.TeamMemberIdSchema).toBe(TeamMemberIdSchema);
     expect(IdRuntime.RelayIdSchema).toBe(RelayIdSchema);

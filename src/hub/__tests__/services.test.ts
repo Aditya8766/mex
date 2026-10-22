@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,7 @@ import type {
 } from "../../team/contracts/workflow.js";
 import {
   createLocalHubReadServices as createLocalHubReadServicesBase,
+  createHubWikiMigration,
   type HubTeamIdentityActivityService,
   type HubInboxSpecAuthoringService,
   type HubRelayHandoffService,
@@ -53,6 +54,9 @@ import type {
   WikiQueryRequest,
 } from "../../team/contracts/wiki.js";
 import { WIKI_ENTITY_TYPES } from "../../wiki/model/entity.js";
+import { createWikiJobExecutors } from "../jobs/wiki.js";
+import type { HubJobSnapshot as InternalJob } from "../jobs/types.js";
+
 import { createRepositoryTeamWorkflowPortWithDependencies } from "../../team/workflow/repository-team-workflow-port.js";
 import { ActivityRepository } from "../../team/activity/repository.js";
 import { MemberRepository } from "../../team/identity/member-repository.js";
@@ -320,6 +324,28 @@ function overviewJob(
 }
 
 describe("createLocalHubReadServices", () => {
+  it("previews migration without writes, requires the reviewed plan, then migrates and rebuilds", async () => {
+    mkdirSync(join(projectRoot, ".mex", "context"), { recursive: true });
+    writeFileSync(join(projectRoot, ".mex", "ROUTER.md"), "# Project\n");
+    const path = join(projectRoot, ".mex", "context", "architecture.md");
+    writeFileSync(path, "---\nname: architecture\n---\n# Architecture\n\nA small service.\n");
+    const before = readFileSync(path, "utf8");
+    const wiki = createRepositoryWikiPort(projectRoot);
+    const migration = createHubWikiMigration(wiki);
+    const services = createLocalHubReadServices({ projectRoot, scaffoldId: "scaffold-local", git, wiki, migration, jobs: { list: () => ({ items: [] }) } });
+    await expect(services.assertJobStartAllowed!("wiki_rebuild")).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+    const preview = await services.previewWikiMigration!();
+    expect(preview.canApply).toBe(true);
+    expect(preview.report).toContain("filesScanned");
+    expect(readFileSync(path, "utf8")).toBe(before);
+    await expect(services.assertJobStartAllowed!("wiki_rebuild", "wrong")).rejects.toThrow();
+    await services.assertJobStartAllowed!("wiki_rebuild", preview.revision);
+    await createWikiJobExecutors(wiki, migration).wiki_rebuild!({ job: {} as InternalJob, signal: new AbortController().signal, reportProgress: () => {}, migrationPreview: preview.revision });
+    expect((await wiki.inspectIndex()).state).toBe("fresh");
+    expect(readFileSync(path, "utf8")).toContain("mex:");
+    expect(() => migration.assertReviewed(preview.revision)).toThrow();
+  });
+
   it("keeps Team-wide Relay reads independent from local actor resolution", async () => {
     const getIdentity = vi.fn(git.getIdentity);
     const relayGit = { ...git, getIdentity } as GitPort;
@@ -1647,11 +1673,11 @@ The worker drains the durable queue.
       label: "Preview the required Wiki migration",
       command: "mex wiki migrate --dry-run",
     });
-    expect(component.wiki?.recommendedJobKind).toBeNull();
-    expect(component).not.toHaveProperty("repairJobKind");
+    expect(component.wiki?.recommendedJobKind).toBe("wiki_rebuild");
+    expect(component.repairJobKind).toBe("wiki_rebuild");
     expect(component.summary).toBe(
       "Legacy Knowledge requires an explicit migration before Hub reads can continue. "
-      + "Preview it with mex wiki migrate --dry-run, then apply the migration with the CLI.",
+      + "Preview and apply it here, or use mex wiki migrate --dry-run as the CLI alternative.",
     );
 
     const fresh = createLocalHubReadServices({
@@ -1693,7 +1719,7 @@ The worker drains the durable queue.
       }
       const health = await services.health();
       expect(health.components.find((component) => component.id === "wiki")?.wiki?.allowedJobKinds)
-        .toEqual(allowed);
+        .toEqual(state === "migration_required" ? ["wiki_rebuild"] : allowed);
     }
 
     const unsafeWiki = {

@@ -3224,7 +3224,16 @@ export const JobPageResponseSchema = z.object({
 
 export const JobStartRequestSchema = z.object({
   kind: HubJobKindSchema,
+  migrationPreview: revision.optional(),
+}).strict().refine(value => value.migrationPreview === undefined || value.kind === "wiki_rebuild",
+  "A migration preview is only valid for a Wiki rebuild.");
+
+export const WikiMigrationJobPreviewSchema = z.object({
+  revision,
+  report: utf8Text(16 * 1024),
+  canApply: z.boolean(),
 }).strict();
+export type WikiMigrationJobPreview = z.infer<typeof WikiMigrationJobPreviewSchema>;
 
 export const JobCancelRequestSchema = z.object({}).strict();
 

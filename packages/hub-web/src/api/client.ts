@@ -22,6 +22,8 @@ import {
   InboxProposalIdSchema,
   InboxProposalListResponseSchema,
   JobPageResponseSchema,
+  WikiMigrationJobPreviewSchema,
+  type WikiMigrationJobPreview,
   SearchResponseSchema,
   SessionResponseSchema,
   SpecDetailResponseSchema,
@@ -246,6 +248,7 @@ export interface HubApi {
   getJobs(cursor?: string): Promise<JobsResponse>;
   getJob(id: string): Promise<JobSummary>;
   startJob(request: StartJobRequest): Promise<JobSummary>;
+  previewWikiMigration?(): Promise<WikiMigrationJobPreview>;
   cancelJob(id: string): Promise<JobSummary>;
   subscribeToJob(id: string, onSnapshot: (job: JobSummary) => void): JobSubscription;
   getSetupStatus?(): Promise<SetupStatus>;
@@ -788,6 +791,11 @@ export class HttpHubApi implements HubApi {
       { method: "POST", body: JSON.stringify(request) },
       true,
     );
+  }
+
+  previewWikiMigration(): Promise<WikiMigrationJobPreview> {
+    return this.#request("/jobs/wiki-migration/preview", WikiMigrationJobPreviewSchema,
+      { method: "POST", body: "{}" }, true);
   }
 
   async cancelJob(id: string): Promise<JobSummary> {

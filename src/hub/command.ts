@@ -6,7 +6,7 @@ import { HubJobManager } from "./jobs/index.js";
 import { createGraphJobExecutors } from "./jobs/graph.js";
 import { createWikiJobExecutors } from "./jobs/wiki.js";
 import { startHubNodeServer } from "./node-server.js";
-import { createLocalHubReadServices } from "./services.js";
+import { createLocalHubReadServices, createHubWikiMigration } from "./services.js";
 import { createSetupHubServices } from "./setup/services.js";
 import { TeamLocalState } from "../team/local-state/index.js";
 import { createRepositoryGraphPort } from "../graph/application-adapter.js";
@@ -281,11 +281,12 @@ async function composeProductionHub(
     ...(options.wikiExclude === undefined ? {} : { exclude: options.wikiExclude }),
     ...(options.wikiReadOnly === undefined ? {} : { readOnly: options.wikiReadOnly }),
   });
+  const migration = createHubWikiMigration(wiki);
   const jobs = new HubJobManager({
     localState,
     executors: {
       ...createGraphJobExecutors(graph),
-      ...createWikiJobExecutors(wiki),
+      ...createWikiJobExecutors(wiki, migration),
     },
     shutdownTimeoutMs: 60_000,
     telemetry: options.telemetry,
@@ -304,6 +305,7 @@ async function composeProductionHub(
       specs: createSpecReadService(wiki),
       graph,
       wiki,
+      migration,
     });
     return {
       app: createHubApp({
