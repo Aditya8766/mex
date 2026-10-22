@@ -4,6 +4,7 @@ import type {
 import type { Diagnostic } from "../team/contracts/shared.js";
 import {
   GraphMaintenanceError,
+  ensureGraphCurrent,
   inspectOrphanGraphFiles,
   repairGraph,
   rebuildGraph,
@@ -18,6 +19,8 @@ export interface GraphCommandOptions {
   root?: string;
   /** Emit the complete machine-readable result. */
   json?: boolean;
+  /** Rebuild even when the existing graph is fresh. */
+  force?: boolean;
 }
 
 /** Strictly read-only graph health/freshness command. */
@@ -93,17 +96,19 @@ export async function runGraphRebuild(options: GraphCommandOptions = {}): Promis
   }
 }
 
-/** Backward-compatible `mex graph`, now implemented as a safe rebuild. */
+/** Ensure a current graph, reusing a fresh store without writing. */
 export async function runGraph(options: GraphCommandOptions = {}): Promise<void> {
   const rootDir = options.root ?? process.cwd();
-  const result = await rebuildGraph(rootDir);
+  const result = await ensureGraphCurrent(rootDir, { force: options.force });
   const coverage = await readStoredGraphCoverage(rootDir, result.status.status === "fresh");
   if (options.json) {
     console.log(JSON.stringify({
+      operation: result.operation,
       filesIndexed: result.filesIndexed,
       nodesCreated: result.nodesCreated,
       edgesCreated: result.edgesCreated,
       durationMs: result.durationMs,
+      ...(result.refresh ? { refresh: result.refresh } : {}),
       health: {
         ok: result.status.parseHealth.ok,
         partial: result.status.parseHealth.partial,
@@ -117,10 +122,15 @@ export async function runGraph(options: GraphCommandOptions = {}): Promise<void>
     }, null, 2));
     return;
   }
-  console.log(
-    `Code graph built: ${result.nodesCreated} nodes, ${result.edgesCreated} edges `
-      + `across ${result.filesIndexed} files in ${result.durationMs}ms → .mex/graph.db`,
-  );
+  if (result.operation === "unchanged") {
+    console.log(`Code graph already fresh; no files indexed (${result.durationMs}ms).`);
+  } else {
+    const action = result.operation === "refresh" ? "refreshed" : "built";
+    console.log(
+      `Code graph ${action}: ${result.nodesCreated} nodes, ${result.edgesCreated} edges `
+        + `across ${result.filesIndexed} files in ${result.durationMs}ms → .mex/graph.db`,
+    );
+  }
   printUnindexedSources(coverage);
   printSkippedSources(result.skipped);
   printDeclinedInputs(result.declinedInputs);

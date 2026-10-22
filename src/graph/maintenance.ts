@@ -318,6 +318,33 @@ export function acquireGraphMaintenanceLease(
   };
 }
 
+/** Explicit ensure operation shared by the graph CLI and resumable setup. */
+export async function ensureGraphCurrent(
+  projectRoot: string,
+  options: GraphMaintenanceExecutionOptions & { force?: boolean } = {},
+): Promise<GraphMaintenanceResult & { operation: "unchanged" | "refresh" | "rebuild" }> {
+  const started = new Date();
+  progress(options, "discover", "Checking graph freshness.");
+  if (options.force) return { ...await rebuildGraph(projectRoot, options), operation: "rebuild" };
+  const status = await inspectGraphStatus({ projectRoot });
+  assertNotAborted(options.signal);
+  if (status.status === "fresh") {
+    return {
+      ...maintenanceResult(started, new Date(), {
+        filesIndexed: 0, nodesCreated: 0, edgesCreated: 0, durationMs: 0,
+      }, { status, diagnostics: status.diagnostics }),
+      operation: "unchanged",
+    };
+  }
+  try {
+    assertRefreshable(status);
+  } catch (error) {
+    if (!(error instanceof GraphMaintenanceError)) throw error;
+    return { ...await rebuildGraph(projectRoot, options), operation: "rebuild" };
+  }
+  return { ...await refreshGraph(projectRoot, options), operation: "refresh" };
+}
+
 /** Explicit correctness-first refresh. Reads never call this function. */
 export async function refreshGraph(
   projectRoot: string,

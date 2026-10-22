@@ -505,13 +505,14 @@ program
 // ── Code Graph ──
 const graphCommand = program
   .command("graph")
-  .description("Inspect or explicitly maintain the code knowledge graph")
+  .description("Ensure a current code graph: reuse fresh, refresh changed, rebuild missing or unusable")
+  .option("--force", "Force a full build (also available as mex graph rebuild)")
   .option("--json", "Output the build summary as JSON")
   .option("--root <dir>", "Project root to index (defaults to current directory)")
   .action(async (opts) => {
     try {
       const { runGraph } = await import("./graph/cli-graph.js");
-      await runGraph({ root: opts.root, json: opts.json });
+      await runGraph({ root: opts.root, json: opts.json, force: opts.force });
     } catch (err) {
       const { describeGraphMaintenanceFailure } = await import("./graph/cli-graph.js");
       console.error(describeGraphMaintenanceFailure(err));

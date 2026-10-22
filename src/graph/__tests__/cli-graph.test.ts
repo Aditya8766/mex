@@ -140,7 +140,7 @@ describe("graph CLI cached coverage", () => {
       expect(afterAddition.at(-1)).toMatchObject({ status: "no-match", warnings: [] });
       for (const command of [runGraph, runGraphRefresh, runGraphRebuild]) {
         output.length = 0;
-        await command({ root, json: true });
+        await command({ root, json: true, force: command === runGraph });
         expect(JSON.parse(output.join(""))).toHaveProperty("unindexedSources", {
           total: 1, byExtension: { ".vue": 1 }, truncated: false,
         });
