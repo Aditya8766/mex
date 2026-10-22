@@ -11,7 +11,7 @@ import {
   type SetupPopulationLaunchResult,
 } from "./population.js";
 
-const POPULATION_TIMEOUT_MS = 30 * 60_000;
+const POPULATION_TIMEOUT_MS = 15 * 60_000;
 const TERMINATE_GRACE_MS = 500;
 const DIAGNOSTIC_BYTES = 8 * 1024;
 const DISCOVERY_TIMEOUT_MS = 5_000;
@@ -23,7 +23,7 @@ export interface HeadlessPopulationOptions {
   readonly signal?: AbortSignal;
   /** Agent-memory setup supports directories without a Git repository. */
   readonly allowNonGit?: boolean;
-  /** A shorter bounded deadline; the browser request cannot supply this. */
+  /** The stdout inactivity window; the browser request cannot supply this. */
   readonly timeoutMs?: number;
   /** Fixed activity categories only; never raw agent output or tool arguments. */
   readonly onActivity?: (activity: HeadlessPopulationActivity) => void;
@@ -52,7 +52,7 @@ export class HeadlessPopulationError extends SetupPopulationError {
       failed: `${name} exited before population completed. Check its CLI configuration and try again.`,
       protocol: `${name} stopped without confirming completion. Review the files and resume setup.`,
       cancelled: "AI population was cancelled. You can resume setup when ready.",
-      timeout: "AI population exceeded its time limit and was stopped. Review the files and resume setup.",
+      timeout: "The agent showed no activity for 15 minutes and was stopped. Review the files and resume setup.",
       prompt: "The private setup population prompt could not be prepared or removed safely.",
     };
     super(messages[category]);
@@ -143,6 +143,8 @@ function runHeadlessAgent(
     }) : undefined;
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout.append(chunk);
+      // Count stdout records even when their type has no visible activity signal.
+      if (!closing && !failure && chunk.includes(10)) timer.refresh();
       if (!closing && !failure && !options.signal?.aborted) {
         decoder.write(chunk);
         transcript?.write(chunk);

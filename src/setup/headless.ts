@@ -327,10 +327,15 @@ export async function runHeadlessSetup(
     };
   }
 
+  let dropped: readonly import("../graph/runtime.js").GroundingBaselineFailure[] = [];
   if (mode === "code-repo") {
     report("finalize");
     throwIfSetupAborted(options.signal);
-    await finalizeCodeRepoSetup(projectRoot, mexDir, {
+    dropped = await finalizeCodeRepoSetup(projectRoot, mexDir, {
+      selectedTools: options.confirmPopulation ? [] : selectedTools,
+      populate: options.populate,
+      onActivity: options.onPopulationActivity,
+      onTranscript: options.onPopulationTranscript,
       signal: options.signal,
       onMessage: options.onMessage,
     });
@@ -351,6 +356,7 @@ export async function runHeadlessSetup(
     anchorNotes,
     message: mode === "code-repo"
       ? "Graph and Wiki are ready. Review and commit the canonical MEX setup."
+        + (dropped.length ? ` Dropped references: ${dropped.map(f => `${f.file} → ${f.node}`).join("; ")}.` : "")
       : "Setup complete.",
   };
 }
