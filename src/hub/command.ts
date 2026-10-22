@@ -40,6 +40,7 @@ export interface LaunchHubOptions {
 }
 
 export interface RunSetupHubCommandOptions {
+  readonly finalizeOnly?: boolean;
   readonly projectRoot: string;
   readonly port?: number;
   readonly openBrowser: boolean;
@@ -60,25 +61,34 @@ export async function launchHub(options: LaunchHubOptions): Promise<void> {
   const initialMode = options.mode === undefined ? undefined : normalizeSetupMode(options.mode);
   const projectRoot = findSetupProjectRoot();
   const status = inspectSetupStatus(projectRoot);
+  let finalizeOnly = false;
   if (!options.setup && initialMode === undefined && status.mode === "code-repo" && status.hasScaffold && await hasCommittedHubIdentity(projectRoot)) {
     const config = findConfig(projectRoot);
-    const scaffoldId = readScaffoldId(config.scaffoldRoot);
-    if (!scaffoldId) throw new Error("The committed MEX project identity could not be read.");
-    await runHubCommand({
-      projectRoot: config.projectRoot,
-      scaffoldId,
-      port: options.port,
-      openBrowser: options.openBrowser,
-      ...(config.wiki?.exclude === undefined ? {} : { wikiExclude: config.wiki.exclude }),
-      ...(config.wiki?.readOnly === undefined ? {} : { wikiReadOnly: config.wiki.readOnly }),
+    const wiki = createRepositoryWikiPort(projectRoot, {
+      ...(config.wiki?.exclude === undefined ? {} : { exclude: config.wiki.exclude }),
+      ...(config.wiki?.readOnly === undefined ? {} : { readOnly: config.wiki.readOnly }),
     });
-    return;
+    finalizeOnly = (await wiki.inspectIndex()).state === "migration_required";
+    if (!finalizeOnly) {
+      const scaffoldId = readScaffoldId(config.scaffoldRoot);
+      if (!scaffoldId) throw new Error("The committed MEX project identity could not be read.");
+      await runHubCommand({
+        projectRoot: config.projectRoot,
+        scaffoldId,
+        port: options.port,
+        openBrowser: options.openBrowser,
+        ...(config.wiki?.exclude === undefined ? {} : { wikiExclude: config.wiki.exclude }),
+        ...(config.wiki?.readOnly === undefined ? {} : { wikiReadOnly: config.wiki.readOnly }),
+      });
+      return;
+    }
   }
   await runSetupHubCommand({
     projectRoot,
     port: options.port,
     openBrowser: options.openBrowser,
     initialMode,
+    finalizeOnly,
   });
 }
 
@@ -194,6 +204,7 @@ export async function runSetupHubCommand(options: RunSetupHubCommandOptions): Pr
   const { services, setup } = createSetupHubServices(options.projectRoot, {
     onReady: promoteToProjectHub,
     initialMode: options.initialMode,
+    finalizeOnly: options.finalizeOnly,
   });
   try {
     const bootstrapToken = createBootstrapToken();

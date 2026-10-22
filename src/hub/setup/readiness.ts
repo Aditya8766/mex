@@ -2,6 +2,18 @@ import type { SetupStatus } from "@mex/hub-contracts/setup";
 import { inspectSetupStatus } from "../../setup/headless.js";
 import { setupCommitCheckpointCommands } from "../../setup/index.js";
 import { createRepositoryTeamWorkflowPort } from "../../team/workflow/repository-team-workflow-port.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+/** Finalization changes tracked Knowledge even when the scaffold identity was committed earlier. */
+export async function hasPendingSetupChanges(projectRoot: string): Promise<boolean> {
+  try {
+    await promisify(execFile)("git", ["diff", "--quiet", "HEAD", "--", ".mex"], { cwd: projectRoot, timeout: 10_000 });
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 /** Use the same read-only authority check as production; never provision state. */
 export async function hasCommittedHubIdentity(projectRoot: string): Promise<boolean> {
