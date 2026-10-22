@@ -5,12 +5,14 @@ import type { MexConfig, SyncTarget, DriftIssue, AiTool } from "../types.js";
 import { AI_TOOLS } from "../types.js";
 import { runDriftCheck } from "../drift/index.js";
 import { isCliAvailable } from "../cli-tools.js";
-import { buildSyncBrief, buildCombinedBrief } from "./brief-builder.js";
+import { buildSyncBrief, buildCombinedBrief, flaggedWikiEntities, type FlaggedEntity } from "./brief-builder.js";
+import { rebuildWikiIndexAfterSync } from "./wiki-index.js";
 import { findScaffoldFiles } from "../drift/index.js";
 import { captureGroundingBaselines, groundingReviewNodeIds, loadGroundingRuntime, persistMovedGroundings, previewGroundingBaseline, type MovedByNeighborsNotice } from "../graph/runtime.js";
 import { movedByNeighborsMessage } from "../drift/checkers/grounding.js";
 import { writeGroundings } from "../markdown.js";
 import { buildAgentCommand } from "../agent-command.js";
+import { createAgentPromptSession } from "../agent-prompt.js";
 
 const INTERACTIVE_AI_TIMEOUT_MS = 15 * 60_000;
 
@@ -35,26 +37,32 @@ export function runToolInteractive(
   cwd: string,
   options: RunToolInteractiveOptions = {},
 ): boolean {
-  const invocation = buildAgentCommand(tool, brief, "interactive");
-  if (invocation === null) return false;
+  if (AI_TOOLS[tool].cli === null) return false;
+  // Long sync briefs exceed Windows .cmd limits even when correctly escaped.
+  // Reuse setup's private file transport; keep small existing invocations intact.
+  const session = Buffer.byteLength(brief, "utf8") > 1_024 ? createAgentPromptSession(brief, cwd) : null;
+  const invocation = buildAgentCommand(tool, session?.instruction ?? brief, "interactive")!;
   // cross-spawn resolves Windows `.cmd`/`.bat` wrappers (npm installs `claude`
   // as `claude.cmd`) and escapes args correctly — plain spawnSync throws ENOENT
   // on Windows, and `shell: true` mangles the multi-line prompt (issue #85).
-  const result = crossSpawn.sync(invocation.command, invocation.args, {
-    cwd,
-    stdio: "inherit",
-    ...(options.timeoutMs === null
-      ? {}
-      : { timeout: options.timeoutMs ?? INTERACTIVE_AI_TIMEOUT_MS }),
-  });
-  // A spawn failure (ENOENT, etc.) sets `error` and leaves `status` null — don't
-  // mistake that for success, or launch problems get silently swallowed.
-  if (result.error) return false;
-  return result.status === 0;
+  try {
+    const result = crossSpawn.sync(invocation.command, invocation.args, {
+      cwd,
+      stdio: "inherit",
+      ...(options.timeoutMs === null
+        ? {}
+        : { timeout: options.timeoutMs ?? INTERACTIVE_AI_TIMEOUT_MS }),
+    });
+    // A spawn failure (ENOENT, etc.) must not be mistaken for success.
+    if (result.error) return false;
+    return result.status === 0;
+  } finally {
+    session?.cleanup();
+  }
 }
 
 /** Pick which AI tool to use for interactive sync */
-async function pickSyncTool(configuredTools: AiTool[]): Promise<AiTool | null> {
+export async function pickSyncTool(configuredTools: AiTool[]): Promise<AiTool | null> {
   // Filter to tools that have a CLI and are installed
   let available = configuredTools.filter((t) => {
     const meta = AI_TOOLS[t];
@@ -104,7 +112,17 @@ interface SyncDependencies {
   ask?: (question: string) => Promise<string>;
   runAgent?: typeof runToolInteractive;
   reviewGrounding?: boolean;
+  /** Rebuilds the Wiki index after a session that reviewed Wiki entities. */
+  rebuildWikiIndex?: (config: MexConfig) => Promise<{ entityCount: number }>;
 }
+
+/** Findings `sync` reports but never hands to an AI session. */
+const SYNC_NOTICE_CODES: ReadonlySet<DriftIssue["code"]> = new Set([
+  "GROUNDING_MOVED_BY_NEIGHBORS",
+  "GROUNDING_COMMENT_DRIFT",
+  "GROUNDING_MOVED",
+  "GROUNDING_NEARBY_DRIFT",
+]);
 
 /** Run targeted sync: detect → brief → AI → verify → ask → loop */
 export async function runSync(
@@ -152,9 +170,9 @@ export async function runSync(
     // A body that changed only in comments (#236) needs a review of the new
     // body, not an AI session over prose that still describes the code.
     const commentOnly = report.issues.filter((i) => i.code === "GROUNDING_COMMENT_DRIFT");
-    const issues = report.issues.filter(
-      (i) => i.code !== "GROUNDING_MOVED_BY_NEIGHBORS" && i.code !== "GROUNDING_COMMENT_DRIFT",
-    );
+    // A move and a change away from the fact are notices too: the link's
+    // verdict is not `changed`, so nothing in the prose is in question.
+    const issues = report.issues.filter((i) => !SYNC_NOTICE_CODES.has(i.code));
 
     if (issues.length === 0) {
       if (commentOnly.length === 0) {
@@ -297,8 +315,24 @@ export async function runSync(
       }
     }
 
+    // The session may have re-recorded or rewritten Wiki entities. Rebuild the
+    // index so `wiki query`, `wiki for-code` and the Hub show it; a rebuild that
+    // fails stops sync loudly rather than leave the index silently behind.
+    const reviewed = flaggedWikiEntities(targets);
+    if (ok && reviewed.length > 0) {
+      try {
+        const rebuilt = await (dependencies.rebuildWikiIndex ?? rebuildWikiIndexAfterSync)(config);
+        console.log(chalk.dim(`Rebuilt the Wiki index (${rebuilt.entityCount} entities).`));
+      } catch (error) {
+        console.error(chalk.red(`✗ Wiki index rebuild failed: ${error instanceof Error ? error.message : String(error)}`));
+        process.exitCode = 1;
+        return;
+      }
+    }
+
     // Step 4: Verify
     const postReport = await runDriftCheck(config);
+    reportStillFlagged(reviewed, postReport.issues);
     const scoreDelta = postReport.score - report.score;
     const deltaStr =
       scoreDelta > 0
@@ -352,6 +386,25 @@ export async function runSync(
       console.log(chalk.dim("Stopped. Run mex sync again anytime."));
       return;
     }
+  }
+}
+
+/**
+ * Name every reviewed Wiki entity that `check` still flags: the agent was
+ * unsure, or the link is missing or ambiguous and could not be re-recorded.
+ * Said plainly, so nothing reads as reviewed that was not.
+ */
+function reportStillFlagged(reviewed: readonly FlaggedEntity[], issues: readonly DriftIssue[]): void {
+  if (reviewed.length === 0) return;
+  const still = new Map<string, string[]>();
+  for (const issue of issues) {
+    if (issue.entity === undefined || SYNC_NOTICE_CODES.has(issue.code) || !issue.code.startsWith("GROUNDING_")) continue;
+    still.set(issue.entity.id, [...(still.get(issue.entity.id) ?? []), issue.verdict ?? issue.code]);
+  }
+  const left = reviewed.filter((entity) => still.has(entity.id));
+  console.log(chalk.dim(`Wiki entities reviewed: ${reviewed.length - left.length} cleared, ${left.length} still flagged.`));
+  for (const entity of left) {
+    console.log(chalk.yellow(`  still flagged, not cleared: ${entity.id} "${entity.title}" — ${still.get(entity.id)!.join(", ")}`));
   }
 }
 

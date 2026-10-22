@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import { __resetTelemetryForTest, __setTelemetryEndpointForTest, __setTransport,
   flush, getTelemetryInspection, isEnabled, startHubTelemetry } from "../src/telemetry/index.js";
 import { claimBatch, closeOutbox, enqueue, finishBatch, inspectOutbox, OUTBOX_LIMITS, purgeOutbox } from "../src/telemetry/outbox.js";
 import { eventAttributes, makeEvent, validateStoredEvent, type TelemetryAttributes, type TelemetryEvent } from "../src/telemetry/schema.js";
+import * as telemetryTransport from "../src/telemetry/transport.js";
 
 let root: string;
 let cwd: string;
@@ -336,7 +337,8 @@ describe("noninitializing audit and filesystem containment", () => {
     symlinkSync(outside, join(root, ".mex", "telemetry"), "dir");
     expect(enqueue(event())).toBe(false);
     expect(readdirSync(outside)).toEqual([]);
-    rmSync(join(root, ".mex", "telemetry")); mkdirSync(join(root, ".mex", "telemetry"));
+    expect(lstatSync(join(root, ".mex", "telemetry")).isSymbolicLink()).toBe(true);
+    unlinkSync(join(root, ".mex", "telemetry")); mkdirSync(join(root, ".mex", "telemetry"));
     const other = join(outside, "other"); writeFileSync(other, "do not change");
     symlinkSync(other, dbPath());
     expect(enqueue(event())).toBe(false);
@@ -401,6 +403,8 @@ describe("silent bounded delivery", () => {
     });
     captureEvent("cli.command_started", { command: "wiki.query", stage: "direct" });
     captureEvent("cli.command_completed", { command: "wiki.query", stage: "direct", outcome: "success", duration_ms: 5 });
+    // Successful delivery is independent from the best-effort CLI exit grace.
+    await expect.poll(() => inspectOutbox().events, { timeout: 2_000 }).toBe(0);
     await flush({ deadlineMs: 50 });
     expect(bodies).toHaveLength(1);
     expect(bodies[0].batch.map((item) => item.event)).toEqual(["cli.command_started", "cli.command_completed"]);
@@ -425,7 +429,9 @@ describe("silent bounded delivery", () => {
   it("never follows an ingestion redirect", async () => {
     let calls = 0;
     await endpoint((_request, response) => { calls++; response.writeHead(302, { Location: "https://example.com/private" }); response.end(); });
-    captureEvent("cli.command_started", { command: "check" }); await flush({ deadlineMs: 50 });
+    captureEvent("cli.command_started", { command: "check" });
+    await expect.poll(() => calls, { timeout: 2_000 }).toBe(1);
+    await flush({ deadlineMs: 50 });
     expect(calls).toBe(1); expect(inspectOutbox().events).toBe(1);
   });
   it("checks opt-out again before scheduled send; explicit disable clears queued events", async () => {
@@ -442,9 +448,10 @@ describe("silent bounded delivery", () => {
   });
   it("batches Hub activity at lifecycle shutdown without counting idle timer ticks", async () => {
     const batches: TelemetryEvent[][] = [];
-    await endpoint((request, response) => {
-      let body = ""; request.on("data", (part) => { body += part; });
-      request.on("end", () => { batches.push(JSON.parse(body).batch); response.end('{"status":1}'); });
+    // This case owns lifecycle batching; real HTTP delivery is covered above.
+    vi.spyOn(telemetryTransport, "sendBatch").mockImplementation((events) => {
+      batches.push([...events]);
+      return { done: Promise.resolve(true), abort() {} };
     });
     const stop = startHubTelemetry();
     captureEvent("hub.session_started"); captureEvent("hub.page_viewed", { page: "knowledge" });

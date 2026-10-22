@@ -41,6 +41,9 @@ import { resolve } from "node:path";
 import { tryEnsureSetupIgnoreProtection } from "../../setup/ignore.js";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
 import { inspectDirectWikiSpecMutation } from "./spec-authoring-boundary.js";
+import { wikiRegroundEntity } from "../service/reground.js";
+import { wikiLinkSections } from "../service/link-sections.js";
+import { publishSynthesis, readSynthesis, type WikiCliSynthesisBridge } from "./synthesis.js";
 import {
   graphDiagnostics,
   publishWithGraph,
@@ -71,6 +74,7 @@ import {
   wikiSynthesisBuild,
   wikiSynthesisPrepare,
   wikiSynthesisPropose,
+  wikiPrepareSynthesisPropose,
   wikiValidate,
   isPrepareStage,
   type PrepareStage,
@@ -99,6 +103,8 @@ export interface CommandIo {
    * invocation has no graph, which every one of them tolerates.
    */
   groundingBridge?: WikiCliGroundingBridge | null;
+  /** Production synthesis reads and publications adopt one strict fresh snapshot. */
+  synthesisBridge?: WikiCliSynthesisBridge | null;
   /** §12 scope knobs from `wiki.synthesis`. */
   synthesisScope?: SynthesisScope;
   /** Launch an agent with the playbook. Returns false when none is available. */
@@ -271,39 +277,18 @@ export function runBacklinks(io: CommandIo, id: string, flags: CommandFlags): vo
 }
 
 export async function runValidate(io: CommandIo, flags: CommandFlags): Promise<void> {
-  const { value: validated, unavailable } = await readWithGraph(io.groundingBridge, (graph) => wikiValidate({
+  const result = wikiValidate({
     ...serviceOptions(io),
     ...(io.projectRoot === undefined ? {} : { projectRoot: io.projectRoot }),
     ...filtersFrom(flags),
-    graph,
-  }));
-  const result = { ...validated, diagnostics: [...validated.diagnostics, ...graphDiagnostics(unavailable)] };
+  });
   emit(io, result, flags, (data) => {
     io.write(
       `${data.filesScanned} file(s), ${data.entitiesChecked} entities — ` +
         `${data.counts.error} error, ${data.counts.warning} warning, ${data.counts.info} info`,
     );
     if (data.truncated) io.write(chalk.dim("… more diagnostics than the bound; raise --limit to see them"));
-    if (data.groundingsUnverified) {
-      // Not a diagnostic: it says how much was checked, not that anything is
-      // wrong, and a CI run needs to tell a clean report from an unread one.
-      //
-      // Each case worded for what was actually true of the pass: the graph was
-      // used and still decided nothing, which puts the fault in what the
-      // groundings committed; the checkout has no graph; the caller gave this
-      // pass none, which says nothing about the checkout; or the checkout has
-      // one this pass could not trust, which the CODE_GRAPH_UNAVAILABLE notice
-      // below explains.
-      io.write(chalk.dim(
-        data.codeGraphAvailable
-          ? "grounding checks did not run — the code graph is present, but no grounding could be compared against it"
-          : unavailable === "missing"
-            ? "grounding checks did not run — this checkout has no code graph; `mex graph` builds one"
-            : unavailable === "not_supplied"
-              ? "grounding checks did not run — this pass was given no code graph; `mex check` is the grounding check"
-              : "grounding checks did not run — the code graph could not be used for this pass",
-      ));
-    }
+    io.write(chalk.dim("Wiki structure only; `mex check` checks every code link."));
   });
 }
 
@@ -469,6 +454,46 @@ export async function runApply(io: CommandIo, file: string, flags: CommandFlags)
 }
 
 /** Exported for the exit-code table's test, which asserts the CLI uses it. */
+/**
+ * `mex wiki reground <id>` — re-record an entity's code links after review.
+ * Plans by default; writes only with `--apply`, like `wiki apply`.
+ */
+export async function runReground(io: CommandIo, id: string, flags: CommandFlags & { reason?: string }): Promise<void> {
+  const write = flags.apply === true && flags.dryRun !== true;
+  const reground = (graph: import("../grounding/adapter.js").GroundingGraph | null) => wikiRegroundEntity(id, {
+    ...serviceOptions(io),
+    ...(write ? { apply: true } : {}),
+    ...(flags.reason === undefined ? {} : { reason: flags.reason }),
+    graph,
+  });
+  const { value, unavailable } = write
+    ? await writeWithGraph(io.groundingBridge, reground)
+    : await readWithGraph(io.groundingBridge, reground);
+  const result = { ...value, diagnostics: [...value.diagnostics, ...graphDiagnostics(unavailable)] };
+  emit(io, result, flags, (data) => {
+    for (const link of data.links) {
+      const target = link.recordedNode !== undefined && link.recordedNode !== link.node ? ` → ${link.recordedNode}` : "";
+      io.write(`${link.node}${target}: ${link.verdict}`);
+    }
+    if (data.apply?.applied) io.write(chalk.green(`re-recorded ${data.entityId} — ${data.apply.changedFiles.join(", ")}`));
+    else if (data.apply?.planned) io.write(chalk.dim("planned only — re-run with --apply to write"));
+  });
+}
+
+export async function runLinkSections(io: CommandIo, flags: CommandFlags): Promise<void> {
+  const write = flags.apply === true && flags.dryRun !== true;
+  const run = (graph: import("../grounding/adapter.js").GroundingGraph | null) =>
+    wikiLinkSections({ ...serviceOptions(io), graph, apply: write });
+  const { value, unavailable } = write
+    ? await writeWithGraph(io.groundingBridge, run)
+    : await readWithGraph(io.groundingBridge, run);
+  emit(io, { ...value, diagnostics: [...value.diagnostics, ...graphDiagnostics(unavailable)] }, flags, data => {
+    io.write(`${data.links.length} section connections${data.applied ? " written" : " planned"}`);
+    for (const link of data.links) io.write(`${link.source} → ${link.target} (${link.file})`);
+    if (!write && data.links.length) io.write("Re-run with --apply to write these relationships.");
+  });
+}
+
 export { WIKI_EXIT };
 
 // -- §12 synthesis: build, prepare, propose ----------------------------------
@@ -492,6 +517,18 @@ function synthesisOptions(io: CommandIo): Parameters<typeof wikiSynthesisBuild>[
   };
 }
 
+function runSynthesisRead<T>(
+  io: CommandIo,
+  flags: CommandFlags,
+  work: (bound: CommandIo) => ServiceResult<T>,
+  render: (data: T) => void,
+): void | Promise<void> {
+  if (!io.synthesisBridge) { emit(io, work(io), flags, render); return; }
+  return readSynthesis(io.synthesisBridge, snapshot => work({ ...io,
+    codeGraph: snapshot?.codeGraph ?? null, graph: snapshot?.graph ?? null,
+  })).then(result => { emit(io, result, flags, render); });
+}
+
 function directSpecBoundaryDiagnostics(
   io: CommandIo,
   envelope: unknown,
@@ -512,12 +549,11 @@ function directSpecBoundaryDiagnostics(
  * launches, because a command an agent is parsing must not open an interactive
  * session inside itself.
  */
-export function runBuild(io: CommandIo, flags: CommandFlags): void {
-  const result = wikiSynthesisBuild({
-    ...synthesisOptions(io),
+export function runBuild(io: CommandIo, flags: CommandFlags): void | Promise<void> {
+  return runSynthesisRead(io, flags, bound => wikiSynthesisBuild({
+    ...synthesisOptions(bound),
     ...(flags.cluster === undefined ? {} : { cluster: flags.cluster }),
-  });
-  emit(io, result, flags, (data) => {
+  }), (data) => {
     if (data.clusters.length === 0) return;
     io.write(`${data.clusters.length} cluster(s) to synthesize:`);
     for (const cluster of data.clusters) {
@@ -556,7 +592,7 @@ function unknownStage(value: string | undefined): WikiDiagnostic[] {
  * and scaffold. The prompt is what the agent sends to its own model; mex sends
  * nothing anywhere.
  */
-export function runPrepare(io: CommandIo, flags: CommandFlags): void {
+export function runPrepare(io: CommandIo, flags: CommandFlags): void | Promise<void> {
   if (!isPrepareStage(flags.stage)) {
     const envelope = envelopeFor(null, unknownStage(flags.stage));
     if (flags.json === true) io.write(renderEnvelope(envelope));
@@ -565,12 +601,11 @@ export function runPrepare(io: CommandIo, flags: CommandFlags): void {
     return;
   }
   const stage: PrepareStage = flags.stage;
-  const result = wikiSynthesisPrepare({
-    ...synthesisOptions(io),
+  return runSynthesisRead(io, flags, bound => wikiSynthesisPrepare({
+    ...synthesisOptions(bound),
     stage,
     ...(flags.cluster === undefined ? {} : { cluster: flags.cluster }),
-  });
-  emit(io, result, flags, (data) => {
+  }), (data) => {
     if (data.prompt === null) return;
     io.write(`stage ${data.stage}${data.cluster === null ? "" : ` · cluster ${data.cluster}`}`);
     if (data.groups.length > 0) io.write(`${data.groups.length} candidate group(s)`);
@@ -594,15 +629,14 @@ export function runPrepare(io: CommandIo, flags: CommandFlags): void {
  * plans, prints the diff and writes nothing, which is the safe outcome when a
  * caller says nothing at all.
  */
-export function runPropose(io: CommandIo, file: string, flags: CommandFlags): void {
-  const result = wikiSynthesisPropose({
-    ...synthesisOptions(io),
+export function runPropose(io: CommandIo, file: string, flags: CommandFlags): void | Promise<void> {
+  const proposalOptions = (bound: CommandIo) => ({
+    ...synthesisOptions(bound),
     responsePath: file,
-    ...(flags.apply === true && flags.dryRun !== true ? { apply: true } : {}),
     ...(isPrepareStage(flags.stage) ? { stage: flags.stage } : {}),
     ...(flags.cluster === undefined ? {} : { cluster: flags.cluster }),
   });
-  emit(io, result, flags, (data) => {
+  const render = (data: ReturnType<typeof wikiSynthesisPropose>["data"]) => {
     io.write(
       `${data.received} candidate(s) received, ${data.accepted} accepted, ${data.rejected.length} refused`,
     );
@@ -619,5 +653,15 @@ export function runPropose(io: CommandIo, file: string, flags: CommandFlags): vo
     }
     if (data.applied) io.write(chalk.green(`applied — ${data.changedFiles.join(", ")}`));
     else io.write(chalk.dim("planned only — re-run with --apply to write"));
-  });
+  };
+  const apply = flags.apply === true && flags.dryRun !== true;
+  if (!io.synthesisBridge) {
+    emit(io, wikiSynthesisPropose({ ...proposalOptions(io), ...(apply ? { apply: true } : {}) }), flags, render);
+    return;
+  }
+  if (!apply) return runSynthesisRead(io, flags, bound => wikiSynthesisPropose(proposalOptions(bound)), render);
+  return publishSynthesis(io.synthesisBridge,
+    snapshot => wikiPrepareSynthesisPropose(proposalOptions({ ...io, ...snapshot })),
+    () => wikiSynthesisPropose(proposalOptions({ ...io, codeGraph: null, graph: null })),
+  ).then(result => { emit(io, result, flags, render); });
 }

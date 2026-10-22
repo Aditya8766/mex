@@ -1,6 +1,8 @@
 import {
   AgentLoggingPolicySchema,
   HubOnboardingStateSchema,
+  HubRepositoryContributorsSchema,
+  type HubRepositoryContributors,
   ActivityResponseSchema,
   BootstrapResponseSchema,
   CodeKnowledgeResponseSchema,
@@ -127,7 +129,7 @@ import type {
   WikiRelationsResponse,
 } from "./types";
 import type { RelayTransport } from "./relay-client";
-import { isHubTelemetryPage, type HubTelemetryPage } from "./telemetry";
+import { isHubTeamAccessStep, isHubTelemetryPage, type HubTeamAccessStep, type HubTelemetryPage } from "./telemetry";
 
 const API_ROOT = "/api/v1";
 
@@ -198,6 +200,8 @@ export interface HubApi {
   getSetupInstallation?(): Promise<SetupInstallation>;
   installSetupGlobally?(): Promise<SetupInstallation>;
   recordPageView?(page: HubTelemetryPage): Promise<void>;
+  recordTeamAccess?(step: HubTeamAccessStep): Promise<void>;
+  getRepositoryContributors?(): Promise<HubRepositoryContributors>;
   getLoggingPolicy(): Promise<AgentLoggingPolicy>;
   setLoggingPolicy(request: AgentLoggingUpdateRequest): Promise<AgentLoggingPolicy>;
   getOnboardingState(): Promise<HubOnboardingState>;
@@ -368,6 +372,28 @@ export function clearBootstrapFragment(): void {
   window.history.replaceState(window.history.state, "", clean);
 }
 
+/**
+ * Exchange a one-use link for a session and return the startup error, if any.
+ * A used or expired link is not an error while this browser still holds a
+ * valid session, e.g. when the same link is opened again (#276).
+ */
+export async function openBootstrapSession(
+  api: Pick<HubApi, "bootstrap" | "getSession">,
+  token: string,
+): Promise<Error | null> {
+  try {
+    await api.bootstrap(token);
+    return null;
+  } catch (error) {
+    try {
+      await api.getSession();
+      return null;
+    } catch {
+      return error instanceof Error ? error : new Error("The bootstrap request failed.");
+    }
+  }
+}
+
 export class HttpHubApi implements HubApi {
   #csrfToken: string | null = null;
   #pageViewPending = false;
@@ -387,6 +413,21 @@ export class HttpHubApi implements HubApi {
       });
     } catch { /* A dropped local usage event must never disturb navigation. */ }
     finally { this.#pageViewPending = false; }
+  }
+
+  async recordTeamAccess(step: HubTeamAccessStep): Promise<void> {
+    if (!this.#csrfToken || !isHubTeamAccessStep(step)) return;
+    try {
+      await fetch(`${API_ROOT}/telemetry/team-access`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-MEX-CSRF": this.#csrfToken },
+        body: JSON.stringify({ step }),
+        credentials: "same-origin",
+        redirect: "error",
+        referrerPolicy: "no-referrer",
+        signal: AbortSignal.timeout(2_000),
+      });
+    } catch { /* A dropped local usage event must never disturb the card. */ }
   }
   #relayTransport: RelayTransport = {
     request: (path, schema, init, mutation) => this.#request(path, schema, init, mutation),
@@ -716,6 +757,10 @@ export class HttpHubApi implements HubApi {
 
   getOnboardingState(): Promise<HubOnboardingState> {
     return this.#request("/settings/onboarding", HubOnboardingStateSchema);
+  }
+
+  getRepositoryContributors(): Promise<HubRepositoryContributors> {
+    return this.#request("/repository/contributors", HubRepositoryContributorsSchema);
   }
 
   completeOnboarding(): Promise<HubOnboardingState> {

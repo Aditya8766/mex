@@ -37,6 +37,7 @@ import type { GraphEngine } from "../../graph/engine.js";
 import type { Fingerprint, Reconciler, Resolution } from "../../graph/reconcile.js";
 import type { SqliteDatabase } from "../../graph/db/sqlite.js";
 import type { GroundingBaseline, GroundingSubject } from "../../graph/grounding.js";
+import { createGroundingEvidence, type GroundingChangeEvidence } from "../../graph/grounding-evidence.js";
 import { asGraphDerived, type GraphDerivedGrounding, type WikiGrounding } from "../model/grounding.js";
 
 /**
@@ -71,6 +72,8 @@ export interface GroundedNode {
  * what would make drift disappear behind a helpful-looking cache update.
  */
 export interface GroundingGraph {
+  /** A stable parse gap permits direct verified targets, but proves no absence. */
+  readonly incompleteReason?: string;
   /** The node under this id, or null when the graph has no such node. */
   getNode(nodeId: string): GroundedNode | null;
   /** The node's serialized fingerprint in this checkout, or null. */
@@ -88,14 +91,26 @@ export interface GroundingGraph {
    * The cached baseline for one (subject, node), **for rendering an old-vs-new
    * diff only**.
    *
-   * Never consult this to decide whether something drifted. It is re-captured
-   * by an ordinary graph rebuild, so a current-against-baseline comparison is a
-   * current-against-current comparison and reports `fresh` for code that
-   * changed — at exactly the moment the user did the most ordinary thing
-   * available to them.
+   * Never treat this disposable row as the accepted change baseline. Current
+   * code cannot recreate lost historical source after an index is discarded;
+   * only content matching the committed body hash can explain its old side.
    */
   getBaselineSource(subject: GroundingSubject, nodeId: string): GroundingBaseline | null;
+  /**
+   * What can be said about a body that no longer matches the committed hash.
+   * Optional: a graph that cannot read source returns nothing and every
+   * changed body stays `changed`.
+   */
+  explainChange?(grounding: WikiGrounding, nodeId: string): ChangeEvidence | null;
+  /**
+   * Explicit maintenance may cache a body whose hash matches. Never invoke
+   * this from resolution or ordinary reads: it writes checkout-local state.
+   */
+  rememberBody?(nodeId: string, bodyHash: string): void;
 }
+
+/** Evidence about a changed body; see `src/graph/grounding-evidence.ts`. */
+export type ChangeEvidence = GroundingChangeEvidence;
 
 /** Build the graph-backed implementation. The only place `src/graph/` is bound in. */
 export function createGroundingGraph(
@@ -103,8 +118,16 @@ export function createGroundingGraph(
   /** May take the committed body hash as a tie-breaker, as the graph's reconciler does (#229). */
   reconciler: Reconciler & { reconcile(nodeId: string, baseline: Fingerprint, bodyHash?: string): Resolution },
   db: SqliteDatabase,
+  /** Enables {@link GroundingGraph.explainChange}: where source is read from, and where old bodies are kept. */
+  source?: { projectRoot: string; bodyCacheDir?: string },
 ): GroundingGraph {
   const store = new FingerprintStore(db);
+  const evidence = source === undefined ? null : createGroundingEvidence({
+    projectRoot: source.projectRoot,
+    getNode: (nodeId) => engine.getNode(nodeId),
+    recallBody: (bodyHash) => store.sourceByBodyHash(bodyHash),
+    ...(source.bodyCacheDir === undefined ? {} : { bodyCacheDir: source.bodyCacheDir }),
+  });
   return {
     getNode(nodeId) {
       const node = engine.getNode(nodeId);
@@ -126,6 +149,12 @@ export function createGroundingGraph(
     },
     getBaselineSource(subject, nodeId) {
       return store.getBaseline(subject, nodeId);
+    },
+    explainChange(grounding, nodeId) {
+      return evidence === null ? null : evidence.explainChange(grounding, nodeId);
+    },
+    rememberBody(nodeId, bodyHash) {
+      evidence?.rememberBody(nodeId, bodyHash);
     },
   };
 }
@@ -184,6 +213,8 @@ export function deriveGrounding(
  * what was asked for and let the caller say how much it asked for.
  */
 export interface SynthesisGraph {
+  /** Snapshot-bound source when composed by the repository adapter. */
+  readFileLines?(filePath: string): string[] | null;
   /** Every indexed file, deduplicated, in path order. */
   listFiles(): Array<{ path: string }>;
   /** The declarations in one file. Empty for a path the graph does not know. */

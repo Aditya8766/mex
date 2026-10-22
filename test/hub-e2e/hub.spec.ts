@@ -2404,7 +2404,7 @@ test.describe("built production Hub", () => {
     );
     processHandle = spawn(process.execPath, [join(root, "dist", "cli.js"), "hub", "--no-open"], {
       cwd: projectRoot,
-      env: { ...process.env, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+      env: { ...process.env, MEX_HOME: join(projectRoot, ".mex", "local", "browser-home"), MEX_TELEMETRY: "0", NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     bootstrapUrl = await readBootstrapUrl(processHandle);
@@ -2472,11 +2472,12 @@ test.describe("built production Hub", () => {
     await expect.poll(() => contactAssetRequests.length).toBe(1);
     expect(setupAssetRequests).toEqual([]);
     expect(teamAccessDialogRequests).toEqual([]);
-    const requestAccess = page.getByRole("button", { name: "Request access", exact: true });
+    const requestAccess = page.getByRole("button", { name: "Join the hosted beta", exact: true });
     await requestAccess.click();
-    const teamAccessDialog = page.getByRole("dialog", { name: "Request access", exact: true });
+    const teamAccessDialog = page.getByRole("dialog", { name: "Join the hosted beta", exact: true });
     await expect(teamAccessDialog).toBeVisible();
-    await expect(teamAccessDialog.getByRole("textbox", { name: "Name", exact: true })).toBeFocused();
+    await expect(teamAccessDialog.getByRole("textbox", { name: "Email", exact: true })).toBeFocused();
+    await expect(teamAccessDialog.getByRole("textbox", { name: "Name", exact: true })).toHaveCount(0);
     expect(teamAccessDialogRequests).toHaveLength(1);
     for (const width of [1024, 1440]) {
       await page.setViewportSize({ width, height: 900 });

@@ -10,15 +10,17 @@ This scaffold is currently empty. Follow the steps below to populate it for your
 mex setup
 ```
 
-This opens the local browser Hub. Use `mex setup --cli` for terminal setup,
-or `mex setup --dry-run` for a read-only terminal preview.
+This opens the terminal setup HUD. Highlight your AI tool and press Enter to
+select it and start; Space optionally selects additional integrations. Use
+`mex setup --browser` for browser setup, or `mex setup --dry-run` for a read-only
+terminal preview. `--cli` remains an alias for the default terminal flow.
 
-The Hub handles the setup workflow:
+Setup runs the following steps, then opens the Hub for review and completion:
 1. Detects your project state without overwriting existing scaffold files
 2. Protects `.mex/graph.db*`, `.mex/wiki.db*`, and `.mex/local/` from Git
-3. Asks which AI tool you use and installs the right project instructions
+3. Installs the project instructions for your selected AI tools
 4. Scans the codebase and builds the local code graph
-5. Launches the first selected available Claude Code or Codex CLI, or shows a copyable prompt when no agent is available or the agent fails
+5. Hands the terminal to the first selected available Claude Code or Codex CLI; exiting the agent returns to MEX for file checks, with a manual prompt when population is incomplete (browser setup uses a background agent session)
 6. Captures grounding, migrates the populated Markdown, builds the Wiki index, and validates it
 7. Shows the exact setup diff for an explicit local commit, with a manual Git option
 8. Shows a completion guide, optional global install at the running version, and optional contact details before **Open Hub**
@@ -27,6 +29,12 @@ Global install and contact submission are optional. Email is needed only if you
 choose to send contact details; name is optional. Contact details go through the
 embedded form service and stay out of project files and usage telemetry.
 The introductory Hub tour begins after opening the full Hub.
+
+For scripts, use `--yes` and repeatable `--tool` flags (or `--tool none`).
+Piped input/output and CI also use plain output and never launch an agent or
+long-lived Hub. Exit 2 means population is pending; populate the scaffold and
+rerun setup to continue. Exit 0 means preparation is complete. Use
+`mex setup --browser` to open the commit and completion page afterward.
 
 For Claude Code and Codex, setup also copies the packaged `mex-inbox` and
 `mex-relay` skills into the project. No plugin or separate skill installer is
@@ -125,14 +133,20 @@ section using anchor links (see INDEX.md annotation for format).
 
 PASS 3 — Wire the web:
 
+File-level edges do not connect separate section entities. Preview missing
+section-to-parent `refines` relationships with `mex wiki link-sections`, then
+write explicitly with `mex wiki link-sections --apply`. Use existing ids and
+review cross-entity semantic relationships from evidence; never invent links
+to meet a count or duplicate inverse backlinks.
+
 Re-read every file you just wrote (context/ files, pattern files, ROUTER.md).
 For each file, add or update the `edges` array in the YAML frontmatter.
 Each edge should point to another scaffold file that is meaningfully related,
 with a `condition` explaining when an agent should follow that edge.
 
 Rules for edges:
-- Every context/ file should have at least 2 edges
-- Every pattern file should have at least 1 edge (usually to the relevant context file)
+- Add only meaningful edges supported by the content; there is no minimum count
+- Link a pattern to its relevant context file when the content supports it
 - Edges should be bidirectional where it makes sense (if A links to B, consider B linking to A)
 - Use relative paths (e.g., context/stack.md, patterns/add-endpoint.md)
 - Pattern files can edge to other patterns (e.g., debug pattern → related task pattern)
@@ -213,14 +227,18 @@ pattern file you created.
 
 PASS 3 — Wire the web:
 
+Connect section entities to their enclosing knowledge with canonical `refines`
+relations and existing ids. Preview with `mex wiki link-sections`, then apply
+explicitly with `--apply`. Semantic dependencies need evidence, not link quotas.
+
 Re-read every file you just wrote (context/ files, pattern files, ROUTER.md).
 For each file, add or update the `edges` array in the YAML frontmatter.
 Each edge should point to another scaffold file that is meaningfully related,
 with a `condition` explaining when an agent should follow that edge.
 
 Rules for edges:
-- Every context/ file should have at least 2 edges
-- Every pattern file should have at least 1 edge
+- Add only meaningful edges supported by the content; there is no minimum count
+- Link a pattern to its relevant context file when the content supports it
 - Edges should be bidirectional where it makes sense
 - Use relative paths (e.g., context/stack.md, patterns/add-endpoint.md)
 

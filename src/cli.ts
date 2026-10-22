@@ -1,11 +1,12 @@
 import chalk from "chalk";
-import { Command, InvalidArgumentError } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { findConfig, getScaffoldIdentity } from "./config.js";
 import { reportConsole, reportQuiet, reportJSON, reportVerbose } from "./reporter.js";
 import { VERSION } from "./version.js";
+import { unsupportedNodeMessage } from "./node-version.js";
 import { captureEvent, flush, isEnabled, getProjectTelemetryContext, getTelemetryInspection, disableTelemetry, showFirstRunNotice } from "./telemetry/index.js";
 import { setGlobalConfigKey } from "./global-config.js";
 import { createCliTelemetry, telemetryProjectLocation } from "./cli-telemetry.js";
@@ -175,6 +176,36 @@ async function runBrowserCommand(options: { port?: number; open: boolean; mode?:
   await launchHub({ port: options.port, openBrowser: options.open, mode: options.mode, setup: options.setup });
 }
 
+async function reportSetupCommandError(error: unknown): Promise<void> {
+  const { SetupError } = await import("./setup/errors.js");
+  console.error(error instanceof SetupError ? error.userMessage : error instanceof Error ? error.message : String(error));
+  if (error instanceof SetupError && error.message !== error.userMessage) console.error(`Diagnostics: ${error.message}`);
+  process.exitCode = 1;
+}
+
+async function runSetupCommand(options: {
+  browser?: boolean; dryRun?: boolean; mode?: string; port?: number; open: boolean; tool?: string[]; yes?: boolean;
+}): Promise<void> {
+  try {
+    if (options.browser) {
+      await runBrowserCommand({ ...options, setup: true });
+      return;
+    }
+    const setup = await import("./setup/index.js");
+    const result = await setup.runSetup({
+      dryRun: options.dryRun,
+      mode: options.mode,
+      port: options.port,
+      openBrowser: options.open,
+      ...(options.tool === undefined ? {} : { tools: setup.parseSetupTools(options.tool) }),
+      ...(options.yes ? { yes: true } : {}),
+    });
+    process.exitCode = result.exitCode;
+  } catch (error) {
+    await reportSetupCommandError(error);
+  }
+}
+
 // ── Telemetry hooks ──
 
 const cliTelemetry = createCliTelemetry(captureEvent, flush, undefined, (command) => {
@@ -192,7 +223,13 @@ program
   .option("--port <n>", "Bind a specific loopback port", parsePortArg)
   .option("--no-open", "Print the Hub link without opening a browser")
   .action(async (opts: { port?: number; open: boolean }) => {
-    await runBrowserCommand(opts);
+    try {
+      const { resolveDefaultEntry } = await import("./setup/entry.js");
+      if (await resolveDefaultEntry() === "hub") await runBrowserCommand(opts);
+      else await runSetupCommand(opts);
+    } catch (error) {
+      await reportSetupCommandError(error);
+    }
   });
 
 program
@@ -301,30 +338,30 @@ program.addCommand(buildSpecCommand({
   io: processTeamCommandIo(),
 }));
 
-// ── Setup (browser by default; explicit terminal and read-only paths) ──
+// ── Setup (terminal by default; explicit browser and read-only paths) ──
 program
   .command("setup")
-  .description("Set up MEX in the local Hub; use --cli for terminal setup")
-  .option("--cli", "Run setup in the terminal")
+  .description("Set up MEX in the terminal; use --browser for browser setup")
+  .option("--cli", "Run setup in the terminal (the default)")
+  .addOption(new Option("--browser", "Run setup in the local browser Hub").conflicts(["cli", "dryRun", "tool", "yes"]))
   .option("--mode <mode>", "Template mode: code-repo or agent-memory (preserves saved mode)")
   .option("--dry-run", "Show what would happen without making changes")
   .option("--port <n>", "Bind a specific loopback port", parsePortArg)
-  .option("--no-open", "Print the setup link without opening a browser")
+  .option("--no-open", "Show the Hub link without opening a browser")
+  .option("--tool <tool>", "Terminal setup: preselect an AI tool (repeatable; none for no tool; --yes skips review)", (value: string, previous: string[] = []) => [...previous, value])
+  .option("--yes", "Terminal setup: never wait on a question (for scripts and CI)")
+  .addHelpText(
+    "after",
+    "\nSetup modes:\n"
+      + "  Terminal (default, or --cli)  Runs setup in this terminal. --tool, --yes and --dry-run\n"
+      + "                                apply only here.\n"
+      + "  Browser (--browser)           Runs setup in the local browser Hub. It cannot be combined\n"
+      + "                                with --cli, --tool, --yes or --dry-run.\n"
+      + "\n--no-open prints the Hub link instead of opening it in a browser. In the terminal\n"
+      + "mode this is the link to the finishing Hub page; in the browser mode it is the setup link.\n",
+  )
   .action(async (_opts, command: Command) => {
-    const opts = command.optsWithGlobals<{ cli?: boolean; dryRun?: boolean; mode?: string; port?: number; open: boolean }>();
-    try {
-      if (opts.cli || opts.dryRun) {
-        if (opts.port !== undefined || opts.open === false) throw new Error("--port and --no-open apply to browser setup. Omit them with --cli or --dry-run.");
-        const { runSetup } = await import("./setup/index.js");
-        await runSetup({ dryRun: opts.dryRun, mode: opts.mode });
-      } else {
-        await runBrowserCommand({ ...opts, setup: true });
-      }
-    } catch (err) {
-      console.error((err as Error).message);
-      process.exitCode = 1;
-      return;
-    }
+    await runSetupCommand(command.optsWithGlobals());
   });
 
 // ── Official agent skills ──
@@ -383,7 +420,7 @@ skillsCommand
 // ── Layer 2: Drift Detection ──
 program
   .command("check")
-  .description("Detect drift between scaffold files and codebase reality")
+  .description("Run every deterministic drift check, including scaffold and Wiki code links; read-only, no AI")
   .option("--json", "Output full drift report as JSON")
   .option("--quiet", "Single-line summary only")
   .option("--fix", "Run sync to fix any issues found")
@@ -544,13 +581,14 @@ graphCommand
 
 graphCommand
   .command("query <relation> <target>")
-  .description("Query graph structure: who-calls, what-calls, or where-defined")
+  .description("Query who-calls, what-calls, or where-defined by symbol, node id, or indexed file:line")
   .option("--detail <level>", "minimal | standard | source", "minimal")
   .option("--max-nodes <n>", "maximum results to return")
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
-  .action((relation, target, options) => {
-    return import("./graph/cli-agent.js").then(({ runGraphQuery }) => runGraphQuery(relation, target, process.cwd(), {}, options));
+  .action(async (relation, target, options) => {
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return import("./graph/cli-agent.js").then(({ runGraphQuery }) => runGraphQuery(relation, target, process.cwd(), { write: createGraphCliWriter() }, options));
   });
 
 graphCommand
@@ -575,7 +613,8 @@ graphCommand
             knowledgeRecordsFor(nodeIds).map((record) => ({ ...record })),
         }))
       : {};
-    return runGraphScope(task.join(" "), process.cwd(), deps, options);
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return runGraphScope(task.join(" "), process.cwd(), { ...deps, write: createGraphCliWriter() }, options);
   });
 
 // ── Wiki ──
@@ -615,7 +654,7 @@ function wikiIo(): import("./wiki/cli/commands.js").CommandIo {
 
 /**
  * `wikiIo()` plus the code graph, for the commands that resolve groundings
- * (#232): validate, rebuild-index, migrate, apply and regenerate-views.
+ * (#232): rebuild-index, migrate, apply, reground and regenerate-views.
  *
  * The graph is the repository graph port, the same one the Project Hub hands
  * the Wiki: it opens nothing until a command asks for a snapshot, refuses one
@@ -681,12 +720,12 @@ withReadFilters(wikiCommand.command("backlinks <id>").description("Entities that
 
 wikiCommand
   .command("validate")
-  .description("Check the whole scaffold; works with no index and no code graph")
+  .description("Check Wiki structure (ids, relations, evidence, anchors); code links are checked by `mex check`")
   .option("--limit <n>", "maximum diagnostics to report")
   .option("--json", "emit one enveloped JSON object")
   .action(async (options) => {
     const { runValidate } = await import("./wiki/cli/commands.js");
-    await runValidate(await groundedWikiIo(), options);
+    await runValidate(wikiIo(), options);
   });
 
 withReadFilters(wikiCommand.command("graph").description("A bounded slice of the relation graph")).action(
@@ -736,6 +775,40 @@ wikiCommand
     await runApply(await groundedWikiIo(), file, options);
   });
 
+wikiCommand
+  .command("reground <entity-id>")
+  .description("Re-record an entity's code links after review confirms its text still holds; writes only with --apply")
+  .option("--apply", "write the re-recorded links, rather than only planning them")
+  .option("--reason <text>", "why the links are re-recorded, kept in the operation log")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (id: string, options) => {
+    const { runReground } = await import("./wiki/cli/commands.js");
+    await runReground(await groundedWikiIo(), id, options);
+  });
+
+wikiCommand
+  .command("link-sections")
+  .description("Connect existing knowledge sections to their enclosing knowledge; writes only with --apply")
+  .option("--apply", "write the planned structural relationships")
+  .option("--dry-run", "plan only, even if --apply was given")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runLinkSections } = await import("./wiki/cli/commands.js");
+    await runLinkSections(await groundedWikiIo(), options);
+  });
+
+wikiCommand
+  .command("upgrade")
+  .description("Preview an existing scaffold's review for one code-linked fact per entity; --apply starts an interactive agent")
+  .option("--apply", "start the explicit agent review, rather than preview only")
+  .option("--dry-run", "preview only, even if --apply was given")
+  .option("--after <entity-id>", "resume bounded review after an existing entity id")
+  .option("--tool <name>", "optional interactive CLI override; otherwise uses the same agent chooser as mex sync")
+  .action(async (options) => {
+    const { runKnowledgeUpgrade } = await import("./sync/knowledge-upgrade.js");
+    await runKnowledgeUpgrade(loadConfig(), options);
+  });
+
 /**
  * The synthesis wiring: the code graph, and an agent launcher.
  *
@@ -747,39 +820,24 @@ wikiCommand
  */
 async function synthesisIo(): Promise<import("./wiki/cli/commands.js").CommandIo> {
   const base = wikiIo();
-  const config = loadConfig();
-  const { resolve } = await import("node:path");
-  const { existsSync } = await import("node:fs");
-  const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
-  if (!existsSync(dbPath)) return base;
+  const config = findConfig();
 
   const [
-    { createGroundingGraph, createSynthesisGraph },
-    { openGraphDatabase },
-    { createGraphEngine },
-    { MinHashReconciler },
-    { FingerprintStore },
+    { createRepositoryGraphPort },
     { AI_TOOLS },
     { isCliAvailable },
     { runToolInteractive },
   ] = await Promise.all([
-    import("./wiki/grounding/adapter.js"),
-    import("./graph/db/database.js"),
-    import("./graph/engine-impl.js"),
-    import("./graph/reconcile-engine.js"),
-    import("./graph/fingerprint-store.js"),
+    import("./graph/application-adapter.js"),
     import("./types.js"),
     import("./cli-tools.js"),
     import("./sync/index.js"),
   ]);
 
-  const db = openGraphDatabase(dbPath);
-  const engine = createGraphEngine({ rootDir: config.projectRoot, dbPath });
   return {
     ...base,
     repoRoot: config.projectRoot,
-    codeGraph: createSynthesisGraph(engine, db),
-    graph: createGroundingGraph(engine, new MinHashReconciler(new FingerprintStore(db)), db),
+    synthesisBridge: createRepositoryGraphPort(config.projectRoot),
     ...(config.wiki?.synthesis === undefined ? {} : { synthesisScope: config.wiki.synthesis }),
     launchAgent: (playbook: string) => {
       // mex's own launcher, not a second one: six tools, cross-platform
@@ -806,7 +864,7 @@ wikiCommand
   .option("--json", "emit one enveloped JSON object; never launches an agent")
   .action(async (options) => {
     const { runBuild } = await import("./wiki/cli/commands.js");
-    runBuild(await synthesisIo(), { ...options, print: options.print === true || options.json === true });
+    await runBuild(await synthesisIo(), { ...options, print: options.print === true || options.json === true });
   });
 
 wikiCommand
@@ -817,7 +875,7 @@ wikiCommand
   .option("--json", "emit one enveloped JSON object")
   .action(async (options) => {
     const { runPrepare } = await import("./wiki/cli/commands.js");
-    runPrepare(await synthesisIo(), options);
+    await runPrepare(await synthesisIo(), options);
   });
 
 wikiCommand
@@ -830,12 +888,12 @@ wikiCommand
   .option("--json", "emit one enveloped JSON object")
   .action(async (file: string, options) => {
     const { runPropose } = await import("./wiki/cli/commands.js");
-    runPropose(await synthesisIo(), file, options);
+    await runPropose(await synthesisIo(), file, options);
   });
 
 wikiCommand
   .command("for-code <nodeId...>")
-  .description("Knowledge entities grounded to the given code-graph node ids")
+  .description("Knowledge entities grounded to the given code-graph node ids, with the link health `mex check` reports")
   .option("--json", "Emit one enveloped JSON object instead of JSONL records")
   .option("--limit <n>", "maximum entities to return")
   .option("--include-archived", "include archived entities, which are excluded by default")
@@ -854,8 +912,9 @@ graphCommand
   .option("--detail <level>", "source (get always returns source)", "source")
   .option("--max-source-lines <n>", "per-node source line cap")
   .option("--max-output-tokens <n>", "hard output token ceiling")
-  .action((ids: string[], options) => {
-    return import("./graph/cli-agent.js").then(({ runGraphGet }) => runGraphGet(ids, process.cwd(), {}, options));
+  .action(async (ids: string[], options) => {
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return import("./graph/cli-agent.js").then(({ runGraphGet }) => runGraphGet(ids, process.cwd(), { write: createGraphCliWriter() }, options));
   });
 
 graphCommand
@@ -915,14 +974,16 @@ graphCommand
 
 program
   .command("impact <target>")
-  .description("Show transitive code and scaffold blast radius for a symbol or file")
+  .description("Show transitive code and scaffold blast radius for a symbol, node id, file, or indexed file:line")
+  .addOption(new Option("--direction <direction>", "proven call edges: callers (default), callees, or both").choices(["callers", "callees", "both"]))
   .option("--detail <level>", "minimal | standard | source", "minimal")
-  .option("--depth <n>", "transitive caller depth", "2")
+  .option("--depth <n>", "transitive call-edge depth", "2")
   .option("--max-nodes <n>", "maximum impacted nodes to return")
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
-  .action((target, options) => {
-    return import("./graph/cli-agent.js").then(({ runImpact }) => runImpact(target, process.cwd(), {}, options));
+  .action(async (target, options) => {
+    const { createGraphCliWriter } = await import("./graph-cli-output.js");
+    return import("./graph/cli-agent.js").then(({ runImpact }) => runImpact(target, process.cwd(), { write: createGraphCliWriter() }, options));
   });
 
 // ── Agent Memory Events ──
@@ -1029,7 +1090,7 @@ program
 // ── Layer 3: Targeted Sync ──
 program
   .command("sync")
-  .description("Run drift check, then build targeted prompts for AI to fix flagged files")
+  .description("Run drift check, then fix flagged files and review flagged Wiki entities in one interactive AI session")
   .option("--dry-run", "Show what would be synced without executing")
   .option("--warnings", "Include warning-only files (by default only errors are synced)")
   .action(async (opts) => {
@@ -1265,9 +1326,9 @@ program
   .description("List all available commands and scripts")
   .action(() => {
     console.log(chalk.bold("\nCLI Commands") + chalk.dim("  (run from project root)\n"));
-    console.log("  mex                    Open the local Hub (or setup for a new project)");
-    console.log("  mex setup              Set up MEX in the local browser Hub");
-    console.log("  mex setup --cli        Use the terminal setup flow");
+    console.log("  mex                    Open the Hub, or terminal setup for a new project");
+    console.log("  mex setup              Set up MEX in the terminal HUD");
+    console.log("  mex setup --browser    Use the browser setup flow");
     console.log("  mex setup --dry-run    Preview setup without making changes");
     console.log("  mex skills sync        Install/update official skills for configured agents");
     console.log("  mex skills sync --dry-run --json  Preview skill and instruction changes as JSON");
@@ -1342,7 +1403,12 @@ if (process.argv[1]) {
     // argv[1] is missing or not on disk (e.g. test fixtures) — not the main entry.
   }
 }
-if (isMainModule) {
+// Refuse unsupported Node before any command runs, so it cannot fail halfway.
+const unsupportedNode = isMainModule ? unsupportedNodeMessage(process.versions.node) : null;
+if (unsupportedNode !== null) {
+  console.error(unsupportedNode);
+  process.exitCode = 1;
+} else if (isMainModule) {
   if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
   const commandArgv = process.argv.slice(2);
   const teamJsonContext = inspectTeamJsonInvocation(commandArgv);

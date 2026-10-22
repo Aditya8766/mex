@@ -49,6 +49,21 @@ function pending<T>(): Promise<T> {
 const unavailable = (reason: string) => ({ availability: "unavailable" as const, reason });
 
 describe("Home states", () => {
+  it.each([
+    [{ relayPublished: true, moreThanOneContributor: false }, true],
+    [{ relayPublished: false, moreThanOneContributor: true }, true],
+    [{ relayPublished: false, moreThanOneContributor: false }, false],
+  ] as const)("re-asks a skipped person about the hosted beta when Overview sharing is %j", async (sharing, asked) => {
+    const api = createFixtureApi({ overviewFixture: "caught-up" });
+    const overview = await api.getOverview();
+    vi.spyOn(api, "getOverview").mockResolvedValue({ ...overview, sharing });
+    Object.assign(api, { getContactPreference: vi.fn().mockResolvedValue({ status: "skipped" }) });
+    renderRoute("/", api);
+    const card = await screen.findByRole("region", { name: "Share this memory with your team" }, { timeout: 10_000 });
+    if (asked) expect(await within(card).findByRole("button", { name: "Join the hosted beta" })).toBeVisible();
+    else expect(await within(card).findByText("Keep using this Hub with your team.")).toBeVisible();
+  });
+
   it("renders independently loading atlas panels from the Overview aggregate", async () => {
     renderRoute("/", apiWith({ getOverview: () => pending<OverviewResponse>() }));
 
@@ -898,6 +913,34 @@ describe("Search states", () => {
 });
 
 describe("Health states", () => {
+  it("groups repeated health messages while preserving severity and diagnostic details", async () => {
+    const fixture = createFixtureApi();
+    const health = await fixture.getHealth();
+    const message = "A Knowledge code link could not be found in the current graph.";
+    renderRoute("/health", apiWith({ getHealth: () => Promise.resolve({
+      ...health,
+      components: [{
+        id: "wiki", label: "Wiki index", status: "degraded", summary: "Knowledge needs review.",
+        diagnostics: [
+          { code: "GROUNDING_MISSING", severity: "warning", message, path: ".mex/context/first.md" },
+          { code: "GROUNDING_MISSING", severity: "warning", message, path: ".mex/context/second.md" },
+          { code: "OTHER_DIAGNOSTIC", severity: "warning", message },
+          { code: "GROUNDING_MISSING", severity: "error", message },
+        ],
+      }],
+    }) }));
+    const summary = await screen.findByText(`${message} (3 occurrences)`);
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(screen.getByText(message).closest("li")).toHaveAttribute("data-severity", "error");
+    await userEvent.setup().click(summary);
+    expect(details).toHaveAttribute("open");
+    expect(within(details).getByText(".mex/context/first.md")).toBeVisible();
+    expect(within(details).getByText(".mex/context/second.md")).toBeVisible();
+    expect(within(details).getByText("OTHER_DIAGNOSTIC")).toBeVisible();
+    expect(within(details).getAllByRole("listitem")).toHaveLength(3);
+  });
+
   it("renders its loading state while the read-only inspection is pending", async () => {
     renderRoute("/health", apiWith({ getHealth: () => pending<HealthResponse>() }));
 

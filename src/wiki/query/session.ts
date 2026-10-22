@@ -97,6 +97,15 @@ export interface SearchPage extends Page<SearchPageHit> {
   unmatchedTerms: string[];
 }
 
+/** A compact explanation of one cached grounding verdict, separate from lifecycle. */
+export interface SearchGrounding {
+  nodeId: string;
+  resolvedNodeId: string | null;
+  health: GroundingHealth | null;
+  state: string | null;
+  reason: string | null;
+}
+
 /** Per-term bound for the broader tier; the same ceiling `list` reads to. */
 const SOME_TERMS_PER_TERM_LIMIT = 2000;
 
@@ -291,7 +300,10 @@ export class WikiQuerySession {
     const some = this.decorate(rows)
       .map((entity, index) => ({ entity, match: byKey.get(rows[index]!.entity_key)! }))
       .filter((hit) => !seen.has(hit.entity.id) && isVisible(hit.entity.status, options))
-      .map((hit) => ({ entity: hit.entity, field: hit.match.field, score: hit.match.score, matchedTerms: hit.match.matchedTerms }))
+      .map((hit) => ({
+        entity: hit.entity, field: hit.match.field, score: hit.match.score, matchedTerms: hit.match.matchedTerms,
+        relevance: hit.match.relevance,
+      }))
       .sort((left, right) => right.score - left.score || compareHits(left, right))
       .map((hit): SearchPageHit => ({
         entity: hit.entity, field: hit.field, match: "some_terms", matchedTerms: hit.matchedTerms,
@@ -389,6 +401,20 @@ export class WikiQuerySession {
       health: row.health === null ? null : (row.health as GroundingHealth),
       state: row.state,
     }));
+  }
+
+  /** Search exposes at most 25 links per hit, with an honest overflow signal. */
+  searchGroundingsFor(id: string): { items: SearchGrounding[]; truncated: boolean } {
+    const rows = this.db.prepare(`SELECT g.node_id, g.resolved_node, g.health, g.state,
+      CASE WHEN json_valid(g.resolution) THEN substr(json_extract(g.resolution, '$.reason'), 1, 1024) END AS reason
+      FROM wiki_groundings g JOIN wiki_entities e ON e.entity_key = g.entity_key
+      WHERE e.id = ? AND e.shadowed = 0 ORDER BY g.ordinal LIMIT 26`).all(id) as {
+        node_id: string; resolved_node: string | null; health: GroundingHealth | null; state: string | null; reason: string | null;
+      }[];
+    return { items: rows.slice(0, 25).map(row => ({
+      nodeId: row.node_id, resolvedNodeId: row.resolved_node, health: row.health, state: row.state,
+      reason: row.reason ?? (row.health === "changed" ? "The grounded code changed; re-check this claim." : null),
+    })), truncated: rows.length > 25 };
   }
 
   /**
@@ -511,6 +537,23 @@ export class WikiQuerySession {
    * ranking order answers the first question with the second's answer, which
    * nothing caught while the column was always NULL.
    */
+  /**
+   * How many of these entities' groundings carry no verdict: health never
+   * resolved (the index was built without a code graph) or `unverified` (the
+   * graph was unavailable or stale when it was). Their entities read as
+   * unflagged without having been checked.
+   */
+  uncheckedGroundings(entityIds: readonly string[]): number {
+    if (entityIds.length === 0) return 0;
+    const row = this.db
+      .prepare(
+        `SELECT count(*) AS n FROM wiki_groundings g JOIN wiki_entities e ON e.entity_key = g.entity_key
+          WHERE e.id IN (${entityIds.map(() => "?").join(", ")}) AND (g.health IS NULL OR g.health = 'unverified') LIMIT 1`,
+      )
+      .get(...entityIds) as { n: number } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
   private decorate(rows: readonly EntityRow[]): EntitySummary[] {
     if (rows.length === 0) return [];
     const keys = rows.map((row) => row.entity_key);
