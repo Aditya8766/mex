@@ -161,8 +161,8 @@ export async function buildSetupGraph(projectRoot: string, options: {
 } = {}): Promise<void> {
   throwIfSetupAborted(options.signal);
   try {
-    const { rebuildGraph } = await import("../graph/maintenance.js");
-    await rebuildGraph(projectRoot, {
+    const { ensureGraphCurrent } = await import("../graph/maintenance.js");
+    await ensureGraphCurrent(projectRoot, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.background ? { candidateExecution: "process" as const } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
