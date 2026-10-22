@@ -23,7 +23,7 @@ function fixture(count = 32, dense = false, grounded = false) {
       : index === 0 ? [1] : [];
     return `id: ${id(index)}\ntype: ${index === 0 ? "architecture" : "component"}\nstatus: ${index === count - 1 ? "archived" : "promoted"}\nrevision: 1\n`
       + (targets.length ? `relations:\n${targets.map((target) => `  - type: related_to\n    target: ${id(target)}\n    note: Recorded connection ${index} to ${target}\n`).join("")}` : "")
-      + (grounded && index === 0 ? `grounds_to:\n  - node: ${NODE}\n    fingerprint: ${FINGERPRINT}\n` : "");
+      + (grounded && index === 0 ? `grounds_to:\n  - node: ${NODE}\n    fingerprint: ${FINGERPRINT}\n    bodyHash: ${"c".repeat(64)}\n` : "");
   };
   writeFileSync(path, `---\nmex:\n${metadata(0).split("\n").filter(Boolean).map((line) => `  ${line}\n`).join("")}---\n# Unit 000\n\nA document entity.\n\n`
     + Array.from({ length: count - 1 }, (_, i) => i + 1).map((index) => (
@@ -62,6 +62,35 @@ describe("Context graph repository reads", () => {
     expect(graph.coverage).toEqual({ nodeLimit: 100, relationLimit: 500, nodesTruncated: false, relationsTruncated: false });
     expect(graph.indexedRevision).toBe((await port.readKnowledgeWorkspace({ entityId: id(0) })).indexedRevision);
     expect({ bytes: readFileSync(index), mtime: statSync(index).mtimeMs, entries: readdirSync(target.scaffold) }).toEqual(before);
+  });
+
+  it.each([false, true])("bounds repeated projection work within each read (grounded: %s)", async (grounded) => {
+    const target = fixture(16, false, grounded);
+    await createRepositoryWikiPort(target.root).rebuildIndex();
+    const reads: { bodies: string[]; relationRoots: string[] }[] = [];
+    const port = createRepositoryWikiPort(target.root, {
+      groundingBridge: { async withFreshGroundingSnapshot(callback) { return callback(snapshot()); } },
+      __internal: {
+        readAsync: (options, callback) => withWikiContractReadSessionAsync(options, async (session) => {
+          const bodies = vi.spyOn(session, "get");
+          const relations = vi.spyOn(session, "relations");
+          const result = await callback(session);
+          reads.push({
+            bodies: bodies.mock.calls.map(([entityId]) => entityId),
+            relationRoots: relations.mock.calls.map(([request]) => request.entityId),
+          });
+          return result;
+        }),
+      },
+    });
+    const first = await port.graphOverview();
+    const second = await port.graphOverview();
+    expect(first.nodes[0]?.groundingHealth).toBe(grounded ? "fresh" : "unverified");
+    expect(second).toEqual(first);
+    expect(reads).toEqual(Array.from({ length: 2 }, () => ({
+      bodies: grounded ? [id(0)] : [],
+      relationRoots: Array.from({ length: 16 }, (_, index) => id(index)),
+    })));
   });
 
   it("caps the node set and relationships independently without dangling displayed endpoints", async () => {
