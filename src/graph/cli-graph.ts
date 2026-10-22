@@ -52,7 +52,7 @@ function orphanGraphFileDiagnostics(rootDir: string, status: GraphStatus): Diagn
       severity: "warning",
       message: `${files.candidates.length} leftover graph build candidate file(s) from an interrupted `
         + "maintenance run are using disk space; the next `mex graph refresh`, `repair`, or `rebuild` "
-        + "removes them.",
+        + "removes them when no open handle prevents deletion; locked files are retried later.",
       detail: { paths: files.candidates },
       remediation: [{ label: "Remove leftover candidates", command }],
     });

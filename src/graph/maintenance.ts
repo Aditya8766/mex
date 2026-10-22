@@ -2188,7 +2188,13 @@ function sweepOrphanCandidates(paths: MaintenancePaths): void {
     const path = join(paths.mexDir, name);
     const stats = safeLstat(path);
     if (!stats || !stats.isFile() || stats.isSymbolicLink()) continue;
-    cleanupOwnedDatabasePath(paths, path);
+    try {
+      cleanupOwnedDatabasePath(paths, path);
+    } catch (error) {
+      // A surviving writer or an open Windows handle may still hold the file.
+      // Leave it visible to status and retry on the next maintenance run.
+      if (!["EBUSY", "EPERM", "EACCES"].includes(errorCode(error))) throw error;
+    }
   }
 }
 
