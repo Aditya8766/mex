@@ -22,7 +22,9 @@ that matches nothing, or several declarations, is refused with the candidates.
 
 A create-entry inserted under a heading, with no "refines" relation of its own,
 is linked to the section or file that encloses it, and a file with no Wiki id
-gets one. Paths in "file" are repository-relative.
+gets one. Paths in "file" are repository-relative. A create-entry into a file
+that does not exist yet also gives the new file its name, description and
+last_updated frontmatter; "description" in the payload sets the description.
 
 Example (a batch in .mex/local/setup-ops/routing.json):
   [{"opId": "setup_routing_add", "type": "create-entry",

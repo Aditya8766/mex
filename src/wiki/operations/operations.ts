@@ -76,6 +76,8 @@ export interface OperationContext {
   located: LocatedEntity | null;
   /** Explicit operation authority, used only when this writer opted in. */
   creationProvenance?: WikiProvenance;
+  /** The operation's own timestamp; dates the frontmatter of a file this operation creates. */
+  timestamp?: string;
   mintId: () => EntityId;
   locate: (path: string) => LocatedFile | null;
   locateEntity: (id: string) => LocatedEntity | null;
@@ -394,7 +396,8 @@ function createWithStampedParent(
   const declaredTitle = fileTitleOf({ path: file.path, absolutePath: file.absolutePath, text: file.text, parsed: file.parsed, headings });
   const title = declaredTitle ?? titleFromPath(file.path);
   const parentId = context.mintId();
-  const entry = createInto(context, withParent(payload, parentId, title, file.path), id);
+  // The stamp below gives a new file its frontmatter, so the entry itself adds none.
+  const entry = createInto(context, withParent(payload, parentId, title, file.path), id, false);
   if (entry.diagnostics.some((item) => item.severity === "error") || entry.files.length !== 1) return entry;
   const entryFile = entry.files[0]!;
   const eol = dominantEol(file.text.length === 0 ? "\n" : file.text);
@@ -420,7 +423,7 @@ function createWithStampedParent(
     stampEdits = [{
       start: bom,
       end: bom,
-      text: `---${eol}${renderKeyValues([["mex", map]], eol)}${eol}---${eol}${separator}${heading}`,
+      text: `---${eol}${renderKeyValues([...newFileFrontmatter(context, file, payload), ["mex", map]], eol)}${eol}---${eol}${separator}${heading}`,
       label: `file-level entity ${parentId}`,
     }];
   }
@@ -451,6 +454,25 @@ function createWithStampedParent(
   };
 }
 
+/**
+ * The ordinary frontmatter of a file this operation creates: `name` from the
+ * file's slug, `description` from the payload or, failing that, a neutral line
+ * naming the first entry, and `last_updated` from the operation's date. A file
+ * that already exists keeps whatever it has, so this is empty for it.
+ */
+function newFileFrontmatter(
+  context: OperationContext,
+  file: LocatedFile,
+  payload: CreateEntryPayload,
+): (readonly [string, unknown])[] {
+  if (file.existed) return [];
+  const name = file.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? file.path;
+  const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+  const description = oneLine(payload.description ?? "") || oneLine(`Knowledge entries, starting with: ${payload.title}`);
+  const day = context.timestamp === undefined ? null : /^\d{4}-\d{2}-\d{2}/.exec(context.timestamp)?.[0] ?? null;
+  return [["name", name], ["description", description.slice(0, 200)], ...(day === null ? [] : [["last_updated", day] as const])];
+}
+
 /** `context/api-gateway.md` → "Api Gateway": the title of a file that names none itself. */
 function titleFromPath(path: string): string {
   const base = path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? path;
@@ -464,7 +486,7 @@ function titleFromPath(path: string): string {
  * Shared by `create-entry` and `supersede-entry`'s inline replacement, so the
  * two cannot come to disagree about what a well-formed new entity looks like.
  */
-function createInto(context: OperationContext, payload: CreateEntryPayload, id: EntityId): OperationEdits {
+function createInto(context: OperationContext, payload: CreateEntryPayload, id: EntityId, frontmatterForNewFile = true): OperationEdits {
   if (payload.adopt === undefined && payload.provenance === undefined && context.creationProvenance !== undefined) {
     const validated = validateAuthoringProvenance(context.creationProvenance, { path: "provenance" });
     if (!validated.ok) {
@@ -549,7 +571,7 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
       );
     }
     const map = Object.fromEntries(fields.filter(([, value]) => value !== undefined));
-    const rendered = renderKeyValues([["mex", map]], eol);
+    const rendered = renderKeyValues([...(frontmatterForNewFile ? newFileFrontmatter(context, file, payload) : []), ["mex", map]], eol);
     const frontmatter = file.parsed.frontmatter;
     if (frontmatter === null) {
       edits.push({ start: 0, end: 0, text: `---${eol}${rendered}${eol}---${eol}${file.text.length > 0 ? eol : ""}`, label: `frontmatter for ${id}` });
@@ -569,10 +591,15 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
   } else {
     const metadata = `<!-- mex:entity${eol}${renderKeyValues(fields, eol)}${eol}-->`;
     const block = `${metadata}${eol}${headingAndBody(payload.headingDepth, payload.title, body, eol)}`;
+    // A document this operation creates opens with ordinary frontmatter, in the
+    // same edit as the entry (two insertions at offset 0 would clash).
+    const opening = frontmatterForNewFile && offset === 0 && file.text === "" && file.parsed.frontmatter === null
+      ? newFileFrontmatter(context, file, payload) : [];
     edits.push({
       start: offset,
       end: offset,
-      text: paddedInsertion(file.text, offset, block),
+      text: (opening.length === 0 ? "" : `---${eol}${renderKeyValues(opening, eol)}${eol}---${eol}${eol}`)
+        + paddedInsertion(file.text, offset, block),
       label: `entity ${id}`,
     });
   }

@@ -321,6 +321,7 @@ export function planOperation(envelope: unknown, options: PlanOptions): PlanResu
           : {}),
       },
     } : {}),
+    timestamp: operation.timestamp,
     mintId: options.generateId ?? generateEntityId,
     locate: (path) => locateFile(options, path),
     locateEntity: (id) => locateEntity(id, options),

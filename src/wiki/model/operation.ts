@@ -180,6 +180,12 @@ export interface CreateEntryPayload {
   metadata?: Record<string, unknown>;
   /** Heading depth for a block-level entity; omit for a file-level entity. */
   headingDepth?: number;
+  /**
+   * The `description` frontmatter of the file, used only when this operation
+   * creates the file. Without it a neutral description is derived from the
+   * entry's title. Ignored when the file already exists.
+   */
+  description?: string;
 }
 
 export interface UpdateEntryPayload {
@@ -427,6 +433,7 @@ const createEntryShape = validateShape<CreateEntryPayload>({
   aliases: optional(validateAliases),
   metadata: optional(metadataMapValidator),
   headingDepth: optional(validateInteger({ min: 1, max: 6 })),
+  description: optional(validateString()),
 });
 
 const createEntryValidator: Validator<CreateEntryPayload> = (value, context) => {

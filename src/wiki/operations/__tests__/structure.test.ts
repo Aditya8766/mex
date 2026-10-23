@@ -9,6 +9,8 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { applyOperation, type ApplyOptions } from "../apply.js";
+import { checkFrontmatterCompleteness } from "../../../drift/checkers/frontmatter-completeness.js";
+import { extractFrontmatter } from "../../../markdown.js";
 import { parseWikiMarkdown } from "../../markdown/codec.js";
 import { classifyFile } from "../../migration/classify.js";
 import { inventoryScaffold } from "../../migration/inventory.js";
@@ -161,6 +163,65 @@ describe("a file with no file-level entity", () => {
     const text = target.read("context/cache.md");
     expect(text).toContain("Cache entries live for a minute.");
     expect(entitiesOf(target, "context/cache.md")).toHaveLength(2);
+  });
+});
+
+describe("the frontmatter of a file wiki apply creates", () => {
+  const completeness = (target: Scaffold, path: string) =>
+    checkFrontmatterCompleteness(extractFrontmatter(target.read(path)), `.mex/${path}`);
+
+  it("names the file, describes it from the first entry and dates it, so mex check has nothing to report", () => {
+    const target = scaffold();
+    const applied = applyOperation(envelope(target, "create-entry", fact("context/api-gateway.md")), options(target));
+    expect(applied.ok).toBe(true);
+    const frontmatter = extractFrontmatter(target.read("context/api-gateway.md")) as Record<string, unknown>;
+    expect(frontmatter["name"]).toBe("api-gateway");
+    expect(frontmatter["description"]).toBe("Knowledge entries, starting with: Requests time out after 30 seconds");
+    expect(String(frontmatter["last_updated"])).toContain("2026-08-24");
+    expect(completeness(target, "context/api-gateway.md")).toEqual([]);
+    // The entities are exactly what they were without the new keys.
+    expect(entitiesOf(target, "context/api-gateway.md").map((entry) => entry.metadataKind).sort()).toEqual(["comment", "frontmatter"]);
+    expect(target.read("context/api-gateway.md")).toContain("# Api Gateway");
+  });
+
+  it("takes the description from the payload when there is one", () => {
+    const target = scaffold();
+    const applied = applyOperation(envelope(target, "create-entry", fact("context/billing.md", { description: "How invoices are rounded and retried." })), options(target));
+    expect(applied.ok).toBe(true);
+    expect((extractFrontmatter(target.read("context/billing.md")) as Record<string, unknown>)["description"]).toBe("How invoices are rounded and retried.");
+    expect(completeness(target, "context/billing.md")).toEqual([]);
+  });
+
+  it("gives a second entry into the same file no second frontmatter", () => {
+    const target = scaffold();
+    applyOperation(envelope(target, "create-entry", fact("context/sessions.md")), options(target));
+    applyOperation(envelope(target, "create-entry", fact("context/sessions.md", { title: "Sessions expire" })), options(target));
+    expect(target.read("context/sessions.md").match(/^---$/gm)).toHaveLength(2);
+    expect(completeness(target, "context/sessions.md")).toEqual([]);
+  });
+
+  it("adds nothing to a file that already exists", () => {
+    const target = scaffold({ "context/queue.md": "# Job queue\n\nJobs retry three times.\n" });
+    applyOperation(envelope(target, "create-entry", fact("context/queue.md", { description: "ignored" })), options(target));
+    const text = target.read("context/queue.md");
+    expect(text.startsWith("---\nmex:\n")).toBe(true);
+    expect(text).not.toContain("description");
+  });
+
+  it("covers a new file written without derived structure, and a new file-level entity", () => {
+    const plain = scaffold();
+    expect(applyOperation(envelope(plain, "create-entry", fact("patterns/retry.md")), { scaffoldRoot: plain.root }).ok).toBe(true);
+    expect((extractFrontmatter(plain.read("patterns/retry.md")) as Record<string, unknown>)["name"]).toBe("retry");
+    expect(entitiesOf(plain, "patterns/retry.md")).toHaveLength(1);
+    expect(completeness(plain, "patterns/retry.md")).toEqual([]);
+
+    const fileLevel = scaffold();
+    const { headingDepth: _depth, ...payload } = fact("context/overview.md", { type: "component", title: "Overview" });
+    expect(applyOperation(envelope(fileLevel, "create-entry", payload), { scaffoldRoot: fileLevel.root }).ok).toBe(true);
+    const text = fileLevel.read("context/overview.md");
+    expect(text.match(/^name: overview$/m)).not.toBeNull();
+    expect(text.match(/^---$/gm)).toHaveLength(2);
+    expect(completeness(fileLevel, "context/overview.md")).toEqual([]);
   });
 });
 
