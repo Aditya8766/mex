@@ -21,7 +21,11 @@ export default defineConfig([
     dts: false,
     // Bundle the private contracts and read dependencies to reduce per-process
     // module resolution. Preserve the dependency overlay during bundling.
-    noExternal: ["@mex/hub-contracts", "glob", "yaml", "zod"],
+    noExternal: [
+      "@mex/hub-contracts", "glob", "yaml", "zod", "chalk", "commander",
+      "unified", "remark-parse", "remark-frontmatter", "unist-util-visit",
+      "simple-git", "cross-spawn",
+    ],
     esbuildOptions(options) { options.preserveSymlinks = true; },
     banner: {
       js: "#!/usr/bin/env node\nimport { createRequire as __mexCreateRequire } from 'node:module';\nvar require = __mexCreateRequire(import.meta.url);",
