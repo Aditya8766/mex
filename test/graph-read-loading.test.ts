@@ -52,15 +52,20 @@ Module._load = function(request, ...args) {
 });
 afterAll(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 describe("shipped read module loading", () => {
-  for (const command of ["status", "scope", "get", "where-defined", "who-calls", "impact", "wiki-apply", "wiki-validate", "wiki-query"]) {
+  for (const command of ["status", "scope", "get", "where-defined", "who-calls", "impact", "wiki-apply", "wiki-apply-write", "wiki-validate", "wiki-query", "check", "sync", "help", "version"]) {
     it(`${command} keeps extraction off a valid JSONC read`, () => {
       const args = command === "status" ? ["graph", "status", "--json"]
         : command === "scope" ? ["graph", "scope", "value"]
         : command === "get" ? ["graph", "get", id]
         : command === "impact" ? ["impact", id]
         : command === "wiki-apply" ? ["wiki", "apply", join(root, "operation.json"), "--json"]
+        : command === "wiki-apply-write" ? ["wiki", "apply", join(root, "operation.json"), "--apply", "--json"]
         : command === "wiki-validate" ? ["wiki", "validate", "--json"]
         : command === "wiki-query" ? ["wiki", "query", "value", "--json"]
+        : command === "check" ? ["check", "--json"]
+        : command === "sync" ? ["sync", "--dry-run"]
+        : command === "help" ? ["--help"]
+        : command === "version" ? ["--version"]
         : ["graph", "query", command, id];
       const result = invoke(args);
       expect(result.error).toBeUndefined();

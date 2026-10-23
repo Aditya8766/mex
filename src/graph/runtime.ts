@@ -14,9 +14,8 @@ import {
   type SourceDriftResolution,
 } from "../drift/checkers/grounding.js";
 import { codeHash, codeHashOfBody, formatCommittedCodeHash, prepareCodeHashing } from "./code-hash.js";
-import { createGraphEngine } from "./engine-impl.js";
 import type { GraphEngine } from "./engine.js";
-import { detectLanguage, extractFile, loadGrammars } from "./extraction/index.js";
+import { detectLanguage, loadGrammars } from "./extraction/grammars.js";
 import type { CompilerSourceLanguage } from "./extraction/compiler.js";
 import type { GraphNode, Language } from "./types.js";
 import {
@@ -29,7 +28,6 @@ import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { FingerprintStore } from "./fingerprint-store.js";
 import { deserializeFingerprint, sameFingerprint, serializeFingerprint } from "./fingerprint.js";
-import { acquireGraphMaintenanceLease } from "./maintenance.js";
 import { MinHashReconciler } from "./reconcile-engine.js";
 import type { Fingerprint, Reconciler } from "./reconcile.js";
 import {
@@ -266,6 +264,10 @@ export async function loadReadOnlyGroundingRuntime(
  * workflows. Ordinary reads must use {@link loadReadOnlyGroundingRuntime}.
  */
 export async function loadGroundingRuntime(config: MexConfig): Promise<GroundingRuntime | null> {
+  const [{ acquireGraphMaintenanceLease }, { createGraphEngine }] = await Promise.all([
+    import("./maintenance.js"),
+    import("./engine-impl.js"),
+  ]);
   const lease = acquireGraphMaintenanceLease(config.projectRoot, "refresh");
   let priorSession: InternalGraphReadSession | null = null;
   let graph: GraphEngine | null = null;
@@ -637,6 +639,10 @@ async function prepareSourceDriftGrounding(
   const modified = new Set(modifiedSources.filter((path) => drifted.has(path)));
   const treeLanguages = [...new Set([...modified].map((path) => detectLanguage(path)))]
     .filter((language) => !isCompilerSourceLanguage(language));
+  // Fresh checks use stored spans. Only edited non-compiler files need extraction.
+  const extractFile = treeLanguages.length > 0
+    ? (await import("./extraction/index.js")).extractFile
+    : undefined;
   // A grammar that fails to load leaves `extractFile` returning null, which
   // resolves to unverified below; it never fails the check.
   try { await loadGrammars(treeLanguages); } catch { /* unverified, not fatal */ }
@@ -647,7 +653,7 @@ async function prepareSourceDriftGrounding(
     let nodes: Map<string, Rederived> | null = null;
     try {
       const source = readContainedRepositorySource(projectRoot, filePath);
-      const extraction = extractFile(filePath, source);
+      const extraction = extractFile?.(filePath, source);
       if (extraction) {
         // Same span, same normalization as the graph's `bodyHash`.
         const lines = source.split("\n");
