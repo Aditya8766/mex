@@ -766,6 +766,9 @@ export function refreshGroundingBaselines(
     let content = original;
     const scaffoldFile = relative(config.projectRoot, filePath).replaceAll("\\", "/");
     let dirty = false;
+    // Nodes written as an id alone that the graph cannot answer. They are
+    // reported once, below; while any remain the file is verified but never rewritten.
+    const unresolvedNodes = new Set<string>();
     const committed = committedReferenceLookup(config.projectRoot, filePath);
     if (accepted === undefined) {
       const fill = fillMissingFingerprints(original, (nodeId) => graphFingerprint(runtime, nodeId));
@@ -773,6 +776,7 @@ export function refreshGroundingBaselines(
         const entityFor = groundingFailureEntities(original);
         const contentHash = hashText(original);
         for (const nodeId of fill.unresolved) {
+          unresolvedNodes.add(nodeId);
           skipped += 1;
           // A node-only grounding carries no recorded baseline, so it is new
           // unless the committed file already named it.
@@ -782,10 +786,19 @@ export function refreshGroundingBaselines(
             ? `Preserved changed grounding ${nodeId} in ${scaffoldFile}; explicit review is required.`
             : `Skipped grounding baseline for unavailable node ${nodeId} in ${scaffoldFile}.`);
         }
-        continue;
+        // The rest of the file is still verified: one unresolved reference
+        // must not hide a broken grounding, anchor or block grounding beside it.
+        // A store holding a node-only entry cannot be read as a whole, so the
+        // unresolved entries get a stand-in fingerprint in this in-memory copy
+        // (never published, and skipped below). If the file cannot take it,
+        // only the unresolved references are reported, as before.
+        const readable = fillMissingFingerprints(original, (nodeId) =>
+          unresolvedNodes.has(nodeId) ? UNRESOLVED_FINGERPRINT : graphFingerprint(runtime, nodeId));
+        if (readable.unresolved.length === 0) content = readable.content;
+      } else {
+        content = fill.content;
+        dirty = fill.filled > 0;
       }
-      content = fill.content;
-      dirty = fill.filled > 0;
     }
     const groundings = extractGroundings(content);
     const anchors = findMexAnchors(content);
@@ -804,6 +817,7 @@ export function refreshGroundingBaselines(
       ...anchors.map((anchor) => anchor.nodeId),
     ]);
     for (const nodeId of nodeIds) {
+      if (unresolvedNodes.has(nodeId)) continue;
       const acceptance = accepted?.find((entry) => entry.scaffoldFile === scaffoldFile && entry.nodeId === nodeId);
       // A selected renewal must not initialize or change any unselected entry.
       if (accepted !== undefined && acceptance === undefined) continue;
@@ -906,6 +920,10 @@ export function refreshGroundingBaselines(
         ? `Preserved changed grounding ${block.node} of entity ${entity} in ${scaffoldFile}; explicit review is required.`
         : `Skipped unverifiable grounding ${block.node} of entity ${entity} in ${scaffoldFile}.`);
     }
+    if (unresolvedNodes.size > 0) {
+      // Nothing is captured or rewritten while a reference is unresolved.
+      continue;
+    }
     if (readBoundedText(filePath, readLimit) !== original) {
       skipped += pendingBaselines.length;
       options.warn?.(`Grounding document ${scaffoldFile} changed during capture; review it again.`);
@@ -937,6 +955,9 @@ export function refreshGroundingBaselines(
   }
   return { captured, skipped, ...(driftCount ? { driftCount } : {}), ...(failures.length ? { failures } : {}) };
 }
+
+/** Stands in for the fingerprint of a reference the graph cannot answer, in a copy that is only read. */
+const UNRESOLVED_FINGERPRINT = "unresolved";
 
 /**
  * What the graph says a node looks like, serialized for `grounds_to`.
