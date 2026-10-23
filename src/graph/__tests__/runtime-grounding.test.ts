@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { expect, it } from "vitest";
 import { createFingerprint, serializeFingerprint } from "../fingerprint.js";
 import { refreshGroundingBaselines, type GroundingRuntime } from "../runtime.js";
+import { wikiGroundingDocumentReader } from "../../wiki/grounding/document-reader.js";
 it("retains exact bounded failure details for authored entries and links", () => {
   const root = mkdtempSync(join(tmpdir(), "grounding-detail-"));
   mkdirSync(join(root, ".mex"));
@@ -49,7 +50,8 @@ function runtimeWith(existing: string[], cached: Record<string, boolean> = {}): 
   } as unknown as GroundingRuntime;
 }
 const capture = (f: Fixture, runtime: GroundingRuntime) =>
-  refreshGroundingBaselines({ projectRoot: f.root, scaffoldRoot: f.scaffold, aiTools: [] }, [f.file], runtime);
+  refreshGroundingBaselines({ projectRoot: f.root, scaffoldRoot: f.scaffold, aiTools: [] }, [f.file], runtime,
+    { documentReader: wikiGroundingDocumentReader });
 const kinds = (result: ReturnType<typeof capture>) => Object.fromEntries((result.failures ?? []).map(entry => [entry.node, entry.kind]));
 const entry = (node: string, extra = "") => `- node: ${node}\n  fingerprint: ${fp("a")}\n${extra}`;
 const indent = (text: string, pad: string) => text.split("\n").map(line => line ? pad + line : line).join("\n");

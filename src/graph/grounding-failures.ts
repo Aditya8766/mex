@@ -1,23 +1,22 @@
 import { spawnSync } from "node:child_process";
 import { relative, resolve } from "node:path";
-import YAML from "yaml";
 import { extractGroundings, findMexAnchors } from "../markdown.js";
-import { parseDocument } from "../wiki/markdown/parse.js";
-import { parseWikiMarkdown } from "../wiki/markdown/codec.js";
-import type { WikiGrounding } from "../wiki/model/grounding.js";
+
+/** A grounding held by a block-level Wiki entity (`<!-- mex:entity ... -->`). */
+export interface BlockEntityGrounding {
+  entity: string;
+  grounding: { node: string; fingerprint: string; bodyHash?: string; codeHash?: string };
+}
 
 /**
- * Groundings held by block-level Wiki entities (`<!-- mex:entity ... -->`),
- * read with the Wiki's own parser. File-level entities keep theirs in the
- * frontmatter, which {@link extractGroundings} already covers. A block the
- * Wiki cannot parse yields nothing here: validation owns malformed blocks.
+ * How baseline capture reads Wiki structure in a scaffold document: groundings
+ * held by block entities, and which entity owns a reference. The graph never
+ * imports the Wiki, so the Wiki supplies this and callers pass it in. Without
+ * one, block entities are not read and failures name no entity.
  */
-export function entityBlockGroundings(content: string): { entity: string; grounding: WikiGrounding }[] {
-  try {
-    const parsed = parseWikiMarkdown({ path: "entity.md", text: content });
-    return parsed.entities.filter((entry) => entry.metadataKind === "comment")
-      .flatMap((entry) => entry.entity.groundsTo.map((grounding) => ({ entity: String(entry.entity.id), grounding })));
-  } catch { return []; }
+export interface GroundingDocumentReader {
+  blockGroundings(content: string): readonly BlockEntityGrounding[];
+  failureEntities(content: string): (node: string) => string | null;
 }
 
 /**
@@ -56,7 +55,9 @@ function git(projectRoot: string, args: string[]) {
  * other reason the lookup returns `"unknown"`, and callers treat that as
  * recorded: the cost of a wrong guess is an authoritative fact deleted.
  */
-export function committedReferenceLookup(projectRoot: string, absoluteFile: string): CommittedReferenceLookup {
+export function committedReferenceLookup(
+  projectRoot: string, absoluteFile: string, reader?: GroundingDocumentReader,
+): CommittedReferenceLookup {
   let ids: ReadonlySet<string> | "unknown" | null | undefined;
   const load = (): ReadonlySet<string> | "unknown" | null => {
     const shown = git(projectRoot, ["show", `HEAD:./${relativeToRoot(projectRoot, absoluteFile)}`]);
@@ -65,7 +66,7 @@ export function committedReferenceLookup(projectRoot: string, absoluteFile: stri
       try {
         for (const grounding of extractGroundings(shown.stdout)) found.add(grounding.node);
         for (const anchor of findMexAnchors(shown.stdout)) found.add(anchor.nodeId);
-        for (const { grounding } of entityBlockGroundings(shown.stdout)) found.add(grounding.node);
+        for (const { grounding } of reader?.blockGroundings(shown.stdout) ?? []) found.add(grounding.node);
       } catch { return "unknown"; }
       return found;
     }
@@ -129,28 +130,4 @@ export function describeGroundingDrift(summary: GroundingDriftSummary | null): s
   const more = summary.fileCount - summary.files.length;
   const where = summary.files.length === 0 ? "" : ` (${summary.files.join(", ")}${more > 0 ? `, and ${more} more file${more === 1 ? "" : "s"}` : ""})`;
   return `${bound}${count} ${noun} changed since they were recorded${where}. They were left as written; run \`mex sync\` to review them.`;
-}
-
-/** Parse entity ownership once per document; reference failures remain exact and bounded. */
-export function groundingFailureEntities(content: string): (node: string) => string | null {
-  const parsed = parseDocument(content);
-  let rootId: string | null = null;
-  const owners = new Map<string, string | null>();
-  try {
-    const root = parsed.frontmatter ? YAML.parse(parsed.frontmatter.text) : null;
-    if (typeof root?.mex?.id === "string") rootId = root.mex.id;
-    for (const entry of [...(Array.isArray(root?.grounds_to) ? root.grounds_to : []),
-      ...(Array.isArray(root?.mex?.grounds_to) ? root.mex.grounds_to : [])]) {
-      if (typeof entry?.node === "string") owners.set(entry.node, rootId);
-    }
-    const blocks = parsed.htmlBlocks.filter(block => block.isEntityMarker).map(block => {
-      let id: string | null = null;
-      try { const value: unknown = YAML.parse(block.yamlText)?.id; if (typeof value === "string") id = value; } catch { /* validation owns malformed blocks */ }
-      return { end: block.end, id };
-    });
-    for (const link of parsed.links) {
-      if (!owners.has(link.nodeId)) owners.set(link.nodeId, blocks.filter(block => block.end <= link.start).at(-1)?.id ?? rootId);
-    }
-  } catch { /* validation owns malformed metadata */ }
-  return node => owners.get(node) ?? rootId;
 }
