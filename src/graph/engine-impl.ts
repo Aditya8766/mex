@@ -84,6 +84,7 @@ import {
 import {
   encodeCachedExtraction,
   extractionCacheIdentity,
+  incrementalClosureBudget,
   planIncrementalExtraction,
   type CachedTreeFile,
   type IncrementalExtractionPlan,
@@ -1043,6 +1044,7 @@ async function stageCorpus(
             gated: plan.gated,
             modified: plan.modified,
             importers: plan.importers,
+            maxAffected: incrementalClosureBudget(compilerPaths.length),
             projectStates: (reuse as ExtractionReuse).projectStates,
           });
         } catch (error) {

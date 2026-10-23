@@ -18,6 +18,7 @@ import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { incrementalClosureBudget } from "../extraction-cache.js";
 import { createGraphEngine, GraphSourceStagingError, type GraphRefreshStrategy } from "../engine-impl.js";
 import type { BuildResult } from "../engine.js";
 import { openGraphDatabase } from "../db/database.js";
@@ -265,5 +266,49 @@ describe("grounding across an incremental move", () => {
     const moved = withGroundingGraph(harness.root, harness.incrementalDb, (graph) =>
       graph.getNode((incremental as { resolvedNode: string }).resolvedNode));
     expect(moved?.filePath).toBe("src/tokens.ts");
+  }, 240_000);
+});
+
+// A refresh whose re-extraction closure reaches past the budget costs more than
+// a build, so it must publish through the full path and say why.
+describe("incremental refresh falls back to a full extraction past the closure budget", () => {
+  const HUB_FILES = 130;
+  const hubFixture: Fixture = {
+    name: "hub",
+    files: {
+      "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", module: "ESNext", moduleResolution: "Bundler", strict: true }, include: ["src"] }),
+      "package.json": JSON.stringify({ name: "fixture-hub", type: "module" }),
+      "src/hub.ts": "export function hub(value: number): number {\n  return value + 1;\n}\n",
+      ...Object.fromEntries(Array.from({ length: HUB_FILES }, (_, index) => [
+        `src/user${index}.ts`,
+        `import { hub } from "./hub";\n\nexport function use${index}(): number {\n  return hub(${index});\n}\n`,
+      ])),
+    },
+    edits: [],
+  };
+
+  it("budgets 100 files up to 200 compiler files, then half of them", () => {
+    expect(incrementalClosureBudget(10)).toBe(100);
+    expect(incrementalClosureBudget(200)).toBe(100);
+    expect(incrementalClosureBudget(1000)).toBe(500);
+  });
+
+  it("stays incremental below the budget, falls back above it, and matches a full build", async () => {
+    const harness = await startHarness(hubFixture);
+    const modeOf = (index: number): { mode?: string; fallbackReason?: string } | undefined =>
+      (harness.results[index]!.incremental as BuildResult & { refresh?: { mode?: string; fallbackReason?: string } }).refresh;
+
+    await step(harness, {
+      name: "leaf body edit",
+      apply: replace("src/user3.ts", "hub(3)", "hub(3) + 1"),
+    }, "leaf edit");
+    expect(modeOf(0)?.mode).toBe("incremental");
+
+    await step(harness, {
+      name: "hub signature change",
+      apply: replace("src/hub.ts", "value: number): number", "value: number, extra = 0): string"),
+    }, "hub signature edit");
+    expect(modeOf(1)?.mode).toBe("full");
+    expect(modeOf(1)?.fallbackReason).toMatch(/^the changed set reaches \d+ of 131 compiler files$/);
   }, 240_000);
 });
