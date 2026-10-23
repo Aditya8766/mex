@@ -16,6 +16,7 @@ import { runFeedback, maybeShowInvite, dismissInvite, enableInvite } from "./fee
 import type { MexConfig } from "./types.js";
 import type { RunHubCommandOptions } from "./hub/command.js";
 import { capabilitiesInvalidRequestEnvelope, readWikiExclude } from "./capabilities.js";
+import { WIKI_APPLY_HELP } from "./wiki/cli/apply-help.js";
 import {
   buildTeamIdentityActivityCommands,
   buildWorkstreamCommand,
@@ -767,10 +768,11 @@ wikiCommand
 
 wikiCommand
   .command("apply <operation-file>")
-  .description("Plan an operation from a JSON file; writes only with --apply")
+  .description("Plan one operation or an all-or-nothing batch from a JSON file; writes only with --apply")
   .option("--apply", "write the change, rather than only planning it")
   .option("--dry-run", "plan only, even if --apply was given")
   .option("--json", "emit one enveloped JSON object")
+  .addHelpText("after", WIKI_APPLY_HELP)
   .action(async (file: string, options) => {
     const { runApply } = await import("./wiki/cli/commands.js");
     await runApply(await groundedWikiIo(), file, options);

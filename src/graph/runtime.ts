@@ -4,7 +4,7 @@ import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, re
 import { isAbsolute, relative, resolve } from "node:path";
 import { globSync } from "glob";
 import type { MexConfig, Grounding } from "../types.js";
-import { extractGroundings, findMexAnchors, rewriteMexAnchor, writeGroundings } from "../markdown.js";
+import { extractGroundings, fillMissingFingerprints, findMexAnchors, rewriteMexAnchor, writeGroundings } from "../markdown.js";
 import { createGroundingChecker, type GroundingChecker, type GroundedSource } from "./grounding.js";
 import {
   committedBaselines,
@@ -759,7 +759,34 @@ export function refreshGroundingBaselines(
   };
   for (const filePath of scaffoldFiles) {
     const readLimit = accepted === undefined ? GRAPH_CORPUS_LIMITS.maxSourceFileBytes : GROUNDING_REVIEW_MAX_BYTES;
-    const content = readBoundedText(filePath, readLimit);
+    // `original` is what is on disk and what a concurrent edit is judged against;
+    // `content` is that text once any grounding written as a node id alone has
+    // its fingerprint from the graph. A selected renewal fills nothing.
+    const original = readBoundedText(filePath, readLimit);
+    let content = original;
+    const scaffoldFile = relative(config.projectRoot, filePath).replaceAll("\\", "/");
+    let dirty = false;
+    const committed = committedReferenceLookup(config.projectRoot, filePath);
+    if (accepted === undefined) {
+      const fill = fillMissingFingerprints(original, (nodeId) => graphFingerprint(runtime, nodeId));
+      if (fill.unresolved.length > 0) {
+        const entityFor = groundingFailureEntities(original);
+        const contentHash = hashText(original);
+        for (const nodeId of fill.unresolved) {
+          skipped += 1;
+          // A node-only grounding carries no recorded baseline, so it is new
+          // unless the committed file already named it.
+          const kind: GroundingFailureKind = committed(nodeId) !== false ? "drift" : "new";
+          failed(scaffoldFile, nodeId, "Node is unavailable or has no verifiable body.", entityFor(nodeId), contentHash, kind);
+          options.warn?.(kind === "drift"
+            ? `Preserved changed grounding ${nodeId} in ${scaffoldFile}; explicit review is required.`
+            : `Skipped grounding baseline for unavailable node ${nodeId} in ${scaffoldFile}.`);
+        }
+        continue;
+      }
+      content = fill.content;
+      dirty = fill.filled > 0;
+    }
     const groundings = extractGroundings(content);
     const anchors = findMexAnchors(content);
     // Block entities keep their groundings in their own metadata; they are
@@ -767,10 +794,9 @@ export function refreshGroundingBaselines(
     const blockGroundings = accepted === undefined ? entityBlockGroundings(content) : [];
     if (groundings.length === 0 && anchors.length === 0 && blockGroundings.length === 0) continue;
     const entityFor = groundingFailureEntities(content);
-    const committed = committedReferenceLookup(config.projectRoot, filePath);
-    const contentHash = hashText(content);
-    const scaffoldFile = relative(config.projectRoot, filePath).replaceAll("\\", "/");
-    let dirty = false;
+    // A failure names the document as it is on disk, which is what a later
+    // repair or drop judges a concurrent edit against.
+    const contentHash = hashText(original);
     const pendingBaselines: GroundedSource[] = [];
     const groundingByNode = new Map(groundings.map((grounding) => [grounding.node, grounding]));
     const nodeIds = new Set([
@@ -880,7 +906,7 @@ export function refreshGroundingBaselines(
         ? `Preserved changed grounding ${block.node} of entity ${entity} in ${scaffoldFile}; explicit review is required.`
         : `Skipped unverifiable grounding ${block.node} of entity ${entity} in ${scaffoldFile}.`);
     }
-    if (readBoundedText(filePath, readLimit) !== content) {
+    if (readBoundedText(filePath, readLimit) !== original) {
       skipped += pendingBaselines.length;
       options.warn?.(`Grounding document ${scaffoldFile} changed during capture; review it again.`);
       continue;
@@ -890,13 +916,13 @@ export function refreshGroundingBaselines(
       options.warn?.(`Grounding source changed during capture for ${scaffoldFile}; review it again.`);
       continue;
     }
-    if (readBoundedText(filePath, readLimit) !== content) {
+    if (readBoundedText(filePath, readLimit) !== original) {
       skipped += pendingBaselines.length;
       options.warn?.(`Grounding document ${scaffoldFile} changed before publication; review it again.`);
       continue;
     }
-    const published = dirty ? writeGroundings(content, groundings) : content;
-    if (dirty) replaceGroundingDocument(config, filePath, content, published, readLimit);
+    const published = dirty ? writeGroundings(content, groundings) : original;
+    if (dirty) replaceGroundingDocument(config, filePath, original, published, readLimit);
     const publishedHash = hashText(published);
     for (const failure of failures) if (failure.file === scaffoldFile) failure.contentHash = publishedHash;
     // Markdown is authoritative. A failed document publication leaves its old
@@ -910,6 +936,18 @@ export function refreshGroundingBaselines(
     captured += pendingBaselines.length;
   }
   return { captured, skipped, ...(driftCount ? { driftCount } : {}), ...(failures.length ? { failures } : {}) };
+}
+
+/**
+ * What the graph says a node looks like, serialized for `grounds_to`.
+ * Null for an id the graph does not hold exactly (an alias is not the node) or
+ * a node with no body to baseline, the two cases a baseline is skipped for.
+ */
+function graphFingerprint(runtime: GroundingRuntime, nodeId: string): string | null {
+  const fingerprint = runtime.reconciler.getFingerprint(nodeId);
+  const node = runtime.graph.getNode(nodeId);
+  if (!fingerprint || node?.id !== nodeId || !node.bodyHash) return null;
+  return serializeFingerprint(fingerprint);
 }
 
 /** Produce a bounded review from current graph facts without changing a baseline. */
