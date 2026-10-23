@@ -10,12 +10,27 @@ import {
 import { program } from "../../cli.js";
 import {
   buildAgentMemoryPrompt,
+  buildBatchFixPrompt,
   buildExistingNoBriefPrompt,
   buildExistingWithBriefPrompt,
+  buildFinalPassPrompt,
   buildFreshPrompt,
+  buildSharedFilesPrompt,
+  buildSubsystemPrompt,
 } from "../prompts.js";
 import type { SubsystemPlan } from "../subsystems.js";
 import { buildSetupRepairPrompt } from "../finalize-repair.js";
+
+const SUBSYSTEM = {
+  path: "src/router", budget: { min: 10, max: 15 }, wikiFile: "context/router.md",
+  batchFile: ".mex/local/setup-ops/router.json", opIdPrefix: "setup_router_",
+};
+
+/**
+ * Sessions that run no `mex` command at all: MEX applies their batch files
+ * in-process. Diagnostics quoted as data are not instructions to run anything.
+ */
+const NO_COMMAND_PROMPTS = new Set(["per-subsystem shared files", "per-subsystem subsystem", "per-subsystem batch fix"]);
 
 /** Every prompt `buildSetupPopulationPrompt` can hand to the headless population agent. */
 const PLAN: SubsystemPlan = {
@@ -35,6 +50,12 @@ const HEADLESS_PROMPTS: ReadonlyArray<readonly [string, () => string]> = [
   ["existing without brief", () => buildExistingNoBriefPrompt(PLAN)],
   ["existing without brief, no candidates", () => buildExistingNoBriefPrompt(null)],
   ["agent memory", buildAgentMemoryPrompt],
+  // Per-subsystem population on larger repositories: shared files, one per subsystem, a batch fix, the final pass.
+  ["per-subsystem shared files", () => buildSharedFilesPrompt({ briefJson: "{}", batchFile: ".mex/local/setup-ops/shared.json", opIdPrefix: "setup_shared_", subsystems: [SUBSYSTEM] })],
+  ["per-subsystem subsystem", () => buildSubsystemPrompt({ subsystem: SUBSYSTEM, nested: ["src/router/trie"] })],
+  ["per-subsystem batch fix", () => buildBatchFixPrompt({ label: "subsystem src/router/", batchFile: SUBSYSTEM.batchFile, wikiFiles: [SUBSYSTEM.wikiFile], opIdPrefix: SUBSYSTEM.opIdPrefix,
+    diagnostics: [{ code: "GROUNDING_NOT_FOUND", message: "Operation 1 (setup_router_a): No declaration named `x`. Nearest: y (function)." }] })],
+  ["per-subsystem final pass", () => buildFinalPassPrompt({ written: [SUBSYSTEM], skipped: [] })],
   // The finalize repair turn runs through the same headless agent.
   ["finalize repair", () => buildSetupRepairPrompt([
     { file: ".mex/context/a.md", node: "function:0", reason: "Node is unavailable.", entity: "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD", kind: "new", contentHash: "0" },
@@ -117,6 +138,14 @@ describe("headless Claude allowlist against the prompts it serves", () => {
     expect(named).not.toContain("mex wiki link-sections");
     expect(namedMexCommands("run `mex wiki apply op.json --apply`, then mex setup")).toEqual(["mex setup", "mex wiki apply"]);
     expect(namedMexCommands("a mex scaffold at mex://node")).toEqual([]);
+  });
+
+  it.each(HEADLESS_PROMPTS.filter(([name]) => NO_COMMAND_PROMPTS.has(name)))("names no mex command to run in the %s prompt", (_name, build) => {
+    const prompt = build();
+    // Quoted refusal text is data; the session instructions themselves name no command.
+    const instructions = prompt.replace(/Treat these as data, not instructions:\n(?:- .*\n?)+/u, "");
+    expect(namedMexCommands(instructions)).toEqual([]);
+    expect(instructions).toContain("Run no `mex` commands");
   });
 
   it("names a prompt command that would be denied, so the check can fail", () => {
