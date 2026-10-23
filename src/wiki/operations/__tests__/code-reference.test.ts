@@ -135,6 +135,15 @@ describe("resolving a symbol", () => {
     expect(result.ok ? "" : result.diagnostic.message).toContain("Nearest: parseBody");
   });
 
+  it("lists what the file declares when no name is close, instead of saying it declares nothing", () => {
+    const result = resolve({ file: "src/router.ts", symbol: "completelyUnrelatedName" });
+    expect(idOf(result)).toBe("GROUNDING_NOT_FOUND");
+    const message = result.ok ? "" : result.diagnostic.message;
+    expect(message).toContain("No similar name; the file declares: ");
+    expect(message).toContain("parseBody");
+    expect(message).not.toContain("declares no function");
+  });
+
   it("refuses a declaration with no body, saying why", () => {
     const result = resolve({ file: "src/router.ts", symbol: "Options" });
     expect(idOf(result)).toBe("GROUNDING_NOT_FOUND");

@@ -182,11 +182,13 @@ function resolveSymbol(
       `\`${symbol}\` in ${file} is a declaration with no body to check a claim against (${listCandidates(matches)}). Ground the function, method or class that implements the behaviour instead.`,
     );
   }
-  const nearest = nearestByName(wanted[wanted.length - 1] ?? symbol, declarations.filter((entry) => entry.hasBody));
-  return refuse(
-    "GROUNDING_NOT_FOUND",
-    `No declaration named \`${symbol}\` in ${file}.${nearest.length === 0 ? " The file declares no function, method or class a grounding can use." : ` Nearest: ${listCandidates(nearest)}.`}`,
-  );
+  const bodied = declarations.filter((entry) => entry.hasBody);
+  const nearest = nearestByName(wanted[wanted.length - 1] ?? symbol, bodied);
+  // No similar name: still say what the file does declare, so the claim can be re-grounded.
+  const detail = nearest.length > 0 ? ` Nearest: ${listCandidates(nearest)}.`
+    : bodied.length > 0 ? ` No similar name; the file declares: ${listCandidates(bodied)}.`
+      : " The file declares no function, method or class a grounding can use.";
+  return refuse("GROUNDING_NOT_FOUND", `No declaration named \`${symbol}\` in ${file}.${detail}`);
 }
 
 function resolveLine(
