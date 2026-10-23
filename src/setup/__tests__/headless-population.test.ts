@@ -71,12 +71,13 @@ describe("headless population process", () => {
 
   it("pre-approves only the mex commands headless Claude population needs", () => {
     for (const shell of ["Bash", "PowerShell"]) {
-      for (const command of ["mex graph scope", "mex graph get", "mex graph query", "mex wiki query", "mex wiki apply", "mex wiki link-sections", "mex impact", "mex logging", "mex log"]) {
+      for (const command of ["mex graph scope", "mex graph get", "mex graph query", "mex wiki query", "mex wiki apply", "mex wiki validate", "mex wiki --help", "mex --help", "mex impact", "mex logging", "mex log"]) {
         expect(HEADLESS_CLAUDE_ALLOWED_TOOLS).toContain(`${shell}(${command}:*)`);
       }
     }
     for (const rule of HEADLESS_CLAUDE_ALLOWED_TOOLS) {
-      expect(rule).toMatch(/^(Bash|PowerShell)\(mex [a-z]+( [a-z-]+)?:\*\)$/);
+      expect(rule).toMatch(/^(Bash|PowerShell)\(mex (--help|[a-z]+( [a-z-]+)?):\*\)$/);
+      expect(rule).not.toContain("link-sections");
       expect(rule).not.toMatch(/refresh|rebuild|setup|sync|member|relay|inbox|git/);
     }
   });
