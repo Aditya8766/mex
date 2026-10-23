@@ -1,3 +1,4 @@
+import { discoverGraphReadPaths } from "./read-discovery.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
@@ -36,9 +37,8 @@ import {
   addGraphCorpusBytes,
   addGraphSemanticInput,
   createGraphSemanticInputLedger,
-  discoverBoundedGraphPaths,
 } from "./corpus-policy.js";
-import { graphManifest, graphManifestDiffersOnlyByConfig } from "./engine-impl.js";
+import { graphManifest, graphManifestDiffersOnlyByConfig } from "./manifest.js";
 import { isSupportedSourceFile } from "./extraction/grammars.js";
 import { bandHashInts, decodeMinhash } from "./fingerprint.js";
 import type { Fingerprint } from "./reconcile.js";
@@ -324,6 +324,17 @@ export interface InternalGraphStatusInspection {
   readonly configDriftTolerated?: boolean;
 }
 
+// Only tokens minted by this inspector can reuse its exact initial observation.
+// Weak ownership retains no repository state after the read session is released.
+const observationRechecks = new WeakMap<InternalGraphFreshObservationToken, () => Promise<InternalGraphStatusInspection>>();
+
+/** @internal Re-prove every freshness input once against a bound observation. */
+export function revalidateGraphReadObservation(
+  token: InternalGraphFreshObservationToken,
+): Promise<InternalGraphStatusInspection> | null {
+  return observationRechecks.get(token)?.() ?? null;
+}
+
 interface FileRow {
   path: string;
   content_hash: string;
@@ -424,6 +435,7 @@ interface FreshValidation {
   retryable: boolean;
   diagnostics: Diagnostic[];
   freshObservation?: InternalGraphFreshObservationToken;
+  repoState?: RepoState;
 }
 
 interface InspectionAttempt {
@@ -1120,7 +1132,7 @@ async function inspectGraphStatusAttempt(
     }
 
     await context.options.internal?.beforeFreshValidation?.(attempt);
-    const validation = await validateFreshObservation(context, {
+    const observation: FreshObservation = {
       repo,
       live,
       semantic,
@@ -1129,8 +1141,48 @@ async function inspectGraphStatusAttempt(
       snapshotRaw,
       database,
       databaseIdentity: databaseFileIdentity(fileStat),
-    }, degradations);
+    };
+    const validation = await validateFreshObservation(context, observation, degradations);
     if (validation.stable) {
+      observationRechecks.set(validation.freshObservation!, async () => {
+        // The initial pass and its independent validation already established
+        // this class and database. Re-read sources, config, semantic inputs,
+        // Git, containment, sidecars and snapshot identity at the final boundary.
+        const final = await validateFreshObservation(context, observation, degradations, true);
+        if (!final.stable) {
+          // Failures retain the full inspector's current diagnostics. A later
+          // restoration cannot erase a race that the exact final proof saw.
+          const latest = await inspectGraphStatusWithFreshObservation(context.options);
+          const observed = latest.freshObservation;
+          const expected = validation.freshObservation!;
+          // Preserve the session's existing snapshot-change error when the new
+          // database is fresh: its exact-token comparison must reject this token.
+          if (observed && (observed.canonicalDbPath !== expected.canonicalDbPath
+            || observed.databaseIdentity !== expected.databaseIdentity
+            || observed.snapshotRaw !== expected.snapshotRaw
+            || observed.snapshotHash !== expected.snapshotHash)) return latest;
+          return {
+            ...latest,
+            graphStatus: latest.graphStatus.status === "fresh" ? {
+              ...latest.graphStatus,
+              status: final.status,
+              diagnostics: [...latest.graphStatus.diagnostics, ...final.diagnostics],
+            } : latest.graphStatus,
+            freshObservation: null,
+            degradedObservation: null,
+          };
+        }
+        return {
+          graphStatus: { ...result, currentRepo: final.repoState ?? result.currentRepo },
+          configDriftTolerated,
+          freshObservation: degradations.length === 0 ? final.freshObservation! : null,
+          degradedObservation: degradations.length === 0 ? null : {
+            token: final.freshObservation!,
+            degradations: Object.freeze([...degradations]),
+            driftedSources: Object.freeze([...driftedSources]),
+          },
+        };
+      });
       return {
         retry: false,
         status: result,
@@ -1444,6 +1496,7 @@ async function validateFreshObservation(
   context: InspectionContext,
   before: FreshObservation,
   degradations: readonly GraphReadDegradation[] = [],
+  rebaseGit = false,
 ): Promise<FreshValidation> {
   const firstSidecars = inspectGraphSidecars(before.database.canonicalPath);
   if (firstSidecars.state !== "clear") {
@@ -1557,8 +1610,15 @@ async function validateFreshObservation(
     };
   }
 
+  // Non-source commits and dirty-flag changes do not stale an unchanged
+  // corpus. A final session proof permits them exactly as a new inspection
+  // does, while proving Git is stable across this final source pass.
+  const repoAfter = rebaseGit ? await inspectRepoState(context.projectRoot, context.observedAt) : repo;
   const changed: string[] = [];
-  if (!sameRepoState(before.repo.state, repo.state)) changed.push("Git state");
+  if (!repoAfter.complete
+    || (rebaseGit
+      ? before.repo.state.branch !== repo.state.branch || !sameRepoState(repo.state, repoAfter.state)
+      : !sameRepoState(before.repo.state, repo.state))) changed.push("Git state");
   // Comparing the two observations to each other is the race check and always
   // applies; comparing either to the stored snapshot is the freshness question
   // the caller already answered.
@@ -1584,6 +1644,7 @@ async function validateFreshObservation(
       status: "degraded",
       retryable: false,
       diagnostics: [],
+      repoState: repoAfter.state,
       freshObservation: Object.freeze({
         canonicalDbPath: finalContained.database.canonicalPath,
         databaseIdentity: identity,
@@ -2106,7 +2167,7 @@ async function inspectLiveSources(
   };
   let matches: string[];
   try {
-    matches = discoverBoundedGraphPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    matches = discoverGraphReadPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
       ...GRAPH_CORPUS_GLOB_OPTIONS,
       cwd: projectRoot,
       ignore: graphCorpusIgnoreGlobs(projectRoot),

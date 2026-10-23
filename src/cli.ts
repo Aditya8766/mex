@@ -528,7 +528,7 @@ graphCommand
   .option("--root <dir>", "Project root to inspect (defaults to current directory)")
   .action(async (opts) => {
     try {
-      const { runGraphStatus } = await import("./graph/cli-graph.js");
+      const { runGraphStatus } = await import("./graph/cli-status.js");
       await runGraphStatus({
         root: opts.root ?? graphCommand.opts().root,
         json: opts.json ?? graphCommand.opts().json,
@@ -1405,38 +1405,42 @@ if (process.argv[1]) {
   }
 }
 // Refuse unsupported Node before any command runs, so it cannot fail halfway.
-const unsupportedNode = isMainModule ? unsupportedNodeMessage(process.versions.node) : null;
-if (unsupportedNode !== null) {
-  console.error(unsupportedNode);
-  process.exitCode = 1;
-} else if (isMainModule) {
-  if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
-  const commandArgv = process.argv.slice(2);
-  const teamJsonContext = inspectTeamJsonInvocation(commandArgv);
-  const skillsSyncJsonInvocation = isSkillsSyncJsonInvocation(commandArgv);
-  if (teamJsonContext !== null && hasMissingTeamApplyValue(commandArgv)) {
-    emitTeamJsonParseProblem(teamJsonContext);
-  } else if (isInvalidCapabilitiesJsonInvocation(commandArgv)) {
-    console.log(JSON.stringify(capabilitiesInvalidRequestEnvelope()));
-    process.exitCode = 2;
+export function runCli(): void {
+  const unsupportedNode = unsupportedNodeMessage(process.versions.node);
+  if (unsupportedNode !== null) {
+    console.error(unsupportedNode);
+    process.exitCode = 1;
   } else {
-    if (teamJsonContext !== null || skillsSyncJsonInvocation) {
-      configureTeamJsonParseErrors(program);
+    if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
+    const commandArgv = process.argv.slice(2);
+    const teamJsonContext = inspectTeamJsonInvocation(commandArgv);
+    const skillsSyncJsonInvocation = isSkillsSyncJsonInvocation(commandArgv);
+    if (teamJsonContext !== null && hasMissingTeamApplyValue(commandArgv)) {
+      emitTeamJsonParseProblem(teamJsonContext);
+    } else if (isInvalidCapabilitiesJsonInvocation(commandArgv)) {
+      console.log(JSON.stringify(capabilitiesInvalidRequestEnvelope()));
+      process.exitCode = 2;
+    } else {
+      if (teamJsonContext !== null || skillsSyncJsonInvocation) {
+        configureTeamJsonParseErrors(program);
+      }
+      program.parseAsync().catch((err: Error) => {
+        if (teamJsonContext !== null) {
+          emitTeamJsonParseProblem(teamJsonContext);
+          return;
+        }
+        if (skillsSyncJsonInvocation) {
+          emitSkillsSyncJsonParseProblem();
+          return;
+        }
+        console.error(err.message);
+        process.exitCode = 1;
+      }).finally(() => cliTelemetry.finish(process.exitCode));
     }
-    program.parseAsync().catch((err: Error) => {
-      if (teamJsonContext !== null) {
-        emitTeamJsonParseProblem(teamJsonContext);
-        return;
-      }
-      if (skillsSyncJsonInvocation) {
-        emitSkillsSyncJsonParseProblem();
-        return;
-      }
-      console.error(err.message);
-      process.exitCode = 1;
-    }).finally(() => cliTelemetry.finish(process.exitCode));
   }
 }
+
+if (isMainModule) runCli();
 
 interface TeamJsonInvocationContext {
   command: TeamCliCommandName;

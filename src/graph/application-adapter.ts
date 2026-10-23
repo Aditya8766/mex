@@ -36,11 +36,7 @@ import type { GraphEngine, SourceChunkMatch } from "./engine.js";
 import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
 import { FingerprintStore } from "./fingerprint-store.js";
 import type { GroundingBaseline, GroundingSubject } from "./grounding.js";
-import {
-  GraphMaintenanceError,
-  rebuildGraph,
-  refreshGraph,
-} from "./maintenance.js";
+import type { rebuildGraph, refreshGraph } from "./maintenance.js";
 import {
   loadFreshGraphReadSession,
   type InternalFreshGraphReadSession,
@@ -242,8 +238,8 @@ export class RepositoryGraphPort implements GraphPort {
     this.#deps = {
       inspectStatus: options.__internal?.inspectStatus ?? inspectGraphStatus,
       loadFresh: options.__internal?.loadFresh ?? loadFreshGraphReadSession,
-      refresh: options.__internal?.refresh ?? refreshGraph,
-      rebuild: options.__internal?.rebuild ?? rebuildGraph,
+      refresh: options.__internal?.refresh ?? (async (...args) => (await import("./maintenance.js")).refreshGraph(...args)),
+      rebuild: options.__internal?.rebuild ?? (async (...args) => (await import("./maintenance.js")).rebuildGraph(...args)),
     };
   }
 
@@ -662,7 +658,7 @@ export class RepositoryGraphPort implements GraphPort {
         ? await this.#deps.refresh(this.#projectRoot, executionOptions)
         : await this.#deps.rebuild(this.#projectRoot, executionOptions);
     } catch (error) {
-      throw translateMaintenanceError(error);
+      throw await translateMaintenanceError(error);
     }
   }
 
@@ -1735,7 +1731,8 @@ function errorForStatus(status: GraphStatus): MexPortError {
   }
 }
 
-function translateMaintenanceError(error: unknown): MexPortError {
+async function translateMaintenanceError(error: unknown): Promise<MexPortError> {
+  const { GraphMaintenanceError } = await import("./maintenance.js");
   if (error instanceof MexPortError) return error;
   if (!(error instanceof GraphMaintenanceError)) {
     return portError(
