@@ -100,7 +100,8 @@ describe("stored plan state", () => {
     const root = project();
     mkdirSync(join(root, ".mex", "local"));
     writeFileSync(join(root, SETUP_PLAN_STATE_FILE), text);
-    expect(hasUnfinishedPlanState(root)).toBe(false);
+    // Unreadable means "continue": loading replaces it and replay recognizes applied batches.
+    expect(hasUnfinishedPlanState(root)).toBe(true);
     const loaded = loadPlanState(root);
     expect(loaded.state).toBeNull();
     expect(loaded.notice).toContain(reason);

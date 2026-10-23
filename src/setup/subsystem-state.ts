@@ -326,14 +326,18 @@ export function isPlanStateComplete(state: SetupPlanState): boolean {
   return state.shared.state === "done" && state.final.state === "done" && state.subsystems.every((unit) => unit.state === "done");
 }
 
-/** Whether a stored, unfinished plan exists (so a rerun must continue it). */
+/**
+ * Whether a rerun must continue a stored plan: it is unfinished, or it cannot be
+ * read (then loading sets it aside and a new plan replays the batches already on
+ * disk, so finished work is recognized, not redone).
+ */
 export function hasUnfinishedPlanState(projectRoot: string): boolean {
   const path = resolve(projectRoot, SETUP_PLAN_STATE_FILE);
   if (!existsSync(path)) return false;
   try {
     const parsed = parsePlanState(readFileSync(path, "utf8"));
-    return parsed.state === null ? false : !isPlanStateComplete(parsed.state);
+    return parsed.state === null ? true : !isPlanStateComplete(parsed.state);
   } catch {
-    return false;
+    return true;
   }
 }

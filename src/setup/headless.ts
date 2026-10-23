@@ -14,7 +14,23 @@ import { SetupError, classifySetupFileSystemError } from "./errors.js";
 import { classifySetupAgentAssetsError } from "./agent-errors.js";
 import type { GraphMaintenanceProgress } from "../team/contracts/graph.js";
 import { describeGroundingDrift } from "../graph/grounding-failures.js";
-import { launchHeadlessSetupPopulation, type HeadlessPopulationActivity, type HeadlessPopulationTranscript } from "./headless-population.js";
+import {
+  findAvailableSetupAgent,
+  launchHeadlessSetupPopulation,
+  type HeadlessPopulationActivity,
+  type HeadlessPopulationOptions,
+  type HeadlessPopulationTranscript,
+} from "./headless-population.js";
+import type { SetupPopulationLaunchResult } from "./population.js";
+import type { SetupBatchApplier } from "./subsystem-apply.js";
+import { createPlanState, hasUnfinishedPlanState, loadPlanState, type SetupPlanState } from "./subsystem-state.js";
+import {
+  perSubsystemSwitch,
+  runSubsystemPopulation,
+  shouldRunPerSubsystem,
+  type SetupCoverageProgress,
+} from "./subsystem-runs.js";
+import type { SubsystemPlan } from "./subsystems.js";
 import {
   detectProjectState,
   ensureToolAnchors,
@@ -100,6 +116,20 @@ export interface HeadlessSetupOptions {
   readonly onMessage?: (message: string) => void;
   /** Live maintenance updates, separate from the ordered setup phase transitions. */
   readonly onGraphProgress?: (progress: GraphMaintenanceProgress) => void;
+  /** Per-subsystem population progress (larger repositories): subsystems done, skipped, running. */
+  readonly onPopulationCoverage?: (coverage: SetupCoverageProgress) => void;
+  /**
+   * Per-subsystem population knobs. `parallelRuns` caps concurrent sessions
+   * (default 3, or MEX_SETUP_PARALLEL_RUNS); the rest are test seams.
+   */
+  readonly perSubsystem?: {
+    readonly parallelRuns?: number;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly launch?: (input: HeadlessPopulationOptions) => Promise<SetupPopulationLaunchResult>;
+    readonly applier?: SetupBatchApplier;
+    readonly freeMemory?: () => number;
+    readonly trackSource?: boolean;
+  };
 }
 
 export interface HeadlessSetupProgress {
@@ -122,6 +152,8 @@ export interface HeadlessSetupResult {
   readonly message: string;
   /** What finalization changed or left for review (dropped references, drifted facts); already part of `message`. */
   readonly groundingNotice?: string;
+  /** Per-subsystem population summary (covered, skipped, facts); already part of `message`. */
+  readonly coverageNotice?: string;
 }
 
 const STEP_LABELS: Record<SetupProgressStep, string> = {
@@ -279,15 +311,63 @@ export async function runHeadlessSetup(
     });
   }
 
-  const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot);
+  // Larger code repositories populate with one session per subsystem from a
+  // stored plan; a rerun continues an unfinished plan even over filled files.
+  let perSubsystemState: SetupPlanState | null = null;
+  let plan: SubsystemPlan | null | undefined;
+  if (mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
+    const env = options.perSubsystem?.env ?? process.env;
+    const resuming = perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
+    if (!scaffoldPopulatedAtStart || resuming) {
+      if (!resuming) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+      if (shouldRunPerSubsystem({ plan: plan ?? null, resuming, env })
+        && (options.perSubsystem?.launch !== undefined || await findAvailableSetupAgent(selectedTools, options.signal) !== null)) {
+        const loaded = loadPlanState(projectRoot);
+        if (loaded.notice) options.onMessage?.(`Warning: ${loaded.notice}`);
+        // An unreadable stored plan is replaced by a fresh one; replay recognizes batches already applied.
+        if (loaded.state === null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+        perSubsystemState = loaded.state ?? (plan ? createPlanState(plan) : null);
+      }
+    }
+  }
+
+  const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan);
   options.onPopulationPrompt?.(prompt);
   report("population");
 
   let populationFinished = scaffoldPopulatedAtStart;
   let populationTool: "claude" | "codex" | null = null;
   let populationCompleted = false;
+  let coverageNotice: string | undefined;
 
-  if (!populationFinished && options.confirmPopulation !== true) {
+  if (perSubsystemState !== null) {
+    throwIfSetupAborted(options.signal);
+    const outcome = await runSubsystemPopulation({
+      projectRoot,
+      state: perSubsystemState,
+      selectedTools,
+      scannerBrief,
+      signal: options.signal,
+      ...(options.perSubsystem?.parallelRuns === undefined ? {} : { parallelRuns: options.perSubsystem.parallelRuns }),
+      ...(options.perSubsystem?.launch ? { launch: options.perSubsystem.launch } : {}),
+      ...(options.perSubsystem?.applier ? { applier: options.perSubsystem.applier } : {}),
+      ...(options.perSubsystem?.freeMemory ? { freeMemory: options.perSubsystem.freeMemory } : {}),
+      ...(options.perSubsystem?.trackSource === undefined ? {} : { trackSource: options.perSubsystem.trackSource }),
+      onMessage: options.onMessage,
+      onActivity: options.onPopulationActivity,
+      onTranscript: options.onPopulationTranscript,
+      onCoverage: (coverage) => {
+        options.onPopulationCoverage?.(coverage);
+        report("population", describeCoverage(coverage));
+      },
+    });
+    throwIfSetupAborted(options.signal);
+    populationTool = outcome.tool;
+    populationCompleted = outcome.sharedDone;
+    coverageNotice = outcome.summary;
+    options.onMessage?.(outcome.summary);
+    populationFinished = isScaffoldPopulated(mexDir);
+  } else if (!populationFinished && options.confirmPopulation !== true) {
     throwIfSetupAborted(options.signal);
     const launched = await (options.populate ?? launchHeadlessSetupPopulation)({
       selectedTools,
@@ -322,7 +402,10 @@ export async function runHeadlessSetup(
       populationCompleted,
       commitCommands: mode === "code-repo" ? setupCommitCheckpointCommands(selectedTools) : [],
       anchorNotes,
-      message: populationCompleted
+      ...(coverageNotice ? { coverageNotice } : {}),
+      message: coverageNotice !== undefined
+        ? `The shared scaffold files still have required placeholders, so setup did not finalize. ${coverageNotice} Rerun \`mex setup\` to continue.`
+        : populationCompleted
         ? "The agent exited successfully, but required scaffold placeholders remain."
         : options.confirmPopulation === true
           ? "Required scaffold placeholders remain. Finish the manual population prompt, then check again."
@@ -364,8 +447,10 @@ export async function runHeadlessSetup(
     commitCommands: mode === "code-repo" ? setupCommitCheckpointCommands(selectedTools) : [],
     anchorNotes,
     ...(groundingNotice ? { groundingNotice } : {}),
+    ...(coverageNotice ? { coverageNotice } : {}),
     message: mode === "code-repo"
-      ? "Graph and Wiki are ready. Review and commit the canonical MEX setup." + (groundingNotice ? ` ${groundingNotice}` : "")
+      ? "Graph and Wiki are ready. Review and commit the canonical MEX setup."
+        + (coverageNotice ? ` ${coverageNotice}` : "") + (groundingNotice ? ` ${groundingNotice}` : "")
       : "Setup complete.",
   };
 }
@@ -383,6 +468,16 @@ function resolveSetupStage(input: {
   if (!input.populated) return "needs_population";
   if (input.mode === "agent-memory") return "ready";
   return input.graphReady && input.wikiReady ? "ready" : "needs_finalize";
+}
+
+/** One line for the progress view: subsystems done, skipped and in progress. */
+export function describeCoverage(coverage: SetupCoverageProgress): string {
+  if (coverage.phase === "shared") return `Filling the shared files before ${coverage.total} subsystem sessions`;
+  if (coverage.phase === "final") return `${coverage.done}/${coverage.total} subsystems done; writing patterns, routing rows and edges`;
+  const running = coverage.subsystems.filter((entry) => entry.state === "running").map((entry) => `${entry.path}/`);
+  return `${coverage.done}/${coverage.total} subsystems done`
+    + (coverage.skipped > 0 ? `, ${coverage.skipped} skipped` : "")
+    + (running.length > 0 ? ` · working on ${running.slice(0, 3).join(", ")}` : "");
 }
 
 function describeDetectedState(mode: SetupMode, state: ProjectState): string {
