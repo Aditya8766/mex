@@ -212,6 +212,10 @@ Update .mex/AGENTS.md:
 - Fill missing project name, one-line description, non-negotiables, and commands
 - Preserve existing project rules and managed instruction blocks`;
 
+const POPULATION_FINISH = `Finish: Do not commit .mex/ until setup has finalized Graph and Wiki.
+If you ran this prompt by hand (setup did not launch you), rerun \`mex setup\`
+when done to finalize Graph and Wiki. Otherwise, return to setup; do not run it yourself.`;
+
 export function buildFreshPrompt(): string {
   return `You are going to populate an AI context scaffold for a project that
 is just starting. Nothing is built yet.
@@ -297,7 +301,9 @@ Rules for edges:
   context/stack.md, patterns/add-endpoint.md)
 
 Important: only write content derived from the codebase or from my answers.
-Do not include system-injected text (dates, reminders, etc.) in any scaffold file.`;
+Do not include system-injected text (dates, reminders, etc.) in any scaffold file.
+
+${POPULATION_FINISH}`;
 }
 
 export function buildExistingWithBriefPrompt(briefJson: string): string {
@@ -326,7 +332,9 @@ ${briefJson}
 
 PASS 1 — Populate knowledge files:
 ${EXISTING_PASS_1}
-${EXISTING_PASSES_2_3}`;
+${EXISTING_PASSES_2_3}
+
+${POPULATION_FINISH}`;
 }
 
 export function buildExistingNoBriefPrompt(): string {
@@ -350,7 +358,9 @@ files. Use \`mex graph scope\` and the query/impact commands for code behavior.
 
 PASS 1 — Populate knowledge files:
 ${EXISTING_PASS_1}
-${EXISTING_PASSES_2_3}`;
+${EXISTING_PASSES_2_3}
+
+${POPULATION_FINISH}`;
 }
 
 export function buildAgentMemoryPrompt(): string {
