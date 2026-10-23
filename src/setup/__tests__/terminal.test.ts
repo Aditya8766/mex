@@ -67,4 +67,20 @@ describe("terminal setup outcomes", () => {
       populate: async () => { populate(root); return { tool: null, completed: true }; },
     })).toMatchObject({ ready: true, stage: "ready", mode: "agent-memory" });
   });
+
+  it("paused setup without a terminal addresses the population agent, not a person (#285)", async () => {
+    const root = project();
+    const lines: string[] = [];
+    vi.mocked(console.log).mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    const result = await runSetup({ mode: "agent-memory", tools: ["codex"], yes: true });
+    expect(result).toMatchObject({ outcome: "paused", exitCode: 2 });
+    const out = lines.join("\n");
+    expect(out).toContain("You are the population agent. Follow the prompt below in this session.");
+    expect(out).toContain("When done, run `mex setup` again to finalize. Do not commit before it reports complete.");
+    expect(out).toContain("Population prompt:");
+    expect(out).not.toContain("paste");
+    expect(root).toBeTruthy();
+  });
 });

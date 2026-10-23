@@ -66,7 +66,10 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
       });
       for (const note of result.anchorNotes) console.log(`Action needed: ${note}`);
       if (!result.ready) {
-        console.log(`\nSetup paused: scaffold population is still required.\n${CONTINUE}`);
+        // No terminal here: the caller is the population agent itself (#285).
+        console.log(
+          "\nSetup paused: scaffold population is still required.\n\nYou are the population agent. Follow the prompt below in this session.\nWhen done, run `mex setup` again to finalize. Do not commit before it reports complete.",
+        );
         if (result.prompt) console.log(`\nPopulation prompt:\n\n${result.prompt}`);
         return { outcome: "paused", exitCode: 2, message: "Scaffold population is still required." };
       }
