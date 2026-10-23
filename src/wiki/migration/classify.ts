@@ -497,6 +497,44 @@ function declarationRefusal(path: string, declared: string | null, role: Role | 
   return null;
 }
 
+/**
+ * The type a file-level entity gets when a write has to give a file one that
+ * migration has not (an authored entry needs a parent, `wiki apply`), or why
+ * the file must not get one.
+ *
+ * Migration's own rules, in migration's order, so the two writers cannot
+ * disagree about what a file is: Team-owned and navigation files never get
+ * one, a valid root `type` declaration wins, then the path rules. Where
+ * migration would abstain on an untyped file, an authored write still needs a
+ * parent, so the folder decides: a direct `context/` file is a `component`
+ * (one subsystem per file is what population writes there), and `patterns/`
+ * is already a path rule. Anything else is refused with the reason.
+ */
+export function fileEntityTypeFor(
+  path: string,
+  declared: string | null | undefined,
+): { type: WikiEntityType } | { refusal: string } {
+  if (isTeamOwnedReadOnlyPath(path)) return { refusal: `${path} is a Team-owned path, which the Wiki never writes.` };
+  const nonKnowledge = NON_KNOWLEDGE_FILES[path];
+  if (nonKnowledge !== undefined) return { refusal: `${path} is never a Wiki entity: ${nonKnowledge}.` };
+  if (/^specs\//.test(path)) return { refusal: `${path} is under specs/, which only governed Inbox authoring writes.` };
+  const role = roleFor(path);
+  if (declared !== undefined) {
+    const refusal = declarationRefusal(path, declared, role);
+    if (refusal !== null) return { refusal };
+    return { type: declared as WikiEntityType };
+  }
+  if (role !== null) {
+    return role.fileType === null
+      ? { refusal: `${path} has no file-level entity: ${role.rule}.` }
+      : { type: role.fileType };
+  }
+  if (isDirectContextFile(path)) return { type: "component" };
+  return {
+    refusal: `No rule types ${path}. Declare its type in the frontmatter, for example \`type: component\`, so it can hold Wiki entries.`,
+  };
+}
+
 /** The title a file-level entity takes: frontmatter `name`, else the first heading. */
 export function fileTitleOf(file: InventoryFile): string | null {
   const frontmatter = file.parsed.frontmatter;

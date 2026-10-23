@@ -172,7 +172,27 @@ export interface RepositoryGraphGroundingSnapshot {
   explainChange(committed: CommittedBody, nodeId: string): GroundingChangeEvidence | null;
   /** Remember the node's current body under its committed hash, while the two match. */
   rememberBody(nodeId: string, bodyHash: string): void;
+  /**
+   * Bounded declarations of one file, for resolving code named by file and
+   * symbol or line. Null for a file the graph does not hold or cannot verify.
+   */
+  declarationsInFile(filePath: string): readonly RepositoryGraphDeclaration[] | null;
 }
+
+/** @internal One declaration of a file, without its source body. */
+export interface RepositoryGraphDeclaration {
+  id: string;
+  kind: string;
+  name: string;
+  qualifiedName: string;
+  signature?: string;
+  startLine: number;
+  endLine: number;
+  hasBody: boolean;
+}
+
+/** At most this many declarations are read for one file. */
+const MAX_GROUNDING_FILE_DECLARATIONS = 5_000;
 
 /**
  * @internal Opaque two-phase publication prepared while Graph is fresh.
@@ -640,6 +660,33 @@ export class RepositoryGraphPort implements GraphPort {
         rememberBody(nodeId, bodyHash) {
           assertActive();
           evidence.rememberBody(nodeId, bodyHash);
+        },
+        declarationsInFile(filePath) {
+          assertActive();
+          if (typeof filePath !== "string" || filePath.length === 0 || filePath.length > 1_024) return null;
+          if (incomplete && !healthyFiles.has(filePath)) return null;
+          try {
+            const rows = context.session.db.prepare(
+              `SELECT id, kind, name, qualified_name, signature, start_line, end_line, body_hash
+                 FROM nodes WHERE file_path = ? ORDER BY start_line, end_line DESC LIMIT ?`,
+            ).all(filePath, MAX_GROUNDING_FILE_DECLARATIONS) as Array<{
+              id: string; kind: string; name: string; qualified_name: string | null; signature: string | null;
+              start_line: number; end_line: number; body_hash: string | null;
+            }>;
+            if (rows.length === 0) return null;
+            return rows.map((row) => ({
+              id: row.id,
+              kind: row.kind,
+              name: row.name,
+              qualifiedName: row.qualified_name ?? row.name,
+              ...(row.signature === null ? {} : { signature: row.signature }),
+              startLine: Number(row.start_line),
+              endLine: Number(row.end_line),
+              hasBody: row.body_hash !== null,
+            }));
+          } catch {
+            throw interruptedRead("The graph grounding snapshot could not read a file's declarations safely.");
+          }
         },
       };
       return {
