@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openGraphDatabase } from "../../graph/db/database.js";
 import {
   LOW_VALUE_FOLDER_NAMES,
+  SCORE_WEIGHTS,
+  WORKSPACE_CONTAINERS,
+  areaOf,
   computeSubsystemPlan,
   factBudgetForRank,
   isExcludedSourcePath,
@@ -283,6 +286,126 @@ describe("rankSubsystemCandidates: the fixed plan", () => {
     const plan = rankSubsystemCandidates({ files: [...filesIn("src/a", 4), ...filesIn("src/b", 6)] });
     expect(renderSubsystemCandidates(plan)).toBe(" 1. src/b/ — 6 files, 10 to 15 facts\n 2. src/a/ — 4 files, 6 to 10 facts");
     expect(renderSubsystemCandidates(plan)).not.toContain("fan-in");
+  });
+});
+
+describe("areaOf", () => {
+  it("is the workspace folder under a monorepo container, else the top-level folder", () => {
+    expect(areaOf("apps/dashboard/src/components")).toBe("apps/dashboard");
+    expect(areaOf("libs/dal")).toBe("libs/dal");
+    expect(areaOf("packages/framework/src")).toBe("packages/framework");
+    expect(areaOf("src/router")).toBe("src");
+    expect(areaOf("src")).toBe("src");
+    expect(areaOf("apps")).toBe("apps");
+    expect(areaOf("Apps/web/x")).toBe("Apps/web");
+    expect(WORKSPACE_CONTAINERS.has("src")).toBe(false);
+  });
+});
+
+describe("rankSubsystemCandidates: the blended score", () => {
+  it("weights activity first, then size, then fan-in, summing to one", () => {
+    expect(SCORE_WEIGHTS.activity).toBeGreaterThan(SCORE_WEIGHTS.size);
+    expect(SCORE_WEIGHTS.size).toBeGreaterThanOrEqual(SCORE_WEIGHTS.fanIn);
+    expect(SCORE_WEIGHTS.activity + SCORE_WEIGHTS.size + SCORE_WEIGHTS.fanIn).toBeCloseTo(1, 10);
+  });
+
+  const files = [...filesIn("src/a", 20), ...filesIn("src/b", 20), ...filesIn("src/c", 20), ...filesIn("src/d", 20)];
+
+  it("ranks a folder many outside files depend on above an equally active, equally big one", () => {
+    const edges: Array<[string, string]> = [];
+    for (let i = 0; i < 10; i++) edges.push([`src/a/file${i}.ts`, "src/c/file0.ts"]);
+    for (let i = 0; i < 3; i++) edges.push([`src/b/file${i}.ts`, "src/d/file0.ts"]);
+    const commits = [["src/a/file0.ts", "src/b/file0.ts", "src/c/file0.ts", "src/d/file0.ts"]];
+    const plan = rankSubsystemCandidates({ files, commits, fileEdges: edges });
+    expect(plan.candidates.map((c) => [c.path, c.fanIn])).toEqual([["src/c", 10], ["src/d", 3], ["src/a", 0], ["src/b", 0]]);
+  });
+
+  it("counts each outside file once and ignores edges inside the folder", () => {
+    const plan = rankSubsystemCandidates({
+      files,
+      fileEdges: [["src/a/file0.ts", "src/b/file0.ts"], ["src/a/file0.ts", "src/b/file1.ts"], ["src/b/file2.ts", "src/b/file3.ts"]],
+    });
+    expect(plan.candidates.find((c) => c.path === "src/b")!.fanIn).toBe(1);
+    expect(plan.candidates.find((c) => c.path === "src/a")!.fanIn).toBe(0);
+  });
+
+  it("leaves fan-in out without a graph, and the score still ranks", () => {
+    const plan = rankSubsystemCandidates({ files, commits: commitsTouching("src/d", 2) });
+    expect(plan.candidates.every((c) => c.fanIn === null)).toBe(true);
+    expect(plan.candidates[0]!.path).toBe("src/d");
+  });
+
+  it("lets recent activity outweigh a larger size and a higher fan-in", () => {
+    const big = [...filesIn("src/big", 60), ...filesIn("src/busy", 20), ...filesIn("src/x", 20), ...filesIn("src/y", 20)];
+    const edges: Array<[string, string]> = Array.from({ length: 8 }, (_, i): [string, string] => [`src/x/file${i}.ts`, "src/big/file0.ts"]);
+    const plan = rankSubsystemCandidates({ files: big, fileEdges: edges, commits: commitsTouching("src/busy", 6) });
+    expect(plan.candidates[0]!.path).toBe("src/busy");
+  });
+
+  it("falls back to size and fan-in alone when there is no history", () => {
+    const plan = rankSubsystemCandidates({ files, fileEdges: [["src/a/file0.ts", "src/b/file0.ts"]] });
+    expect(plan.ranking).toBe("size");
+    expect(plan.candidates[0]!.path).toBe("src/b");
+  });
+});
+
+describe("rankSubsystemCandidates: the area cap", () => {
+  const modules = ["m1", "m2", "m3", "m4", "m5", "m6"];
+  const others = ["libs/dal", "libs/auth", "packages/fw", "packages/sdk", "apps/api"];
+  const monorepo = [...modules.flatMap((m) => filesIn(`apps/dash/src/${m}`, 50)), ...others.flatMap((o) => filesIn(o, 70))];
+  const dashCommits = modules.flatMap((m, i) => commitsTouching(`apps/dash/src/${m}`, 30 - i));
+  const dashPaths = (plan: ReturnType<typeof rankSubsystemCandidates>) => plan.candidates.map((c) => c.path).filter((p) => p.startsWith("apps/dash"));
+
+  it("keeps one busy workspace from taking more than a third of the slots", () => {
+    const plan = rankSubsystemCandidates({ files: monorepo, commits: dashCommits });
+    expect(plan.target).toEqual({ min: 5, max: 8 });
+    expect(plan.candidates).toHaveLength(8);
+    // ceil(8 / 3) = 3, and they are the three most active modules, in rank order.
+    expect(dashPaths(plan)).toEqual(["apps/dash/src/m1", "apps/dash/src/m2", "apps/dash/src/m3"]);
+  });
+
+  it("fills the freed slots with the best candidates of other areas", () => {
+    const plan = rankSubsystemCandidates({ files: monorepo, commits: dashCommits });
+    const rest = plan.candidates.map((c) => c.path).filter((p) => !p.startsWith("apps/dash")).sort();
+    expect(rest).toEqual(["apps/api", "libs/auth", "libs/dal", "packages/fw", "packages/sdk"]);
+    // Without the cap the dashboard would hold every slot its activity earns.
+    expect(plan.candidates.slice(0, 3).every((c) => c.path.startsWith("apps/dash"))).toBe(true);
+  });
+
+  it("scales with the number of slots: two of four on a small repository", () => {
+    const small = [
+      ...["m1", "m2", "m3"].flatMap((m) => filesIn(`apps/dash/src/${m}`, 30)),
+      ...["libs/dal", "libs/auth", "packages/fw"].flatMap((o) => filesIn(o, 30)),
+    ];
+    const plan = rankSubsystemCandidates({ files: small, commits: dashCommits });
+    expect(plan.target).toEqual({ min: 3, max: 4 });
+    expect(plan.candidates).toHaveLength(4);
+    expect(dashPaths(plan)).toHaveLength(2);
+  });
+
+  it("counts a workspace folder as one area however deep its modules are", () => {
+    expect(new Set(dashPaths(rankSubsystemCandidates({ files: monorepo, commits: dashCommits })).map(areaOf))).toEqual(new Set(["apps/dash"]));
+  });
+
+  it("relaxes the cap when other areas cannot fill the slots", () => {
+    const files = [...modules.flatMap((m) => filesIn(`apps/dash/src/${m}`, 50)), ...filesIn("libs/dal", 70)];
+    const plan = rankSubsystemCandidates({ files, commits: dashCommits });
+    expect(plan.candidates).toHaveLength(7);
+    expect(dashPaths(plan)).toHaveLength(6);
+  });
+
+  it("does not apply to a single-package repository, whose folders are all under src", () => {
+    const src = Array.from({ length: 8 }, (_, i) => filesIn(`src/mod${i}`, 40)).flat();
+    const plan = rankSubsystemCandidates({ files: src, commits: commitsTouching("src/mod0", 3) });
+    expect(plan.candidates).toHaveLength(8);
+    expect(plan.candidates.every((c) => c.path.startsWith("src/"))).toBe(true);
+  });
+
+  it("is deterministic and keeps the plan JSON-serializable", () => {
+    const input = { files: monorepo, commits: dashCommits, fileEdges: [["libs/dal/file0.ts", "packages/fw/file0.ts"]] as Array<[string, string]> };
+    const first = rankSubsystemCandidates(input);
+    expect(rankSubsystemCandidates({ ...input, files: [...monorepo].reverse() })).toEqual(first);
+    expect(JSON.parse(JSON.stringify(first))).toEqual(first);
   });
 });
 

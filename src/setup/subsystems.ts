@@ -25,6 +25,8 @@ export interface SubsystemCandidate {
   readonly files: number;
   /** Recent commits touching the folder's files; `null` when no Git history was read. */
   readonly commits: number | null;
+  /** Distinct files outside the folder with a dependency edge into it; `null` when no graph was read. */
+  readonly fanIn?: number | null;
   /** The folder's own files and its small subfolders, beside the larger subfolders listed separately. */
   readonly remainder?: true;
 }
@@ -100,14 +102,39 @@ export const LOW_VALUE_FOLDER_NAMES: ReadonlySet<string> = new Set([
   "playground", "scripts", "tools", "tooling", "sandbox", "devtools", "bin", "config", "configs",
 ]);
 export const LOW_VALUE_MULTIPLIER = 0.25;
-/** Weight of the file share against the activity share in the score; a tie-break only. */
-const SIZE_TIE_BREAK_WEIGHT = 0.1;
+/**
+ * Score weights: share of recent commits, share of source files, share of
+ * dependency fan-in. Tuned on the two reference repositories: with a flatter blend
+ * (0.5 / 0.3 / 0.2) tiny, widely imported utility folders and one busy feature
+ * crowd out whole workspaces; recent activity must lead, and the area cap does the rest. A term that is unavailable (no history, no graph) is left
+ * out and the others are scaled to sum to one.
+ */
+export const SCORE_WEIGHTS = Object.freeze({ activity: 0.8, size: 0.1, fanIn: 0.1 });
+
+/**
+ * Top-level folders that hold one workspace per child (`apps/api`, `libs/dal`,
+ * `packages/framework`). For a path under one of them the area is the workspace
+ * (two segments); otherwise it is the top-level folder.
+ */
+export const WORKSPACE_CONTAINERS: ReadonlySet<string> = new Set([
+  "apps", "libs", "packages", "services", "modules", "crates", "plugins", "projects", "workspaces",
+]);
+
+/** No area may take more than this share of the plan's slots (rounded up). */
+export const AREA_SLOT_SHARE = 1 / 3;
+
+/** The area a subsystem path belongs to; the diversity cap counts slots per area. */
+export function areaOf(path: string): string {
+  const segments = path.split("/");
+  return segments.length >= 2 && WORKSPACE_CONTAINERS.has(segments[0]!.toLowerCase()) ? `${segments[0]}/${segments[1]}` : segments[0]!;
+}
 
 /** Bounds on the fallback listing, the graph read and the Git reads, so setup never stalls on a huge repository. */
 export const SUBSYSTEM_LIMITS = Object.freeze({
   treeEntries: 40_000,
   treeDepth: 8,
   graphFiles: 200_000,
+  graphEdgeRows: 1_500_000,
   gitListBytes: 32 * 1024 * 1024,
   gitLogCommits: 2000,
   gitLogBytes: 32 * 1024 * 1024,
@@ -149,6 +176,8 @@ export interface SubsystemInputs {
    * Omit when no history could be read; ranking then falls back to size.
    */
   readonly commits?: ReadonlyArray<readonly string[]>;
+  /** Distinct (from file, to file) dependency pairs; omit when no graph was read. */
+  readonly fileEdges?: ReadonlyArray<readonly [string, string]>;
 }
 
 interface Unit {
@@ -210,11 +239,13 @@ function isLowValuePath(path: string): boolean {
  *
  * 1. Top-level folders are the first candidates. Any candidate holding more than
  *    `source files / target minimum` files is replaced by its parts, at any depth.
- * 2. Candidates are scored by their share of recent commits (plus a small share
- *    of the file count as a tie-break). Without history the score is size alone.
- *    Folders named in `LOW_VALUE_FOLDER_NAMES` score a quarter as much.
+ * 2. Candidates are scored by a blend of normalized shares: recent commits (0.5),
+ *    source files (0.3) and dependency fan-in (0.2); an unavailable term is left
+ *    out. Folders named in `LOW_VALUE_FOLDER_NAMES` score a quarter as much.
  * 3. The best `target.max` are kept, skipping tiny folders with no recent
- *    activity unless that would leave fewer than `target.min`.
+ *    activity unless that would leave fewer than `target.min`, and no area (a
+ *    workspace folder such as `apps/dashboard`, else the top-level folder) takes
+ *    more than a third of the slots.
  * 4. Each kept subsystem gets a fact budget by rank.
  */
 export function rankSubsystemCandidates(inputs: SubsystemInputs): SubsystemPlan {
@@ -245,28 +276,67 @@ export function rankSubsystemCandidates(inputs: SubsystemInputs): SubsystemPlan 
   }
   const totalCommits = [...commitCount.values()].reduce((sum, count) => sum + count, 0);
   const byActivity = history !== null && totalCommits > 0;
+
+  const fanInCount = new Map<string, number>();
+  if (inputs.fileEdges !== undefined) {
+    const owner = new Map<string, string>();
+    for (const unit of units) for (const file of unit.files) owner.set(file, unitKey(unit));
+    const sources = new Map<string, Set<string>>();
+    for (const [from, to] of inputs.fileEdges) {
+      const target = owner.get(normalizePath(to));
+      if (target === undefined || owner.get(normalizePath(from)) === target) continue;
+      const set = sources.get(target) ?? new Set<string>();
+      set.add(normalizePath(from));
+      sources.set(target, set);
+    }
+    for (const [key, set] of sources) fanInCount.set(key, set.size);
+  }
+  const totalFanIn = [...fanInCount.values()].reduce((sum, count) => sum + count, 0);
+  const byFanIn = inputs.fileEdges !== undefined && totalFanIn > 0;
+  const weightSum = SCORE_WEIGHTS.size + (byActivity ? SCORE_WEIGHTS.activity : 0) + (byFanIn ? SCORE_WEIGHTS.fanIn : 0);
+
   const scored = units.map((unit) => {
     const commits = history === null ? null : commitCount.get(unitKey(unit)) ?? 0;
-    const fileShare = total === 0 ? 0 : unit.files.length / total;
-    const base = byActivity ? (commits ?? 0) / totalCommits + SIZE_TIE_BREAK_WEIGHT * fileShare : fileShare;
-    return { unit, commits, score: base * (isLowValuePath(unit.path) ? LOW_VALUE_MULTIPLIER : 1) };
+    const fanIn = inputs.fileEdges === undefined ? null : fanInCount.get(unitKey(unit)) ?? 0;
+    const blend = SCORE_WEIGHTS.size * (total === 0 ? 0 : unit.files.length / total)
+      + (byActivity ? SCORE_WEIGHTS.activity * (commits ?? 0) / totalCommits : 0)
+      + (byFanIn ? SCORE_WEIGHTS.fanIn * (fanIn ?? 0) / totalFanIn : 0);
+    return { unit, commits, fanIn, area: areaOf(unit.path), score: (blend / weightSum) * (isLowValuePath(unit.path) ? LOW_VALUE_MULTIPLIER : 1) };
   }).sort((a, b) => b.score - a.score || b.unit.files.length - a.unit.files.length
     || a.unit.path.localeCompare(b.unit.path) || Number(a.unit.remainder === true) - Number(b.unit.remainder === true));
 
   const worthIt = (entry: (typeof scored)[number]): boolean => entry.unit.files.length >= PLAN_FLOOR_FILES || (entry.commits ?? 0) > 0;
-  const chosen = scored.filter(worthIt).slice(0, target.max);
-  for (const entry of scored) {
-    if (chosen.length >= target.min) break;
-    if (!chosen.includes(entry)) chosen.push(entry);
+  const eligible = scored.filter(worthIt);
+  const slots = Math.min(target.max, eligible.length);
+  // No area may take more than a third of the slots; the next best candidates of other areas fill what that frees.
+  // With fewer than three areas the cap cannot be met, so it does not apply.
+  const cap = new Set(eligible.map((entry) => entry.area)).size < 3 ? slots : Math.ceil(slots * AREA_SLOT_SHARE);
+  const perArea = new Map<string, number>();
+  const picked = new Set<(typeof scored)[number]>();
+  for (const entry of eligible) {
+    if (picked.size >= slots) break;
+    if ((perArea.get(entry.area) ?? 0) >= cap) continue;
+    perArea.set(entry.area, (perArea.get(entry.area) ?? 0) + 1);
+    picked.add(entry);
   }
-  const candidates = chosen.map(({ unit, commits }, index): PlannedSubsystem => ({
-    path: unit.path, files: unit.files.length, commits, ...(unit.remainder ? { remainder: true as const } : {}),
+  // If the other areas ran out, the best of the rest take the remaining slots.
+  for (const entry of eligible) {
+    if (picked.size >= slots) break;
+    picked.add(entry);
+  }
+  for (const entry of scored) {
+    if (picked.size >= target.min) break;
+    picked.add(entry);
+  }
+  const chosen = scored.filter((entry) => picked.has(entry));
+  const candidates = chosen.map(({ unit, commits, fanIn }, index): PlannedSubsystem => ({
+    path: unit.path, files: unit.files.length, commits, fanIn, ...(unit.remainder ? { remainder: true as const } : {}),
     budget: factBudgetForRank(index, chosen.length),
   }));
   return { source: "tree", ranking: byActivity ? "activity" : "size", sourceFiles: indexed.length, target, candidates };
 }
 
-/** Indexed source file paths from the built graph; `null` when the graph cannot be read. */
+/** Indexed source file paths and distinct file-to-file edges from the built graph; `null` when the graph cannot be read. */
 export function readGraphSubsystemInputs(projectRoot: string): SubsystemInputs | null {
   const databasePath = resolve(projectRoot, ".mex", "graph.db");
   if (!existsSync(databasePath)) return null;
@@ -275,7 +345,13 @@ export function readGraphSubsystemInputs(projectRoot: string): SubsystemInputs |
     database = openGraphDatabase(databasePath, { readOnly: true });
     const files = (database.prepare("SELECT path FROM files LIMIT ?").allArrays(SUBSYSTEM_LIMITS.graphFiles) as string[][])
       .map((row) => row[0]!);
-    return files.length === 0 ? null : { files };
+    if (files.length === 0) return null;
+    const fileEdges = database.prepare(
+      `SELECT DISTINCT s.file_path, t.file_path FROM edges e
+         JOIN nodes s ON s.id = e.source JOIN nodes t ON t.id = e.target
+        WHERE e.kind <> 'contains' AND s.file_path <> t.file_path LIMIT ?`,
+    ).allArrays(SUBSYSTEM_LIMITS.graphEdgeRows) as Array<[string, string]>;
+    return { files, fileEdges };
   } catch {
     return null;
   } finally {
@@ -388,7 +464,9 @@ export function computeSubsystemPlan(projectRoot: string, options: GitHistoryOpt
     const graph = readGraphSubsystemInputs(projectRoot);
     const files = graph?.files ?? listFilesWithGit(projectRoot) ?? walkSourceTree(projectRoot);
     const commits = readGitCommitFiles(projectRoot, options);
-    const plan = rankSubsystemCandidates({ files, ...(commits === null ? {} : { commits }) });
+    const plan = rankSubsystemCandidates({
+      files, ...(commits === null ? {} : { commits }), ...(graph?.fileEdges === undefined ? {} : { fileEdges: graph.fileEdges }),
+    });
     return plan.candidates.length === 0 ? null : { ...plan, source: graph === null ? "tree" : "graph" };
   } catch {
     return null;
