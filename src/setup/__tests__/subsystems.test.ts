@@ -39,10 +39,10 @@ describe("isExcludedSourcePath", () => {
   it.each([
     "src/__tests__/a.ts", "tests/unit/a.py", "src/api/user.test.ts", "pkg/foo_test.go", "pkg/test_user.py",
     "fixtures/app/main.ts", "vendor/lib/x.go", "third_party/a.c", "docs/conf.py", "src/generated/api.ts",
-    "src/types/api.d.ts", "dist/index.js", "examples/basic/app.ts", "proto/user_pb2.py", "web/Tests/a.ts",
+    "src/types/api.d.ts", "dist/index.js", "examples/basic/app.ts", "proto/user_pb2.py", "web/Tests/a.ts", "runtime-tests/a.ts", "perf-measures/a.ts", "src/test_utils/a.py", "app/e2e-suite/a.ts",
   ])("excludes %s", (path) => expect(isExcludedSourcePath(path)).toBe(true));
 
-  it.each(["src/api/user.ts", "app/models.py", "lib/core.rb", "cmd/server/main.go"])(
+  it.each(["src/api/user.ts", "src/contest/a.ts", "app/attestation/a.ts", "app/models.py", "lib/core.rb", "cmd/server/main.go"])(
     "keeps %s", (path) => expect(isExcludedSourcePath(path)).toBe(false));
 
   it("tolerates backslashes and a leading ./", () => {
