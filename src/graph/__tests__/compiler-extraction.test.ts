@@ -12,6 +12,22 @@ import {
 
 const temporaryRoots: string[] = [];
 
+it("does not construct another project after every source has an owner", async () => {
+  const ts = await import("typescript");
+  const root = project({
+    "tsconfig.json": JSON.stringify({ include: ["src/**/*.ts"] }),
+    "src/tsconfig.json": JSON.stringify({ include: ["**/*.ts"] }),
+    "src/value.ts": "export function value() { return 1; }\n",
+  });
+  let programs = 0;
+  const result = buildTypeScriptExtraction(root, ["src/value.ts"], {
+    programFactory(options) { programs++; return ts.createProgram(options); },
+  });
+  expect(programs).toBe(1);
+  expect(result.files.map((file) => file.filePath)).toEqual(["src/value.ts"]);
+  expect(result.projects).toHaveLength(2);
+});
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -209,6 +225,22 @@ describe("TypeScript compiler extraction", () => {
       expect.objectContaining({ sourceId: factory.id, targetId: initialize.id, kind: "calls", line: 6 }),
       expect.objectContaining({ sourceId: app.id, targetId: initialize.id, kind: "calls", line: 4 }),
     ]));
+  });
+
+  it("renders accessors nested in type literals without failing the extraction", () => {
+    // A getter in a getter's type made the canonical rewrite throw
+    // "Lexical environment is suspended", which failed a whole repository build.
+    const root = project({
+      "settings.ts": [
+        "export type Nested = { get inner(): { get value(): string | number } };",
+        "export function read(source: { get inner(): { get value(): string | number } }): Nested {",
+        "  return source;",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    const file = buildTypeScriptExtraction(root, ["settings.ts"]).files[0]!;
+    expect(file.nodes.find((node) => node.name === "read")).toBeDefined();
   });
 
   it("preserves symbol and reference identity across LF and CRLF checkouts", () => {

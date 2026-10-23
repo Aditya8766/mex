@@ -41,6 +41,16 @@ describe("setup run lifecycle", () => {
     expect(mocks.execute).toHaveBeenCalledWith(expect.objectContaining({ confirmPopulation: true }));
     expect(runner.snapshot()).toMatchObject({ stage: "needs_commit", populationTool: null, ready: false });
   });
+  it("keeps the finalization notice in the commit-checkpoint message", async () => {
+    const notice = "1 grounded entity has changed since they were recorded (.mex/a.md). They were left as written; run `mex sync` to review them.";
+    mocks.execute.mockResolvedValue({ ...result, populationTool: null, groundingNotice: notice, message: `Graph and Wiki are ready. ${notice}` });
+    mocks.status.mockResolvedValue({ ...status, populated: true, graphReady: true, wikiReady: true, ready: false, stage: "needs_commit" });
+    const runner = new HubSetupRunner({ projectRoot: "/test", finalizeOnly: true });
+    runner.start({ mode: "code-repo", tools: [], confirmPopulation: false });
+    await vi.waitFor(() => expect(runner.snapshot().status).toBe("paused"));
+    expect(runner.snapshot().message).toContain("Review and commit");
+    expect(runner.snapshot().message).toContain("run `mex sync`");
+  });
   it("honors an explicit mode on both idle reads without reusing another mode's commit checkpoint", async () => {
     const completedCode = { ...status, populated: true, stage: "needs_commit" };
     mocks.initial.mockReturnValue(completedCode);
