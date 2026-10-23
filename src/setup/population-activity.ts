@@ -18,11 +18,54 @@ const MAX_TRACKED_TOOLS = 128;
 const MAX_ID_LENGTH = 256;
 const MAX_PATH_LENGTH = 2048;
 
+/** Token counts an agent reported for its session; only the numeric fields, never text. */
+export interface PopulationAgentUsage {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly cacheCreationInputTokens?: number;
+  readonly costUsd?: number;
+  readonly turns?: number;
+}
+
 interface PopulationActivityDecoder {
   write(chunk: Buffer): void;
   end(): void;
   readonly failed: boolean;
   readonly completed: boolean;
+  /** The last usage record the agent reported, if any. */
+  readonly usage: PopulationAgentUsage | null;
+  /** The agent's own final error said its usage limit was reached. */
+  readonly usageLimited: boolean;
+}
+
+/** Final provider error text that means the account's usage limit, not a fault of the work. */
+export const USAGE_LIMIT_PATTERN = /usage limit|hit your (?:usage )?limit|limit (?:reached|exceeded)|credit balance is too low|rate_limit_error|quota (?:exceeded|reached)|exceeded your (?:current )?quota/iu;
+
+function count(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(value, Number.MAX_SAFE_INTEGER) : undefined;
+}
+
+function usageOf(event: Record<string, unknown>): PopulationAgentUsage | null {
+  const usage = record(event.usage);
+  if (!usage) return null;
+  const entries: Array<[keyof PopulationAgentUsage, number | undefined]> = [
+    ["inputTokens", count(usage.input_tokens)],
+    ["outputTokens", count(usage.output_tokens)],
+    ["cachedInputTokens", count(usage.cached_input_tokens) ?? count(usage.cache_read_input_tokens)],
+    ["cacheCreationInputTokens", count(usage.cache_creation_input_tokens)],
+    ["costUsd", count(event.total_cost_usd)],
+    ["turns", count(event.num_turns)],
+  ];
+  const kept = entries.filter(([, value]) => value !== undefined);
+  return kept.length === 0 ? null : Object.fromEntries(kept) as PopulationAgentUsage;
+}
+
+/** The provider's own error text of a final failure record, bounded; never forwarded, only matched. */
+function errorTextOf(event: Record<string, unknown>): string {
+  const parts = [event.result, event.message, record(event.error)?.message, event.error]
+    .filter((value): value is string => typeof value === "string");
+  return parts.join(" ").slice(0, 4096);
 }
 
 /**
@@ -49,6 +92,8 @@ export function createPopulationActivityDecoder(
   let ended = false;
   let failed = false;
   let completed = false;
+  let usage: PopulationAgentUsage | null = null;
+  let usageLimited = false;
 
   const fail = () => {
     if (failed) return;
@@ -85,6 +130,8 @@ export function createPopulationActivityDecoder(
       completed = false;
       onSignal({ kind: "started", state: "running" });
     } else if (event.type === "result") {
+      usage = usageOf(event) ?? usage;
+      if (event.is_error === true && USAGE_LIMIT_PATTERN.test(errorTextOf(event))) usageLimited = true;
       if (event.is_error === true || (typeof event.subtype === "string" && event.subtype.startsWith("error_"))) fail();
       else if (event.subtype === "success" && !failed) {
         completed = true;
@@ -134,8 +181,11 @@ export function createPopulationActivityDecoder(
     } else if (event.type === "turn.started") {
       completed = false;
       onSignal({ kind: "working", state: "running" });
-    } else if (event.type === "turn.failed" || event.type === "error") fail();
-    else if (event.type === "turn.completed") {
+    } else if (event.type === "turn.failed" || event.type === "error") {
+      if (USAGE_LIMIT_PATTERN.test(errorTextOf(event))) usageLimited = true;
+      fail();
+    } else if (event.type === "turn.completed") {
+      usage = usageOf(event) ?? usage;
       if (!failed) {
         completed = true;
         onSignal({ kind: "completed", state: "completed" });
@@ -188,6 +238,8 @@ export function createPopulationActivityDecoder(
   return {
     get failed() { return failed; },
     get completed() { return completed && !failed; },
+    get usage() { return usage; },
+    get usageLimited() { return usageLimited; },
     write(chunk) {
       if (ended) return;
       let start = 0;

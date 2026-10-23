@@ -417,6 +417,37 @@ describe("headless population process", () => {
     expect(String(error)).not.toContain(fixture.root);
     expect(fixture.spawn).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["claude", { type: "result", subtype: "error_during_execution", is_error: true, result: "Claude AI usage limit reached|1760000000" }],
+    ["codex", { type: "error", message: "You've hit your usage limit. Try again later." }],
+  ] as const)("reports a %s usage limit as its own category, not as a failed run", async (tool, event) => {
+    const fixture = agentFixture(`
+      process.stdout.write('{"type":"system","subtype":"init"}\\n' + 'reading rate limit middleware code '.repeat(10) + '\\n');
+      process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});
+      process.exitCode = 1;
+    `);
+    const error = await launchHeadlessSetupPopulation({ ...fixture.options, selectedTools: [tool] }).catch((error: unknown) => error);
+    expect(error).toMatchObject({ category: "usage_limit", message: expect.stringContaining("usage limit") });
+  });
+
+  it("does not take agent text that mentions limits for a usage limit", async () => {
+    const fixture = agentFixture(`
+      process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'the rate limit middleware has a usage limit option' } }) + '\\n');
+      process.exitCode = 2;
+    `);
+    const error = await launchHeadlessSetupPopulation(fixture.options).catch((error: unknown) => error);
+    expect(error).toMatchObject({ category: "failed" });
+  });
+
+  it("reports the token usage the agent recorded, once, when it closes", async () => {
+    const fixture = agentFixture(`
+      process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1200, cached_input_tokens: 800, output_tokens: 90 } }) + '\\n');
+    `);
+    const usage = vi.fn();
+    await expect(launchHeadlessSetupPopulation({ ...fixture.options, onUsage: usage })).resolves.toEqual({ tool: "codex", completed: true });
+    expect(usage).toHaveBeenCalledExactlyOnceWith({ inputTokens: 1200, cachedInputTokens: 800, outputTokens: 90 });
+  });
 });
 
 function agentFixture(body: string) {

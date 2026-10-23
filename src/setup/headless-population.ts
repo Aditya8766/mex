@@ -2,7 +2,12 @@ import crossSpawn from "cross-spawn";
 import type { ChildProcess } from "node:child_process";
 import { buildAgentCommand } from "../agent-command.js";
 import { AI_TOOLS, type AiTool } from "../types.js";
-import { createPopulationActivityDecoder, type PopulationActivitySignal } from "./population-activity.js";
+import {
+  createPopulationActivityDecoder,
+  USAGE_LIMIT_PATTERN,
+  type PopulationActivitySignal,
+  type PopulationAgentUsage,
+} from "./population-activity.js";
 import { createPopulationTranscriptDecoder, type PopulationTranscriptSignal } from "./population-transcript.js";
 import {
   launchSetupPopulationAsync,
@@ -28,6 +33,8 @@ export interface HeadlessPopulationOptions {
   /** Fixed activity categories only; never raw agent output or tool arguments. */
   readonly onActivity?: (activity: HeadlessPopulationActivity) => void;
   readonly onTranscript?: (entry: HeadlessPopulationTranscript) => void;
+  /** Token counts the agent reported for the session, once, when it closes. */
+  readonly onUsage?: (usage: PopulationAgentUsage) => void;
   /** Subprocess test seams, never part of the Hub request contract. */
   readonly __internal?: {
     readonly isAvailable?: (command: string) => Promise<boolean>;
@@ -39,7 +46,7 @@ export interface HeadlessPopulationOptions {
 export type HeadlessPopulationActivity = PopulationActivitySignal & { readonly tool: SetupAgentTool };
 export type HeadlessPopulationTranscript = PopulationTranscriptSignal & { readonly tool: SetupAgentTool };
 
-type PopulationFailure = "launch" | "arguments" | "authentication" | "failed" | "protocol" | "cancelled" | "timeout" | "prompt";
+export type PopulationFailure = "launch" | "arguments" | "authentication" | "usage_limit" | "failed" | "protocol" | "cancelled" | "timeout" | "prompt";
 
 /** Fixed messages only: child output can contain prompts, paths, and secrets. */
 export class HeadlessPopulationError extends SetupPopulationError {
@@ -49,6 +56,7 @@ export class HeadlessPopulationError extends SetupPopulationError {
       launch: `${name} could not start. Check its installation and try again.`,
       arguments: `${name} rejected the background command. Update the AI CLI and MEX, then try again.`,
       authentication: `${name} could not authenticate. Sign in to its CLI and try again.`,
+      usage_limit: `${name} reached its usage limit. Wait until the limit resets, then try again.`,
       failed: `${name} exited before population completed. Check its CLI configuration and try again.`,
       protocol: `${name} stopped without confirming completion. Review the files and resume setup.`,
       cancelled: "AI population was cancelled. You can resume setup when ready.",
@@ -88,6 +96,19 @@ export async function launchHeadlessSetupPopulation(
     // receive only this safe allowlist, without an attached raw error cause.
     throw new HeadlessPopulationError("prompt");
   }
+}
+
+/** The first selected Claude Code or Codex CLI that is installed, in the user's order; `null` when none is. */
+export async function findAvailableSetupAgent(
+  selectedTools: readonly AiTool[],
+  signal?: AbortSignal,
+): Promise<SetupAgentTool | null> {
+  for (const tool of selectedTools) {
+    if (tool !== "claude" && tool !== "codex") continue;
+    const command = AI_TOOLS[tool].cli;
+    if (command !== null && await isAvailableAsync(command, signal)) return tool;
+  }
+  return null;
 }
 
 function isAvailableAsync(command: string, signal?: AbortSignal): Promise<boolean> {
@@ -181,10 +202,16 @@ function runHeadlessAgent(
       options.signal?.removeEventListener("abort", cancelled);
       await treeCleanup;
       process.removeListener("exit", parentExit);
+      if (decoder.usage) {
+        try { options.onUsage?.(decoder.usage); } catch { /* observation only */ }
+      }
       if (options.signal?.aborted) reject(new HeadlessPopulationError("cancelled", tool));
       else if (failure) reject(failure);
       else if (code !== 0 || signal || decoder.failed) {
-        reject(new HeadlessPopulationError(classifyFailure(stderr.text(), stdout.text()), tool));
+        reject(new HeadlessPopulationError(
+          decoder.usageLimited || USAGE_LIMIT_PATTERN.test(stderr.text()) ? "usage_limit" : classifyFailure(stderr.text(), stdout.text()),
+          tool,
+        ));
       } else if (!decoder.completed) reject(new HeadlessPopulationError("protocol", tool));
       else resolve(true);
     });
