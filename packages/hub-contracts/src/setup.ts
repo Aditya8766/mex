@@ -61,6 +61,12 @@ export const SetupStatusSchema = z.object({
   tools: z.array(SetupToolStatusSchema).max(8),
   ready: z.boolean(),
   commitCommands: z.array(z.string().min(1).max(512)).max(16),
+  /** Setup stopped part-way: units settled, units in all, and the one line that continues it. */
+  unfinished: z.object({
+    done: z.number().int().nonnegative().max(1_024),
+    total: z.number().int().positive().max(1_024),
+    message: z.string().min(1).max(512),
+  }).strict().optional(),
 }).strict();
 
 export const SetupStartRequestSchema = z.object({

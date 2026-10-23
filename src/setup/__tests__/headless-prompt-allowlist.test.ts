@@ -20,6 +20,9 @@ import {
 } from "../prompts.js";
 import type { SubsystemPlan } from "../subsystems.js";
 import { buildSetupRepairPrompt } from "../finalize-repair.js";
+import { POPULATION_FINISH } from "../prompts.js";
+import { QUEUE_POPULATION_FINISH } from "../next.js";
+import { SETUP_HANDOFF_PROMPT } from "../unfinished.js";
 
 const SUBSYSTEM = {
   path: "src/router", budget: { min: 10, max: 15 }, wikiFile: "context/router.md",
@@ -56,6 +59,9 @@ const HEADLESS_PROMPTS: ReadonlyArray<readonly [string, () => string]> = [
   ["per-subsystem batch fix", () => buildBatchFixPrompt({ label: "subsystem src/router/", batchFile: SUBSYSTEM.batchFile, wikiFiles: [SUBSYSTEM.wikiFile], opIdPrefix: SUBSYSTEM.opIdPrefix,
     diagnostics: [{ code: "GROUNDING_NOT_FOUND", message: "Operation 1 (setup_router_a): No declaration named `x`. Nearest: y (function)." }] })],
   ["per-subsystem final pass", () => buildFinalPassPrompt({ written: [SUBSYSTEM], skipped: [] })],
+  // The one-paste flow: the prompt a user pastes, and the single unit `mex setup next` hands out.
+  ["one-paste handoff", () => SETUP_HANDOFF_PROMPT],
+  ["one-paste single unit", () => buildExistingWithBriefPrompt("{}", PLAN).replace(POPULATION_FINISH, QUEUE_POPULATION_FINISH)],
   // The finalize repair turn runs through the same headless agent.
   ["finalize repair", () => buildSetupRepairPrompt([
     { file: ".mex/context/a.md", node: "function:0", reason: "Node is unavailable.", entity: "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD", kind: "new", contentHash: "0" },
@@ -128,8 +134,13 @@ describe("headless Claude allowlist against the prompts it serves", () => {
   it("does not let the cross-check pass vacuously", () => {
     const named = new Set(HEADLESS_PROMPTS.flatMap(([, build]) => namedMexCommands(build())));
     expect([...named]).toEqual(expect.arrayContaining([
-      "mex graph query", "mex wiki apply", "mex wiki validate",
+      "mex graph query", "mex wiki apply", "mex wiki validate", "mex setup next",
     ]));
+    // Only the one-paste loop's step is allowed; setup itself still needs a person.
+    expect(isHeadlessClaudeMexCommandAllowed("mex setup next")).toBe(true);
+    expect(isHeadlessClaudeMexCommandAllowed("mex setup")).toBe(false);
+    expect(isHeadlessClaudeMexCommandAllowed("mex setup --browser")).toBe(false);
+    expect(isHeadlessClaudeMexCommandAllowed("mex setup nextx")).toBe(false);
     // The population prompts offer no graph-query helper; only the finalize repair turn names where-defined.
     const population = HEADLESS_PROMPTS.filter(([name]) => name !== "finalize repair")
       .flatMap(([, build]) => namedMexCommands(build()));

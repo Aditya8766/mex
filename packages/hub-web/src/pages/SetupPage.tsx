@@ -257,6 +257,12 @@ export function SetupPage() {
             <p>These instruction files need a manual pointer to MEX. Your project setup can continue.</p>
             <ul>{currentRun.anchorNotes.map(note => <li key={note}>{note}</li>)}</ul>
           </aside> : null}
+          {status.unfinished && view !== "progress" ? (
+            <p className={styles.notice} data-tone="warning" role="status">
+              <strong>Setup {status.unfinished.done}/{status.unfinished.total}, not finished</strong>
+              {status.unfinished.message}
+            </p>
+          ) : null}
           {view === "git" ? (
             <GitRequiredNotice onCopy={copy} copied={copied} refreshing={refresh.isPending} onRefresh={() => refresh.mutate()} />
           ) : null}

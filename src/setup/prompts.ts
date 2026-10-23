@@ -280,7 +280,7 @@ joined to it) and fix every error your work caused, such as broken frontmatter
 or a file that does not parse. No other check is needed. If you keep a progress
 file, make sure it ends with COMPLETE.`;
 
-const POPULATION_FINISH = `Finish: Do not commit .mex/ until setup has finalized Graph and Wiki.
+export const POPULATION_FINISH = `Finish: Do not commit .mex/ until setup has finalized Graph and Wiki.
 If you ran this prompt by hand (setup did not launch you), rerun \`mex setup\`
 when done to finalize Graph and Wiki. Otherwise, return to setup; do not run it yourself.`;
 

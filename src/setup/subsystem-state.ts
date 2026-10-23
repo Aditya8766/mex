@@ -74,6 +74,35 @@ export interface SetupPlanState {
   readonly shared: SharedUnit;
   readonly subsystems: SubsystemUnit[];
   readonly final: FinalUnit;
+  /** Present when `mex setup next` drives the work (the one-paste flow); absent for background sessions. */
+  queue?: SetupQueueState;
+  /** When setup finalized with this plan (by any path); a later rerun may still retry skipped units. */
+  finalizedAt?: string;
+}
+
+/** A unit `mex setup next` hands out: the shared files, one subsystem, the final pass, the whole population, or finalize. */
+export type QueueUnitId = "shared" | "final" | "single" | "finalize" | `subsystem:${string}`;
+
+/**
+ * The one-paste flow's own progress. In `single` mode (small or fresh
+ * repositories, agent memory) the whole population is one unit, tracked in
+ * `shared`; the plan then may have no candidates.
+ */
+export interface SetupQueueState {
+  readonly mode: "single" | "units";
+  /** The unit whose instructions were printed last, and what was asked. */
+  awaiting?: {
+    readonly unit: QueueUnitId;
+    readonly kind: "write" | "fix";
+    /** The batch file's hash when fix instructions were printed (an unchanged file is not a second attempt). */
+    readonly batchHash?: string;
+    /** The canonical scaffold's hash when the instructions were printed (the final pass writes no batch). */
+    readonly scaffoldHash?: string;
+    /** Times the same instructions were printed again with nothing new to settle. */
+    repeats: number;
+  };
+  /** Finalize ran and setup is complete. */
+  finalized?: boolean;
 }
 
 /** The repository-relative Wiki file a subsystem's facts go into (relative to `.mex/`). */
@@ -203,7 +232,28 @@ function readProgress(value: unknown): UnitProgress | null {
   };
 }
 
-function readPlan(value: unknown): SubsystemPlan | null {
+const QUEUE_UNIT_PATTERN = /^(?:shared|final|single|finalize|subsystem:[a-z0-9][a-z0-9-]{0,63})$/u;
+
+function readQueue(value: unknown): SetupQueueState | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || (value.mode !== "single" && value.mode !== "units")) return null;
+  let awaiting: SetupQueueState["awaiting"];
+  if (value.awaiting !== undefined) {
+    const raw = value.awaiting;
+    if (!isRecord(raw) || typeof raw.unit !== "string" || !QUEUE_UNIT_PATTERN.test(raw.unit)
+      || (raw.kind !== "write" && raw.kind !== "fix")) return null;
+    awaiting = {
+      unit: raw.unit as QueueUnitId,
+      kind: raw.kind,
+      ...(typeof raw.batchHash === "string" ? { batchHash: raw.batchHash.slice(0, 128) } : {}),
+      ...(typeof raw.scaffoldHash === "string" ? { scaffoldHash: raw.scaffoldHash.slice(0, 128) } : {}),
+      repeats: isCount(raw.repeats, 1_000) ? raw.repeats : 0,
+    };
+  }
+  return { mode: value.mode, ...(awaiting ? { awaiting } : {}), ...(value.finalized === true ? { finalized: true } : {}) };
+}
+
+function readPlan(value: unknown, allowEmpty = false): SubsystemPlan | null {
   if (!isRecord(value) || !Array.isArray(value.candidates) || !isRecord(value.target)) return null;
   if (!isCount(value.sourceFiles) || !isCount(value.target.min, 64) || !isCount(value.target.max, 64)) return null;
   const candidates: PlannedSubsystem[] = [];
@@ -218,7 +268,7 @@ function readPlan(value: unknown): SubsystemPlan | null {
       budget: { min: entry.budget.min, max: entry.budget.max },
     });
   }
-  if (candidates.length === 0 || candidates.length > 64) return null;
+  if ((candidates.length === 0 && !allowEmpty) || candidates.length > 64) return null;
   return {
     source: value.source === "graph" ? "graph" : "tree",
     ranking: value.ranking === "activity" ? "activity" : "size",
@@ -236,7 +286,9 @@ export function parsePlanState(text: string): { state: SetupPlanState } | { stat
   if (raw.version !== SETUP_PLAN_STATE_VERSION) {
     return { state: null, reason: `it was written by another MEX version (format ${String(raw.version)}, expected ${SETUP_PLAN_STATE_VERSION})` };
   }
-  const plan = readPlan(raw.plan);
+  const queue = readQueue(raw.queue);
+  if (queue === null) return { state: null, reason: "its contents are incomplete or malformed" };
+  const plan = readPlan(raw.plan, queue?.mode === "single");
   const shared = readProgress(raw.shared);
   const final = readProgress(raw.final);
   if (plan === null || shared === null || final === null || !Array.isArray(raw.subsystems)
@@ -270,6 +322,8 @@ export function parsePlanState(text: string): { state: SetupPlanState } | { stat
       shared,
       subsystems,
       final,
+      ...(queue === undefined ? {} : { queue }),
+      ...(typeof raw.finalizedAt === "string" ? { finalizedAt: raw.finalizedAt.slice(0, 40) } : {}),
     },
   };
 }
@@ -337,7 +391,10 @@ export function hasUnfinishedPlanState(projectRoot: string): boolean {
   if (!existsSync(path)) return false;
   try {
     const parsed = parsePlanState(readFileSync(path, "utf8"));
-    return parsed.state === null ? true : !isPlanStateComplete(parsed.state);
+    if (parsed.state === null) return true;
+    // A finished one-paste setup, or its single-unit form, has no subsystem plan for background sessions to continue.
+    if (parsed.state.queue?.finalized === true || parsed.state.queue?.mode === "single") return false;
+    return !isPlanStateComplete(parsed.state);
   } catch {
     return true;
   }

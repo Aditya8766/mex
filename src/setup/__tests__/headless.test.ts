@@ -128,7 +128,9 @@ describe("headless setup run", () => {
       onProgress: ({ step }) => steps.push(step) });
     expect(result).toMatchObject({ mode: "code-repo", stage: "needs_population", ready: false });
     expect(existsSync(join(root, ".mex", "graph.db"))).toBe(true);
-    expect(existsSync(join(root, ".mex", "wiki.db"))).toBe(false);
+    // A provisional index keeps the paused Wiki readable, never `migration_required` (#268).
+    const { createRepositoryWikiPort } = await import("../../wiki/application-adapter.js");
+    expect((await createRepositoryWikiPort(root).inspectIndex()).state).toBe("fresh");
     expect(steps).toContain("graph");
     expect(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, stdio: "ignore" })).toThrow();
   });

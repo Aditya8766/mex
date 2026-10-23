@@ -216,7 +216,7 @@ export function renderPlanProgress(state: SetupPlanState): string {
   return [
     "# MEX setup progress",
     "",
-    `Written by MEX from ${".mex/local/setup-plan.json"}; do not edit. Rerun \`mex setup\` to continue.`,
+    `Written by MEX from ${".mex/local/setup-plan.json"}; do not edit. ${state.queue === undefined ? "Rerun \`mex setup\`" : "Run \`mex setup next\`"} to continue.`,
     "",
     line("shared files", state.shared),
     ...state.subsystems.map((unit) => line(`${folder(unit.path, unit.remainder)} -> .mex/${subsystemWikiFile(unit.slug)}`, unit)),

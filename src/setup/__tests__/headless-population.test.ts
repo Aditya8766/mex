@@ -79,7 +79,8 @@ describe("headless population process", () => {
     for (const rule of HEADLESS_CLAUDE_ALLOWED_TOOLS) {
       expect(rule).toMatch(/^(Bash|PowerShell)\(mex (--help|[a-z]+( [a-z-]+)?):\*\)$/);
       expect(rule).not.toContain("link-sections");
-      expect(rule).not.toMatch(/refresh|rebuild|setup|sync|member|relay|inbox|git/);
+      // The one-paste loop's `mex setup next` is the only setup form allowed.
+      expect(rule.replace("mex setup next:", "")).not.toMatch(/refresh|rebuild|setup|sync|member|relay|inbox|git/);
     }
   });
 

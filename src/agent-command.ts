@@ -122,6 +122,8 @@ export function opencodeSessionConfig(existing: string | undefined = process.env
  * create-entry operations, which also covers `mex wiki apply --help`) and the
  * `mex wiki validate` self-check, with the `--help` forms for discovery.
  * Without them the agent can stage operation files but nothing applies them.
+ * `mex setup next` is allowed so the one-paste setup loop works in a headless
+ * session too; bare `mex setup` and its other forms are not.
  * Maintenance and Team commands still require a person. The host matches these
  * as prefixes of a single command, so the prompt tells the agent to run one
  * `mex` command per shell call.
@@ -142,6 +144,8 @@ export const HEADLESS_CLAUDE_MEX_COMMANDS = [
   "mex log",
   "mex timeline",
   "mex capabilities",
+  // The one-paste setup loop: applies the last step and prints the next task.
+  "mex setup next",
 ] as const;
 
 /** Whether a `mex ...` command line starts with a pre-approved headless command. */

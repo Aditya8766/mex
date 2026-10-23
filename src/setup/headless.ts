@@ -26,7 +26,8 @@ import {
   type SetupAgentChoice,
 } from "./headless-population.js";
 import type { SetupBatchApplier } from "./subsystem-apply.js";
-import { createPlanState, hasUnfinishedPlanState, loadPlanState, type SetupPlanState } from "./subsystem-state.js";
+import { createPlanState, hasUnfinishedPlanState, loadPlanState, savePlanState, type SetupPlanState } from "./subsystem-state.js";
+import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup, syncSetupNotice } from "./unfinished.js";
 import {
   perSubsystemSwitch,
   runSubsystemPopulation,
@@ -103,6 +104,12 @@ export interface HeadlessSetupOptions {
   readonly mode?: SetupMode | string;
   readonly tools?: readonly AiTool[];
   readonly confirmPopulation?: boolean;
+  /**
+   * Stop after the scaffold, identity, scan and graph steps and return what
+   * population needs (`preparation`), without populating or finalizing. Used by
+   * `mex setup next`, which hands population to the user's agent unit by unit.
+   */
+  readonly stopBeforePopulation?: boolean;
   readonly signal?: AbortSignal;
   readonly onProgress?: (update: HeadlessSetupProgress) => void;
   readonly onPopulationActivity?: (activity: HeadlessPopulationActivity) => void;
@@ -159,6 +166,8 @@ export interface HeadlessSetupResult {
   readonly groundingNotice?: string;
   /** Per-subsystem population summary (covered, skipped, facts); already part of `message`. */
   readonly coverageNotice?: string;
+  /** With `stopBeforePopulation`: the detected project state and the scanner brief. */
+  readonly preparation?: { readonly state: ProjectState; readonly scannerBrief: string | null };
 }
 
 const STEP_LABELS: Record<SetupProgressStep, string> = {
@@ -188,7 +197,10 @@ export function inspectSetupStatus(projectRoot: string): SetupStatus {
     ? loadConfiguredAiTools(mexDir)
     : [];
   const state = detectProjectState(root, mexDir);
-  const stage = resolveSetupStage({ mode, hasGit, hasScaffold, populated, graphReady, wikiReady });
+  // A stored plan that has not finalized keeps setup unfinished, even once the
+  // shared files are filled and a provisional Wiki index exists.
+  const unfinished = hasScaffold && describeUnfinishedSetup(root) !== null;
+  const stage = resolveSetupStage({ mode, hasGit, hasScaffold, populated: populated && !unfinished, graphReady, wikiReady });
   return {
     mode,
     projectRoot: root,
@@ -316,6 +328,24 @@ export async function runHeadlessSetup(
     });
   }
 
+  if (options.stopBeforePopulation === true) {
+    const populated = isScaffoldPopulated(mexDir);
+    return {
+      mode,
+      stage: populated ? (mode === "code-repo" ? "needs_finalize" : "ready") : "needs_population",
+      populated,
+      ready: false,
+      selectedTools,
+      prompt: null,
+      populationTool: null,
+      populationCompleted: false,
+      commitCommands: mode === "code-repo" ? setupCommitCheckpointCommands(selectedTools) : [],
+      anchorNotes,
+      message: "Setup is prepared for population.",
+      preparation: { state, scannerBrief },
+    };
+  }
+
   // The agent background sessions run: the user's first selected agent whose
   // CLI is installed, else any installed one (announced in one line).
   const findAgent = options.perSubsystem?.findAgent
@@ -355,7 +385,10 @@ export async function runHeadlessSetup(
         if (loaded.notice) options.onMessage?.(`Warning: ${loaded.notice}`);
         // An unreadable stored plan is replaced by a fresh one; replay recognizes batches already applied.
         if (loaded.state === null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
-        perSubsystemState = loaded.state ?? (plan ? createPlanState(plan) : null);
+        // The one-paste flow's single-unit form has no subsystem plan to continue.
+        const stored = loaded.state?.queue?.mode === "single" ? null : loaded.state;
+        if (stored === null && loaded.state !== null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+        perSubsystemState = stored ?? (plan ? createPlanState(plan) : null);
       }
     }
   }
@@ -363,6 +396,22 @@ export async function runHeadlessSetup(
   const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan);
   options.onPopulationPrompt?.(prompt);
   report("population");
+
+  // A `mex setup next` plan part-way through its subsystems must not be finalized
+  // early just because its shared files are filled: without an agent to run the
+  // rest here, setup pauses and says how to continue.
+  if (perSubsystemState === null && mode === "code-repo") {
+    const unfinished = describeUnfinishedSetup(projectRoot);
+    if (unfinished !== null && unfinished.driver === "queue" && loadPlanState(projectRoot).state?.queue?.mode === "units") {
+      syncSetupNotice(projectRoot, { done: unfinished.done, total: unfinished.total });
+      return {
+        mode, stage: "needs_population", populated: isScaffoldPopulated(mexDir), ready: false, selectedTools,
+        prompt: SETUP_HANDOFF_PROMPT, populationTool: null, populationCompleted: false,
+        commitCommands: setupCommitCheckpointCommands(selectedTools), anchorNotes,
+        message: `${unfinished.line} No agent CLI could run here, so paste the prompt into your agent; it runs \`mex setup next\` until setup is complete.`,
+      };
+    }
+  }
 
   let populationFinished = scaffoldPopulatedAtStart;
   let populationTool: BackgroundAgentTool | null = null;
@@ -390,6 +439,11 @@ export async function runHeadlessSetup(
         options.onPopulationCoverage?.(coverage);
         report("population", describeCoverage(coverage));
       },
+    }).catch(async (error: unknown) => {
+      // Stopped part-way (cancel, sign-in, usage limit): leave a readable Wiki, never `migration_required`.
+      const { ensureWikiIndexUsable } = await import("./next.js");
+      await ensureWikiIndexUsable(projectRoot);
+      throw error;
     });
     throwIfSetupAborted(options.signal);
     populationTool = outcome.tool;
@@ -430,19 +484,34 @@ export async function runHeadlessSetup(
   }
 
   if (!populationFinished || !isScaffoldPopulated(mexDir)) {
+    // No agent ran (none could be launched, or none was asked for): hand the
+    // user one short prompt that drives `mex setup next`, and record the plan
+    // so status lines and the managed block can say how far setup got.
+    let handoff: { line: string } | null = null;
+    if (populationTool === null && coverageNotice === undefined) {
+      try {
+        const { prepareSetupQueue } = await import("./next.js");
+        const unfinished = await prepareSetupQueue(projectRoot, { mode, projectState: state, scannerBrief, ...(options.perSubsystem?.env === undefined ? {} : { env: options.perSubsystem.env }) });
+        handoff = { line: unfinished.line };
+      } catch (error) {
+        options.onMessage?.(`Warning: Could not record the setup plan for \`mex setup next\` (${error instanceof Error ? error.message : String(error)}). It is created on its first run.`);
+      }
+    }
     return {
       mode,
       stage: "needs_population",
       populated: false,
       ready: false,
       selectedTools,
-      prompt,
+      prompt: handoff !== null ? SETUP_HANDOFF_PROMPT : prompt,
       populationTool,
       populationCompleted,
       commitCommands: mode === "code-repo" ? setupCommitCheckpointCommands(selectedTools) : [],
       anchorNotes,
       ...(coverageNotice ? { coverageNotice } : {}),
-      message: coverageNotice !== undefined
+      message: handoff !== null
+        ? `${options.confirmPopulation === true ? "Required scaffold placeholders remain. " : ""}${handoff.line} No agent CLI could run here, so paste the prompt into your agent; it runs \`mex setup next\` until setup is complete.`
+        : coverageNotice !== undefined
         ? `The shared scaffold files still have required placeholders, so setup did not finalize. ${coverageNotice} Rerun \`mex setup\` to continue.`
         : populationCompleted
         ? "The agent exited successfully, but required scaffold placeholders remain."
@@ -473,6 +542,8 @@ export async function runHeadlessSetup(
       : "",
     describeGroundingDrift(finalized.drift),
   ].filter(Boolean).join(" ");
+  // Setup finished: a `mex setup next` plan is complete too, and the managed block goes.
+  markSetupQueueFinished(projectRoot);
   const status = inspectSetupStatus(projectRoot);
   return {
     mode,
@@ -530,4 +601,20 @@ function describeDetectedState(mode: SetupMode, state: ProjectState): string {
 
 function uniqueTools(tools: readonly AiTool[]): AiTool[] {
   return [...new Set(tools)];
+}
+
+/** Mark a stored `mex setup next` plan finished and remove the managed block (setup completed by any path). */
+export function markSetupQueueFinished(projectRoot: string): void {
+  try {
+    const loaded = loadPlanState(projectRoot);
+    if (loaded.state !== null) {
+      loaded.state.finalizedAt = new Date().toISOString();
+      if (loaded.state.queue !== undefined) {
+        loaded.state.queue.finalized = true;
+        delete loaded.state.queue.awaiting;
+      }
+      savePlanState(projectRoot, loaded.state);
+    }
+  } catch { /* the record is advisory; the managed block still goes */ }
+  try { syncSetupNotice(projectRoot, null); } catch { /* a read-only file keeps its block */ }
 }

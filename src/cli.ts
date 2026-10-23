@@ -340,7 +340,7 @@ program.addCommand(buildSpecCommand({
 }));
 
 // ── Setup (terminal by default; explicit browser and read-only paths) ──
-program
+const setupCommand = program
   .command("setup")
   .description("Set up MEX in the terminal; use --browser for browser setup")
   .option("--cli", "Run setup in the terminal (the default)")
@@ -359,10 +359,37 @@ program
       + "  Browser (--browser)           Runs setup in the local browser Hub. It cannot be combined\n"
       + "                                with --cli, --tool, --yes or --dry-run.\n"
       + "\n--no-open prints the Hub link instead of opening it in a browser. In the terminal\n"
-      + "mode this is the link to the finishing Hub page; in the browser mode it is the setup link.\n",
+      + "mode this is the link to the finishing Hub page; in the browser mode it is the setup link.\n"
+      + "\nNo agent CLI MEX can launch? Paste one prompt into your agent instead: it runs\n"
+      + "`mex setup next` and does what it prints, until setup is complete.\n",
   )
   .action(async (_opts, command: Command) => {
     await runSetupCommand(command.optsWithGlobals());
+  });
+
+setupCommand
+  .command("next")
+  .description("Continue setup one step at a time from your agent's chat: apply the last step, print the next")
+  .addHelpText(
+    "after",
+    "\nFor agents MEX cannot launch itself. Each call applies what the previous step wrote\n"
+      + "(or gives that step's fix task), records progress, and prints the next task as a file\n"
+      + "under .mex/local/setup-next/ with the exact next command. The last call finalizes Graph\n"
+      + "and Wiki. Safe to run again at any time: it continues where setup stopped.\n",
+  )
+  .action(async () => {
+    try {
+      const { findSetupProjectRoot } = await import("./setup/entry.js");
+      const { runSetupNext } = await import("./setup/next.js");
+      const result = await runSetupNext({
+        projectRoot: findSetupProjectRoot(),
+        onProgress: (line) => console.error(line),
+      });
+      console.log(result.output);
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      await reportSetupCommandError(error);
+    }
   });
 
 // ── Official agent skills ──
@@ -448,11 +475,17 @@ program
         { verbose: opts.verbose },
       );
 
+      // An unfinished setup is said first, with the one line that continues it.
+      const { describeUnfinishedSetup } = await import("./setup/unfinished.js");
+      const unfinished = describeUnfinishedSetup(config.projectRoot);
       if (opts.json) {
-        reportJSON(report, { verbose: opts.verbose });
+        const setup = unfinished === null ? {} : { setup: { done: unfinished.done, total: unfinished.total, finished: false, message: unfinished.line } };
+        reportJSON({ ...report, ...setup } as typeof report, { verbose: opts.verbose });
       } else if (opts.quiet) {
+        if (unfinished) console.log(unfinished.line);
         reportQuiet(report);
       } else {
+        if (unfinished) console.log(`${unfinished.line}\n`);
         if (opts.verbose) reportVerbose(report);
         reportConsole(report);
       }
