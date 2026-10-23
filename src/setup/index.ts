@@ -34,6 +34,7 @@ export {
 import { finalizeSetupWiki } from "./wiki-finalize.js";
 import { finalizeWithRepair, type SetupFinalizeOptions } from "./finalize-repair.js";
 import { describeGroundingDrift, summarizeGroundingDrift, type GroundingDriftSummary } from "../graph/grounding-failures.js";
+import { wikiGroundingDocumentReader } from "../wiki/grounding/document-reader.js";
 import { SetupError } from "./errors.js";
 import { classifySetupMaintenanceError, setupWikiFailureMessage } from "./maintenance-errors.js";
 export { findSetupProjectRoot } from "./entry.js";
@@ -335,6 +336,7 @@ async function finalizeCodeRepoSetupOnce(projectRoot: string, mexDir: string, op
     result = await captureGroundingBaselines(
       { projectRoot, scaffoldRoot: mexDir, aiTools: [] },
       {
+        documentReader: wikiGroundingDocumentReader,
         warn: (message) => {
           warn(message);
           if (captureWarnings.length < FINALIZATION_DETAIL_LIMIT) {

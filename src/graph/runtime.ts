@@ -1,4 +1,4 @@
-import { committedReferenceLookup, entityBlockGroundings, groundingFailureEntities, type GroundingFailureKind } from "./grounding-failures.js";
+import { committedReferenceLookup, type GroundingDocumentReader, type GroundingFailureKind } from "./grounding-failures.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -80,6 +80,8 @@ export interface GroundingBaselineCaptureOptions {
   /** Renew only these explicitly reviewed entries, after revalidating their exact facts. */
   acceptedGroundings?: readonly GroundingBaselineAcceptance[];
   warn?: (message: string) => void;
+  /** Wiki structure (block-entity groundings, entity ownership); supplied by the Wiki. */
+  documentReader?: GroundingDocumentReader;
 }
 
 /** An in-process review bound to one document revision and one exact graph fact. */
@@ -769,11 +771,12 @@ export function refreshGroundingBaselines(
     // Nodes written as an id alone that the graph cannot answer. They are
     // reported once, below; while any remain the file is verified but never rewritten.
     const unresolvedNodes = new Set<string>();
-    const committed = committedReferenceLookup(config.projectRoot, filePath);
+    const reader = options.documentReader;
+    const committed = committedReferenceLookup(config.projectRoot, filePath, reader);
     if (accepted === undefined) {
       const fill = fillMissingFingerprints(original, (nodeId) => graphFingerprint(runtime, nodeId));
       if (fill.unresolved.length > 0) {
-        const entityFor = groundingFailureEntities(original);
+        const entityFor = reader?.failureEntities(original) ?? (() => null);
         const contentHash = hashText(original);
         for (const nodeId of fill.unresolved) {
           unresolvedNodes.add(nodeId);
@@ -804,9 +807,9 @@ export function refreshGroundingBaselines(
     const anchors = findMexAnchors(content);
     // Block entities keep their groundings in their own metadata; they are
     // verified, never captured or rewritten here (the Wiki owns their baselines).
-    const blockGroundings = accepted === undefined ? entityBlockGroundings(content) : [];
+    const blockGroundings = accepted === undefined ? reader?.blockGroundings(content) ?? [] : [];
     if (groundings.length === 0 && anchors.length === 0 && blockGroundings.length === 0) continue;
-    const entityFor = groundingFailureEntities(content);
+    const entityFor = reader?.failureEntities(content) ?? (() => null);
     // A failure names the document as it is on disk, which is what a later
     // repair or drop judges a concurrent edit against.
     const contentHash = hashText(original);
