@@ -947,7 +947,8 @@ graphCommand
     try {
       const config = loadConfig();
       const { runGraphGround } = await import("./graph/cli-ground.js");
-      await runGraphGround(config, opts);
+      const { wikiGroundingDocumentReader } = await import("./wiki/grounding/document-reader.js");
+      await runGraphGround(config, opts, { documentReader: wikiGroundingDocumentReader });
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
