@@ -513,4 +513,37 @@ describe("setup run lifecycle", () => {
     expect(runner.snapshot()).toMatchObject({ status: "cancelled", ready: false, error: null });
     expect(onReady).not.toHaveBeenCalled();
   });
+
+  it("publishes per-subsystem progress with each progress event and keeps it after the run", async () => {
+    let coverage!: NonNullable<HeadlessSetupOptions["onPopulationCoverage"]>;
+    let progress!: NonNullable<HeadlessSetupOptions["onProgress"]>;
+    let finish!: () => void;
+    mocks.execute.mockImplementation((options: HeadlessSetupOptions) => {
+      coverage = options.onPopulationCoverage!;
+      progress = options.onProgress!;
+      return new Promise((resolve) => { finish = () => resolve({ ...result, coverageNotice: "Subsystems covered: 1 of 2, 4 facts written." }); });
+    });
+    mocks.status.mockResolvedValue({ ...status, populated: true, graphReady: true, wikiReady: true, ready: false, stage: "needs_commit" });
+    const runner = new HubSetupRunner({ projectRoot: "/test" });
+    const seen: unknown[] = [];
+    runner.subscribe((run) => { seen.push(run.populationCoverage); });
+    runner.start({ mode: "code-repo", tools: ["claude"] });
+    await vi.waitFor(() => expect(mocks.execute).toHaveBeenCalledOnce());
+    const entry = {
+      phase: "subsystems" as const, total: 2, done: 1, skipped: 1,
+      subsystems: [{ path: "src/router", state: "done" as const }, { path: "src/jsx", state: "skipped" as const }],
+    };
+    coverage(entry);
+    progress({ step: "population", label: "Populate the scaffold", detail: "1/2 subsystems done, 1 skipped" });
+    expect(SetupRunSchema.parse(runner.snapshot())).toMatchObject({
+      populationCoverage: entry,
+      progress: { step: "population", detail: "1/2 subsystems done, 1 skipped" },
+      message: "1/2 subsystems done, 1 skipped",
+    });
+    expect(seen.at(-1)).toEqual(entry);
+    finish();
+    await vi.waitFor(() => expect(runner.snapshot().status).toBe("paused"));
+    expect(SetupRunSchema.parse(runner.snapshot()).populationCoverage).toEqual(entry);
+    await runner.shutdown();
+  });
 });

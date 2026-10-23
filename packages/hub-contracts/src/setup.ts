@@ -167,6 +167,24 @@ export const SetupPopulationActivitySchema = z.object({
   totalEvents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 }).strict();
 
+export const SETUP_COVERAGE_SUBSYSTEM_LIMIT = 64;
+
+/**
+ * Per-subsystem population progress on larger repositories: how many planned
+ * subsystems are done, skipped or running. Paths are repository-relative
+ * folders from MEX's own plan, the same ones the population prompt names.
+ */
+export const SetupPopulationCoverageSchema = z.object({
+  phase: z.enum(["shared", "subsystems", "final", "complete"]),
+  total: z.number().int().nonnegative().max(SETUP_COVERAGE_SUBSYSTEM_LIMIT),
+  done: z.number().int().nonnegative().max(SETUP_COVERAGE_SUBSYSTEM_LIMIT),
+  skipped: z.number().int().nonnegative().max(SETUP_COVERAGE_SUBSYSTEM_LIMIT),
+  subsystems: z.array(z.object({
+    path: z.string().min(1).max(512),
+    state: z.enum(["pending", "running", "done", "skipped"]),
+  }).strict()).max(SETUP_COVERAGE_SUBSYSTEM_LIMIT),
+}).strict();
+
 export const SETUP_TRANSCRIPT_ENTRY_CHARACTERS = 4_096;
 export const SETUP_TRANSCRIPT_BATCH_ENTRIES = 32;
 export const SETUP_TRANSCRIPT_RETAINED_BYTES = 1_048_576;
@@ -201,6 +219,7 @@ export const SetupRunSchema = z.object({
   populationTool: z.enum(["claude", "codex"]).nullable(),
   populationCompleted: z.boolean(),
   populationActivity: SetupPopulationActivitySchema.optional(),
+  populationCoverage: SetupPopulationCoverageSchema.optional(),
   transcriptId: z.string().uuid().optional(),
   commitCommands: z.array(z.string().min(1).max(512)).max(16),
   anchorNotes: z.array(z.string().min(1).max(1_024)).max(16),
@@ -222,6 +241,7 @@ export type SetupStartRequest = z.infer<typeof SetupStartRequestSchema>;
 export type SetupProgress = z.infer<typeof SetupProgressSchema>;
 export type SetupPopulationEvent = z.infer<typeof SetupPopulationEventSchema>;
 export type SetupPopulationActivity = z.infer<typeof SetupPopulationActivitySchema>;
+export type SetupPopulationCoverage = z.infer<typeof SetupPopulationCoverageSchema>;
 export type SetupTranscriptEntry = z.infer<typeof SetupTranscriptEntrySchema>;
 export type SetupTranscriptBatch = z.infer<typeof SetupTranscriptBatchSchema>;
 export type SetupRun = z.infer<typeof SetupRunSchema>;
