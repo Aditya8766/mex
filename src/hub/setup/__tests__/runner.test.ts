@@ -8,7 +8,7 @@ import { SetupError } from "../../../setup/errors.js";
 
 const mocks = vi.hoisted(() => ({ inspect: vi.fn(), execute: vi.fn(), status: vi.fn(), initial: vi.fn() }));
 vi.mock("../../../setup/headless.js", () => ({ inspectSetupStatus: mocks.inspect, runHeadlessSetup: mocks.execute }));
-vi.mock("../readiness.js", () => ({ initialSetupStatus: mocks.initial, projectSetupStatus: mocks.status }));
+vi.mock("../readiness.js", () => ({ initialSetupStatus: mocks.initial, projectSetupStatus: mocks.status, hasPendingSetupChanges: async () => true }));
 
 import { HubSetupRunner } from "../runner.js";
 
@@ -32,6 +32,15 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("setup run lifecycle", () => {
+  it("checks population without an agent and retains the migrated commit checkpoint", async () => {
+    mocks.execute.mockResolvedValue({ ...result, populationTool: null });
+    mocks.status.mockResolvedValue({ ...status, populated: true, graphReady: true, wikiReady: true, ready: true, stage: "ready" });
+    const runner = new HubSetupRunner({ projectRoot: "/test", finalizeOnly: true });
+    runner.start({ mode: "code-repo", tools: [], confirmPopulation: false });
+    await vi.waitFor(() => expect(runner.snapshot().status).toBe("paused"));
+    expect(mocks.execute).toHaveBeenCalledWith(expect.objectContaining({ confirmPopulation: true }));
+    expect(runner.snapshot()).toMatchObject({ stage: "needs_commit", populationTool: null, ready: false });
+  });
   it("honors an explicit mode on both idle reads without reusing another mode's commit checkpoint", async () => {
     const completedCode = { ...status, populated: true, stage: "needs_commit" };
     mocks.initial.mockReturnValue(completedCode);

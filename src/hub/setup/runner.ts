@@ -20,7 +20,7 @@ import { HubHttpError } from "../http/errors.js";
 import { setupCommitCheckpointCommands, SetupFinalizationError } from "../../setup/index.js";
 import { SetupPopulationError } from "../../setup/population.js";
 import { SetupError } from "../../setup/errors.js";
-import { initialSetupStatus, projectSetupStatus } from "./readiness.js";
+import { initialSetupStatus, projectSetupStatus, hasPendingSetupChanges } from "./readiness.js";
 import { SetupTranscriptStore } from "./transcript.js";
 import { SetupCommitService } from "./commit.js";
 import { SetupGlobalInstaller } from "../../setup/global-install.js";
@@ -30,6 +30,7 @@ const ACTIVITY_EMIT_INTERVAL_MS = 500;
 const TRANSCRIPT_EMIT_INTERVAL_MS = 200;
 
 export interface HubSetupRunnerOptions {
+  readonly finalizeOnly?: boolean;
   readonly projectRoot: string;
   readonly now?: () => Date;
   readonly onReady?: (signal: AbortSignal) => void | Promise<void>;
@@ -43,6 +44,8 @@ export class HubSetupRunner {
   private readonly now: () => Date;
   private readonly onReady?: (signal: AbortSignal) => void | Promise<void>;
   private readonly initialMode?: "code-repo" | "agent-memory";
+  private readonly finalizeOnly: boolean;
+  private finalizationComplete = false;
   private readonly listeners = new Set<HubSetupListener>();
   private run: SetupRun;
   private controller: AbortController | null = null;
@@ -63,15 +66,21 @@ export class HubSetupRunner {
     this.now = options.now ?? (() => new Date());
     this.onReady = options.onReady;
     this.initialMode = options.initialMode;
+    this.finalizeOnly = options.finalizeOnly === true;
     this.run = idleRun(this.withInitialMode(initialSetupStatus(this.projectRoot)), this.now());
   }
 
   async status(): Promise<SetupStatus> {
     const status = await projectSetupStatus(this.projectRoot);
+    if (this.finalizeOnly && !this.finalizationComplete) return { ...status, ready: false, stage: "needs_finalize" };
+    if (this.finalizeOnly && status.ready && await hasPendingSetupChanges(this.projectRoot)) {
+      return { ...status, ready: false, stage: "needs_commit" };
+    }
     return this.run.status === "idle" ? this.withInitialMode(status) : status;
   }
 
   private withInitialMode(status: SetupStatus): SetupStatus {
+    if (this.finalizeOnly && !this.finalizationComplete) return { ...status, ready: false, stage: "needs_finalize" };
     return this.initialMode && status.mode !== this.initialMode
       ? { ...status, mode: this.initialMode, ready: false,
         stage: this.initialMode === "code-repo" && !status.hasGit ? "needs_git" : "needs_setup" }
@@ -286,7 +295,7 @@ export class HubSetupRunner {
     try {
       if (this.commitService) await this.commitService.verifyRecovery();
       const current = inspectSetupStatus(this.projectRoot);
-      const canFinishExisting = request.confirmPopulation === true
+      const canFinishExisting = !this.finalizeOnly && request.confirmPopulation === true
         && current.ready && current.mode === request.mode
         && JSON.stringify(current.configuredTools) === JSON.stringify(request.tools);
       const result: HeadlessSetupResult = canFinishExisting ? {
@@ -305,7 +314,7 @@ export class HubSetupRunner {
         projectRoot: this.projectRoot,
         mode: request.mode,
         tools: request.tools,
-        ...(request.confirmPopulation === undefined ? {} : { confirmPopulation: request.confirmPopulation }),
+        ...(this.finalizeOnly ? { confirmPopulation: true } : request.confirmPopulation === undefined ? {} : { confirmPopulation: request.confirmPopulation }),
         signal,
         onPopulationPrompt: (prompt) => { this.run = { ...this.run, prompt }; },
         onAnchorNotes: (anchorNotes) => { this.run = { ...this.run, anchorNotes: [...anchorNotes] }; },
@@ -379,6 +388,7 @@ export class HubSetupRunner {
         },
       });
       if (signal.aborted) throw new Error("Setup was cancelled.");
+      if (this.finalizeOnly && result.ready) this.finalizationComplete = true;
       await this.finishFromResult(result, signal, request.openHub === true);
     } catch (error) {
       // Child output and arbitrary filesystem exceptions are never a browser payload.
