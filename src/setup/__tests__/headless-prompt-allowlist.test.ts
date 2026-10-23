@@ -15,6 +15,7 @@ import {
   buildFreshPrompt,
 } from "../prompts.js";
 import type { SubsystemPlan } from "../subsystems.js";
+import { buildSetupRepairPrompt } from "../finalize-repair.js";
 
 /** Every prompt `buildSetupPopulationPrompt` can hand to the headless population agent. */
 const PLAN: SubsystemPlan = {
@@ -30,6 +31,10 @@ const HEADLESS_PROMPTS: ReadonlyArray<readonly [string, () => string]> = [
   ["existing without brief", () => buildExistingNoBriefPrompt(PLAN)],
   ["existing without brief, no candidates", () => buildExistingNoBriefPrompt(null)],
   ["agent memory", buildAgentMemoryPrompt],
+  // The finalize repair turn runs through the same headless agent.
+  ["finalize repair", () => buildSetupRepairPrompt([
+    { file: ".mex/context/a.md", node: "function:0", reason: "Node is unavailable.", entity: "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD", kind: "new", contentHash: "0" },
+  ], [])],
 ];
 
 /**
