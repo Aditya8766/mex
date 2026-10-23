@@ -4,7 +4,7 @@ vi.mock("../../graph/runtime.js", async original => ({ ...await original(), capt
 vi.mock("../wiki-finalize.js", () => ({ finalizeSetupWiki: mocks.wiki }));
 vi.mock("../../config.js", async original => ({ ...await original(), findConfig: () => ({ wiki: {} }) }));
 import { finalizeCodeRepoSetup } from "../index.js";
-const bad = { captured: 0, skipped: 1, failures: [{ file: ".mex/test.md", entity: null, node: "function:wrong", reason: "Unavailable node" }] };
+const bad = { captured: 0, skipped: 1, failures: [{ file: ".mex/test.md", entity: null, node: "function:wrong", reason: "Unavailable node", kind: "new" as const }] };
 beforeEach(() => { vi.resetAllMocks(); mocks.wiki.mockResolvedValue({ ready: true, indexedEntities: 1 }); });
 it("gives the supplied population adapter one exact repair turn", async () => {
   mocks.capture.mockResolvedValueOnce(bad).mockResolvedValue({ captured: 0, skipped: 0 });
@@ -14,7 +14,7 @@ it("gives the supplied population adapter one exact repair turn", async () => {
     expect(input.prompt).toContain("No other edits. Do not commit.");
     return { tool: "codex" as const, completed: true };
   });
-  await expect(finalizeCodeRepoSetup("/project", "/project/.mex", { selectedTools: ["codex"], populate, onMessage: () => {} })).resolves.toEqual([]);
+  await expect(finalizeCodeRepoSetup("/project", "/project/.mex", { selectedTools: ["codex"], populate, onMessage: () => {} })).resolves.toMatchObject({ dropped: [], drift: null });
   expect(populate).toHaveBeenCalledOnce(); expect(mocks.capture).toHaveBeenCalledTimes(2);
 });
 it("retains a non-droppable Wiki error after one repair", async () => {
@@ -46,7 +46,7 @@ it.each([true, false])("drops remaining exact failures (repair available=%s)", a
   const populate = vi.fn(async () => ({ tool: "codex" as const, completed: false }));
   const messages: string[] = [];
   try {
-    await expect(finalizeCodeRepoSetup(root, mex, { selectedTools: available ? ["codex"] : [], populate, onMessage: m => messages.push(m) })).resolves.toEqual(bad.failures);
+    await expect(finalizeCodeRepoSetup(root, mex, { selectedTools: available ? ["codex"] : [], populate, onMessage: m => messages.push(m) })).resolves.toMatchObject({ dropped: bad.failures });
     expect(populate).toHaveBeenCalledTimes(available ? 1 : 0);
     expect(readFileSync(join(mex, "test.md"), "utf8")).toBe('---\r\n# keep\r\ngrounds_to:\r\n  []\r\n---\r\nBefore label after.\r\n');
     expect(messages.join("\n")).toContain("Dropped unverifiable reference");
@@ -64,7 +64,7 @@ it("stops before dropping a document changed after verification", async () => {
   writeFileSync(join(mex, "test.md"), content);
   mocks.capture.mockResolvedValue({ ...bad, failures: bad.failures.map(f => ({ ...f, contentHash: "old-revision" })) });
   try {
-    await expect(finalizeCodeRepoSetup(root, mex, { onMessage: () => {} })).rejects.toThrow("changed after verification");
+    await expect(finalizeCodeRepoSetup(root, mex, { onMessage: () => {} })).rejects.toThrow("edited while setup was checking it");
     expect(readFileSync(join(mex, "test.md"), "utf8")).toBe(content);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -74,7 +74,7 @@ it("drops remaining failures when the repair adapter throws", async () => {
   writeFileSync(join(mex, "test.md"), '[label](mex://function:wrong)\n');
   mocks.capture.mockResolvedValueOnce(bad).mockResolvedValueOnce(bad).mockResolvedValue({ captured: 0, skipped: 0 });
   try {
-    await expect(finalizeCodeRepoSetup(root, mex, { selectedTools: ["codex"], populate: async () => { throw new Error("repair failed"); }, onMessage: () => {} })).resolves.toEqual(bad.failures);
+    await expect(finalizeCodeRepoSetup(root, mex, { selectedTools: ["codex"], populate: async () => { throw new Error("repair failed"); }, onMessage: () => {} })).resolves.toMatchObject({ dropped: bad.failures });
     expect(readFileSync(join(mex, "test.md"), "utf8")).toBe('label\n');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -85,7 +85,7 @@ it("drops bounded batches until all remaining failures are gone", async () => {
   const other = { ...bad.failures[0]!, node: "function:other" };
   mocks.capture.mockResolvedValueOnce({ ...bad, skipped: 2 }).mockResolvedValueOnce({ ...bad, failures: [other] }).mockResolvedValue({ captured: 0, skipped: 0 });
   try {
-    await expect(finalizeCodeRepoSetup(root, mex, { onMessage: () => {} })).resolves.toEqual([...bad.failures, other]);
+    await expect(finalizeCodeRepoSetup(root, mex, { onMessage: () => {} })).resolves.toMatchObject({ dropped: [...bad.failures, other] });
     expect(readFileSync(join(mex, "test.md"), "utf8")).toBe('first mex://function:other\n');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

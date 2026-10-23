@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import YAML from "yaml";
 import { replaceGroundingDocument, type GroundingBaselineFailure } from "../graph/runtime.js";
 import { GRAPH_CORPUS_LIMITS } from "../graph/corpus-policy.js";
 import { parseDocument, type YamlRegion } from "../wiki/markdown/parse.js";
 import { applyEdits, type PatchEdit } from "../wiki/markdown/patch.js";
+import { SetupFinalizationError } from "./index.js";
 
 /** Delete only selected sequence items and link syntax; never render a YAML store. */
 export function dropReferenceText(content: string, nodes: ReadonlySet<string>): string {
@@ -63,18 +64,50 @@ export function dropReferenceText(content: string, nodes: ReadonlySet<string>): 
   return applyEdits(content, edits).text;
 }
 
-export function dropSetupReferences(projectRoot: string, mexDir: string, failures: readonly GroundingBaselineFailure[]): void {
+/**
+ * Remove references the graph cannot verify. Only `new` failures are ever
+ * removed: a drift entry is recorded knowledge, and is left byte for byte as written.
+ *
+ * Every document is checked and rewritten in memory first, so a document that
+ * cannot be edited safely stops the pass before any file changes. Each failure
+ * names the file and the next step, and a rerun of setup picks up from the files.
+ */
+export function dropSetupReferences(projectRoot: string, mexDir: string, all: readonly GroundingBaselineFailure[]): void {
+  const failures = all.filter(f => f.kind === "new");
   const config = { projectRoot, scaffoldRoot: mexDir, aiTools: [] };
+  const stop = (message: string): never => { throw new SetupFinalizationError(message); };
+  const pending: { path: string; content: string; next: string }[] = [];
   for (const file of new Set(failures.map(f => f.file))) {
+    const nodes = failures.filter(f => f.file === file).map(f => f.node);
     const path = resolve(projectRoot, file);
-    if (statSync(path).size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) throw new Error("Grounding document exceeds the bounded read limit.");
-    const content = readFileSync(path, "utf8");
+    let content: string;
+    try {
+      if (statSync(path).size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) {
+        stop(`${file} is too large for setup to edit. Remove the unverifiable reference ${nodes[0]} by hand, then rerun \`mex setup\`.`);
+      }
+      content = readFileSync(path, "utf8");
+    } catch (error) {
+      if (error instanceof SetupFinalizationError) throw error;
+      return stop(`${file} could not be read to remove the unverifiable reference ${nodes[0]} (${error instanceof Error ? error.message : String(error)}). Restore or fix the file, then rerun \`mex setup\`.`);
+    }
     const digest = createHash("sha256").update(content).digest("hex");
     if (failures.some(f => f.file === file && f.contentHash !== undefined && f.contentHash !== digest)) {
-      throw new Error("Grounding document changed after verification; retry setup.");
+      stop(`${file} was edited while setup was checking it, so nothing was removed from it. Rerun \`mex setup\`.`);
     }
-    const next = dropReferenceText(content, new Set(failures.filter(f => f.file === file).map(f => f.node)));
-    if (content === next) throw new Error("Unverifiable references changed before removal; retry setup.");
-    replaceGroundingDocument(config, path, content, next, GRAPH_CORPUS_LIMITS.maxSourceFileBytes);
+    let next: string;
+    try { next = dropReferenceText(content, new Set(nodes)); }
+    catch (error) {
+      return stop(`Setup could not safely remove the unverifiable reference ${nodes[0]} from ${file} (${error instanceof Error ? error.message : String(error)}). Delete that grounds_to entry or mex:// link by hand, then rerun \`mex setup\`.`);
+    }
+    if (content === next) {
+      stop(`Setup could not find the unverifiable reference ${nodes[0]} in ${file} to remove it. Delete that grounds_to entry or mex:// link by hand (or fix its YAML), then rerun \`mex setup\`.`);
+    }
+    pending.push({ path, content, next });
+  }
+  for (const { path, content, next } of pending) {
+    try { replaceGroundingDocument(config, path, content, next, GRAPH_CORPUS_LIMITS.maxSourceFileBytes); }
+    catch (error) {
+      stop(`${relative(projectRoot, path).replaceAll("\\", "/")} changed while setup was removing unverifiable references (${error instanceof Error ? error.message : String(error)}). Rerun \`mex setup\`.`);
+    }
   }
 }
