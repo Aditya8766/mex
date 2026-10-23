@@ -76,8 +76,14 @@ describe("rankSubsystemCandidates", () => {
     const paths = rankSubsystemCandidates({ files }).candidates.map((c) => c.path);
     expect(paths).toContain("packages/core/src/parser");
     expect(paths).toContain("packages/core/src/render");
-    expect(paths).toContain("packages/cli/src");
+    expect(paths).toContain("packages/cli");
+    expect(paths).not.toContain("packages/cli/src");
     expect(paths).not.toContain("packages");
+  });
+
+  it("does not look through a wrapper below the second level unless the folder dominates", () => {
+    const files = [...filesIn("app/dashboard/components", 17), ...filesIn("app/dashboard", 3), ...filesIn("lib", 20), ...filesIn("ui", 12)];
+    expect(rankSubsystemCandidates({ files }).candidates.map((c) => c.path).sort()).toEqual(["app/dashboard", "lib", "ui"]);
   });
 
   it("splits an oversized child again but never below the depth cap", () => {

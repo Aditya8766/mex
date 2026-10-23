@@ -135,8 +135,8 @@ function expand(unit: Unit, depth: number, totalFiles: number): Unit[] {
     .map(([path, files]): Unit => ({ path, files }));
   const covered = children.reduce((sum, child) => sum + child.files.length, 0);
   const dominant = unit.files.length > totalFiles * DOMINANT_SHARE;
-  if (children.length === 1 && children[0]!.files.length >= unit.files.length * 0.8) {
-    // A wrapper such as `src/` or `lib/`: look through it.
+  if (children.length === 1 && children[0]!.files.length >= unit.files.length * 0.8 && (depth < 2 || dominant)) {
+    // A wrapper such as `src/` or `lib/`: look through it, but only below the second level when the folder dominates.
     return expand(children[0]!, depth + 1, totalFiles);
   }
   const worthSplitting = children.length >= 2 && covered >= unit.files.length * SPLIT_COVERAGE;
