@@ -8,6 +8,7 @@ import { runGraphScope } from "../src/graph/cli-agent.js";
 import { describeGroundingDrift } from "../src/graph/grounding-failures.js";
 import { extractGroundings, writeGroundings } from "../src/markdown.js";
 import { finalizeCodeRepoSetup } from "../src/setup/index.js";
+import { loadGroundingRuntime } from "../src/graph/runtime.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -147,4 +148,61 @@ describe("finalize leaves recorded knowledge whose code changed alone", () => {
     expect(outcome.drift).not.toBeNull();
     expect(readFileSync(p.pattern, "utf8")).toBe(before);
   }, 60_000);
+
+  const blockText = (id: string, entries: string) => `<!-- mex:entity
+id: ${id}
+type: fact
+status: promoted
+revision: 1
+provenance:
+  createdBy:
+    kind: agent
+    id: hand
+  createdAt: 2026-10-23T08:31:11.456Z
+grounds_to:
+${entries}-->
+## Claim ${id.slice(-4)}
+
+Prose of ${id.slice(-4)}.
+`;
+  const item = (g: { node: string; fingerprint: string }, extra = "") => `  - node: ${g.node}\n    fingerprint: ${g.fingerprint}\n${extra}`;
+  const A = "mx_01AAAAAAAAAAAAAAAAAAAAAAAA", C = "mx_01CCCCCCCCCCCCCCCCCCCCCCCC", D = "mx_01DDDDDDDDDDDDDDDDDDDDDDDD";
+  const PHANTOM = { node: "function:11111111111111111111111111111111", fingerprint: BAD.fingerprint };
+
+  it("verifies block-entity groundings: drift untouched, a new bad one removed with the rest kept", async () => {
+    const p = await project();
+    const total = p.fact("totalPrice");
+    const shipping = p.fact("shippingCost");
+    const runtime = await loadGroundingRuntime({ projectRoot: p.root, scaffoldRoot: p.scaffold, aiTools: [] });
+    const bodyHash = runtime!.graph.getNode(total.node)!.bodyHash!;
+    runtime!.close();
+    const committed = "# Pricing\n\n" + [blockText(A, item(total, `    bodyHash: ${bodyHash}\n`)), blockText(C, item(shipping))].join("\n");
+    writeFileSync(p.pattern, committed);
+    git(p.root, "add", "-A"); git(p.root, "commit", "-q", "-m", "x");
+    // The code A is recorded against changes; the agent then adds a bad second grounding to C.
+    writeFileSync(join(p.root, "src", "price.ts"), editedSource());
+    writeFileSync(p.pattern, committed.replace(item(shipping), item(shipping) + item(PHANTOM)));
+    const populate = vi.fn(async (input: { prompt: string }) => {
+      expect(input.prompt).toContain(PHANTOM.node);
+      expect(input.prompt).not.toContain(total.node);
+      return { tool: "codex" as const, completed: true };
+    });
+    const outcome = await finalizeCodeRepoSetup(p.root, p.scaffold, { selectedTools: ["codex"], populate, ...quiet });
+    expect(populate).toHaveBeenCalledOnce();
+    expect(outcome.dropped.map((e) => e.node)).toEqual([PHANTOM.node]);
+    expect(outcome.drift).not.toBeNull();
+    expect(readFileSync(p.pattern, "utf8")).toBe(committed);
+  }, 90_000);
+
+  it("removes the only grounding of a new block fact, keeps its prose and says so", async () => {
+    const p = await project();
+    writeFileSync(p.pattern, "# Pricing\n\n" + blockText(D, item({ node: BAD.node, fingerprint: p.fact("totalPrice").fingerprint })));
+    const messages: string[] = [];
+    const outcome = await finalizeCodeRepoSetup(p.root, p.scaffold, { onMessage: (m) => messages.push(m) });
+    expect(outcome.dropped.map((e) => e.node)).toEqual([BAD.node]);
+    const after = readFileSync(p.pattern, "utf8");
+    expect(after).toContain("Prose of DDDD.");
+    expect(after).not.toContain(BAD.node);
+    expect(messages.join("\n")).toContain(`${D} now has no code grounding`);
+  }, 90_000);
 });

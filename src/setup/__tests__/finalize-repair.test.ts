@@ -5,7 +5,7 @@ vi.mock("../wiki-finalize.js", () => ({ finalizeSetupWiki: mocks.wiki }));
 vi.mock("../../config.js", async original => ({ ...await original(), findConfig: () => ({ wiki: {} }) }));
 import { finalizeCodeRepoSetup } from "../index.js";
 import { buildSetupRepairPrompt } from "../finalize-repair.js";
-import { dropSetupReferences } from "../drop-references.js";
+import { dropReferenceText, dropSetupReferences, preserveKey } from "../drop-references.js";
 const bad = { captured: 0, skipped: 1, failures: [{ file: ".mex/test.md", entity: null, node: "function:wrong", reason: "Unavailable node", kind: "new" as const }] };
 beforeEach(() => { vi.resetAllMocks(); mocks.wiki.mockResolvedValue({ ready: true, indexedEntities: 1 }); });
 it("gives the supplied population adapter one exact repair turn", async () => {
@@ -36,7 +36,6 @@ it("cancels during repair without another finalization", async () => {
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { dropReferenceText } from "../drop-references.js";
 it.each([true, false])("drops remaining exact failures (repair available=%s)", async available => {
   const root = mkdtempSync(join(tmpdir(), "repair-fallback-"));
   const mex = join(root, ".mex"); mkdirSync(mex);
@@ -170,4 +169,12 @@ it("keeps the Wiki failure and its remediation after references were dropped", a
     await expect(finalizeCodeRepoSetup(root, mex, { onMessage: () => {} })).rejects.toThrow("Malformed entity");
     expect(readFileSync(join(mex, "test.md"), "utf8")).toBe('label\n');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+it("removes a node from the entity where it is new and keeps it where it is recorded", () => {
+  const block = (id: string, extra: string) => `<!-- mex:entity\nid: ${id}\ngrounds_to:\n  - node: function:same\n    fingerprint: x\n${extra}-->\n## ${id}\n\nbody\n\n`;
+  const text = block("mx_A", "    bodyHash: old\n") + block("mx_B", "");
+  const out = dropReferenceText(text, new Set(["function:same"]), new Set([preserveKey("mx_A", "function:same")]));
+  expect(out).toContain("bodyHash: old");
+  expect(out.split("function:same").length - 1).toBe(1);
+  expect(out).toContain("grounds_to:\n  []");
 });

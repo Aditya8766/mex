@@ -72,8 +72,9 @@ export async function finalizeWithRepair(
     const failures = failure.groundingFailures?.filter(entry => entry.kind === "new");
     if (!failures?.length) throw failure;
     throwIfSetupAborted(options.signal);
-    dropSetupReferences(projectRoot, mexDir, failures);
+    const notices = dropSetupReferences(projectRoot, mexDir, failure.groundingFailures!);
     dropped.push(...failures);
+    for (const notice of notices) (options.onMessage ?? console.warn)(notice);
     for (const entry of failures) {
       (options.onMessage ?? console.warn)(`Warning: Dropped unverifiable reference: ${entry.file} → ${entry.node}`);
     }

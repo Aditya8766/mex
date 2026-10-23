@@ -1,4 +1,4 @@
-import { committedReferenceLookup, groundingFailureEntities, type GroundingFailureKind } from "./grounding-failures.js";
+import { committedReferenceLookup, entityBlockGroundings, groundingFailureEntities, type GroundingFailureKind } from "./grounding-failures.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -762,7 +762,10 @@ export function refreshGroundingBaselines(
     const content = readBoundedText(filePath, readLimit);
     const groundings = extractGroundings(content);
     const anchors = findMexAnchors(content);
-    if (groundings.length === 0 && anchors.length === 0) continue;
+    // Block entities keep their groundings in their own metadata; they are
+    // verified, never captured or rewritten here (the Wiki owns their baselines).
+    const blockGroundings = accepted === undefined ? entityBlockGroundings(content) : [];
+    if (groundings.length === 0 && anchors.length === 0 && blockGroundings.length === 0) continue;
     const entityFor = groundingFailureEntities(content);
     const committed = committedReferenceLookup(config.projectRoot, filePath);
     const contentHash = hashText(content);
@@ -853,6 +856,29 @@ export function refreshGroundingBaselines(
           dirty = true;
         }
       }
+    }
+    for (const { entity, grounding: block } of blockGroundings) {
+      const node = runtime.graph.getNode(block.node);
+      const fingerprint = runtime.reconciler.getFingerprint(block.node);
+      const baseline = runtime.fingerprints.getBaseline({ kind: "entity", id: entity }, block.node);
+      let reason: string | null = null;
+      if (!fingerprint || node?.id !== block.node || !node.bodyHash) reason = "Node is unavailable or has no verifiable body.";
+      else {
+        const baselineHash = block.bodyHash ?? baseline?.bodyHash;
+        if (!sameFingerprint(block.fingerprint, serializeFingerprint(fingerprint))
+          || (baselineHash !== undefined && baselineHash !== node.bodyHash)) {
+          reason = "Fingerprint or body baseline differs from the current graph; explicit review is required.";
+        }
+      }
+      if (reason === null) continue;
+      if (failures.some((f) => f.file === scaffoldFile && f.node === block.node && f.entity === entity)) continue;
+      skipped += 1;
+      const kind: GroundingFailureKind = block.bodyHash !== undefined || block.codeHash !== undefined
+        || baseline !== null || committed(block.node) !== false ? "drift" : "new";
+      failed(scaffoldFile, block.node, reason, entity, contentHash, kind);
+      options.warn?.(kind === "drift"
+        ? `Preserved changed grounding ${block.node} of entity ${entity} in ${scaffoldFile}; explicit review is required.`
+        : `Skipped unverifiable grounding ${block.node} of entity ${entity} in ${scaffoldFile}.`);
     }
     if (readBoundedText(filePath, readLimit) !== content) {
       skipped += pendingBaselines.length;

@@ -45,7 +45,7 @@ function runtimeWith(existing: string[], cached: Record<string, boolean> = {}): 
   return {
     graph: { getNode: (id: string) => existing.includes(id) ? { id, bodyHash: "now" } : null },
     reconciler: { getFingerprint: (id: string) => existing.includes(id) ? createFingerprint(["current", "body", "tokens", "here", "now"]) : null },
-    fingerprints: { getGroundedSource: (_file: string, id: string) => cached[id] ? { bodyHash: "old", fingerprint: fp("old"), source: "", nodeId: id } : null },
+    fingerprints: { getBaseline: (_subject: unknown, id: string) => cached[id] ? { bodyHash: "old" } : null, getGroundedSource: (_file: string, id: string) => cached[id] ? { bodyHash: "old", fingerprint: fp("old"), source: "", nodeId: id } : null },
   } as unknown as GroundingRuntime;
 }
 const capture = (f: Fixture, runtime: GroundingRuntime) =>
@@ -130,4 +130,47 @@ it("keeps drift and new failures under separate bounds", () => {
     expect(result.failures!.filter(failure => failure.kind === "drift")).toHaveLength(1024);
     expect(result.failures!.filter(failure => failure.kind === "new").map(failure => failure.node)).toEqual(["only-new"]);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+// Block-level Wiki entities keep groundings in their own metadata comment.
+const N = Object.fromEntries(["ghost_new", "ghost_recorded", "ghost_cached", "was_there", "added_now"]
+  .map((name, i) => [name, `function:${String(i + 1).repeat(32)}`])) as Record<string, string>;
+const block = (id: string, node: string, extra = "") => `<!-- mex:entity
+id: ${id}
+type: fact
+status: promoted
+revision: 1
+provenance:
+  createdBy:
+    kind: agent
+    id: hand
+  createdAt: 2026-10-23T08:31:11.456Z
+grounds_to:
+  - node: ${node}
+    fingerprint: ${fp("a")}
+${extra}-->
+## Title ${id}
+
+Prose of ${id}.
+`;
+it("verifies block-entity groundings: recorded ones are drift, hand-written unknown ones are new", () => {
+  const f = fixture("# Doc\n\n" + [
+    block("mx_01AAAAAAAAAAAAAAAAAAAAAAAA", N.ghost_new!),
+    block("mx_01BBBBBBBBBBBBBBBBBBBBBBBB", N.ghost_recorded!, "    bodyHash: old\n"),
+    block("mx_01CCCCCCCCCCCCCCCCCCCCCCCC", N.ghost_cached!),
+  ].join("\n"));
+  try {
+    const result = capture(f, runtimeWith([], { [N.ghost_cached!]: true }));
+    expect(kinds(result)).toEqual({ [N.ghost_new!]: "new", [N.ghost_recorded!]: "drift", [N.ghost_cached!]: "drift" });
+    expect(result.failures!.map(entry => entry.entity).sort()).toEqual(["mx_01AAAAAAAAAAAAAAAAAAAAAAAA", "mx_01BBBBBBBBBBBBBBBBBBBBBBBB", "mx_01CCCCCCCCCCCCCCCCCCCCCCCC"]);
+    expect(result.driftCount).toBe(2);
+    expect(result.skipped).toBe(3);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+it("treats a block grounding already in the committed file as drift", () => {
+  const text = "# Doc\n\n" + block("mx_01AAAAAAAAAAAAAAAAAAAAAAAA", N.was_there!);
+  const f = fixture(text + "\n" + block("mx_01BBBBBBBBBBBBBBBBBBBBBBBB", N.added_now!), { committed: text });
+  try { expect(kinds(capture(f, runtimeWith([])))).toEqual({ [N.was_there!]: "drift", [N.added_now!]: "new" }); }
+  finally { rmSync(f.root, { recursive: true, force: true }); }
 });

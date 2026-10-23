@@ -3,6 +3,22 @@ import { relative, resolve } from "node:path";
 import YAML from "yaml";
 import { extractGroundings, findMexAnchors } from "../markdown.js";
 import { parseDocument } from "../wiki/markdown/parse.js";
+import { parseWikiMarkdown } from "../wiki/markdown/codec.js";
+import type { WikiGrounding } from "../wiki/model/grounding.js";
+
+/**
+ * Groundings held by block-level Wiki entities (`<!-- mex:entity ... -->`),
+ * read with the Wiki's own parser. File-level entities keep theirs in the
+ * frontmatter, which {@link extractGroundings} already covers. A block the
+ * Wiki cannot parse yields nothing here: validation owns malformed blocks.
+ */
+export function entityBlockGroundings(content: string): { entity: string; grounding: WikiGrounding }[] {
+  try {
+    const parsed = parseWikiMarkdown({ path: "entity.md", text: content });
+    return parsed.entities.filter((entry) => entry.metadataKind === "comment")
+      .flatMap((entry) => entry.entity.groundsTo.map((grounding) => ({ entity: String(entry.entity.id), grounding })));
+  } catch { return []; }
+}
 
 /**
  * Why a reference could not be verified.
@@ -49,6 +65,7 @@ export function committedReferenceLookup(projectRoot: string, absoluteFile: stri
       try {
         for (const grounding of extractGroundings(shown.stdout)) found.add(grounding.node);
         for (const anchor of findMexAnchors(shown.stdout)) found.add(anchor.nodeId);
+        for (const { grounding } of entityBlockGroundings(shown.stdout)) found.add(grounding.node);
       } catch { return "unknown"; }
       return found;
     }
