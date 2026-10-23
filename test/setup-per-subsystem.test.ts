@@ -174,6 +174,27 @@ describe("per-subsystem setup on a real graph", () => {
     expect(existsSync(join(root, SETUP_PLAN_STATE_FILE))).toBe(false);
   }, 240_000);
 
+  it("runs per-subsystem sessions on a small repository when the only agent has file tools, and says which agent runs", async () => {
+    const root = repository();
+    const agent = simulatedAgent(root);
+    const tools: Array<string | undefined> = [];
+    const launch = async (input: HeadlessPopulationOptions) => {
+      tools.push(input.tool);
+      return { ...(await agent.launch(input)), tool: "copilot" as const };
+    };
+    const messages: string[] = [];
+    const result = await runHeadlessSetup({
+      projectRoot: root, tools: ["windsurf"],
+      perSubsystem: { env: {}, launch, findAgent: async (_selected, requireCommands) => requireCommands ? null : { tool: "copilot", selected: false } },
+      populate: async () => { throw new Error("the single session needs mex commands; a file-only agent must never get it"); },
+      onMessage: (message) => messages.push(message),
+    });
+    expect(result).toMatchObject({ stage: "ready", ready: true, populationTool: "copilot" });
+    expect(new Set(tools)).toEqual(new Set(["copilot"]));
+    expect(agent.prompts.filter((prompt) => prompt.startsWith("You are writing the MEX knowledge"))).toHaveLength(3);
+    expect(messages).toContain("Windsurf has no CLI MEX can run in the background here, so MEX runs Copilot (`copilot`) for the setup sessions. To choose another agent, rerun `mex setup` and select it.");
+  }, 240_000);
+
   it("reuses the stored plan on a rerun, and replaces a corrupt one with a notice", async () => {
     const root = repository();
     const first = simulatedAgent(root);

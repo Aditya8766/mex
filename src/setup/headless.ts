@@ -14,14 +14,17 @@ import { SetupError, classifySetupFileSystemError } from "./errors.js";
 import { classifySetupAgentAssetsError } from "./agent-errors.js";
 import type { GraphMaintenanceProgress } from "../team/contracts/graph.js";
 import { describeGroundingDrift } from "../graph/grounding-failures.js";
+import { BACKGROUND_AGENT_CLIS, COMMAND_CAPABLE_AGENTS, isBackgroundAgentTool, type BackgroundAgentTool } from "../agent-command.js";
 import {
+  describeSetupAgentChoice,
   findAvailableSetupAgent,
   launchHeadlessSetupPopulation,
   type HeadlessPopulationActivity,
+  type HeadlessPopulationLaunchResult,
   type HeadlessPopulationOptions,
   type HeadlessPopulationTranscript,
+  type SetupAgentChoice,
 } from "./headless-population.js";
-import type { SetupPopulationLaunchResult } from "./population.js";
 import type { SetupBatchApplier } from "./subsystem-apply.js";
 import { createPlanState, hasUnfinishedPlanState, loadPlanState, type SetupPlanState } from "./subsystem-state.js";
 import {
@@ -112,7 +115,7 @@ export interface HeadlessSetupOptions {
     prompt: string;
     projectRoot: string;
     signal?: AbortSignal;
-  }) => Promise<{ tool: "claude" | "codex" | null; completed: boolean }>;
+  }) => Promise<HeadlessPopulationLaunchResult>;
   readonly onMessage?: (message: string) => void;
   /** Live maintenance updates, separate from the ordered setup phase transitions. */
   readonly onGraphProgress?: (progress: GraphMaintenanceProgress) => void;
@@ -125,7 +128,9 @@ export interface HeadlessSetupOptions {
   readonly perSubsystem?: {
     readonly parallelRuns?: number;
     readonly env?: NodeJS.ProcessEnv;
-    readonly launch?: (input: HeadlessPopulationOptions) => Promise<SetupPopulationLaunchResult>;
+    readonly launch?: (input: HeadlessPopulationOptions) => Promise<HeadlessPopulationLaunchResult>;
+    /** Test seam: the agent MEX finds on PATH for background sessions. */
+    readonly findAgent?: (selectedTools: readonly AiTool[], requireCommands: boolean) => Promise<SetupAgentChoice | null>;
     readonly applier?: SetupBatchApplier;
     readonly freeMemory?: () => number;
     readonly trackSource?: boolean;
@@ -145,7 +150,7 @@ export interface HeadlessSetupResult {
   readonly ready: boolean;
   readonly selectedTools: AiTool[];
   readonly prompt: string | null;
-  readonly populationTool: "claude" | "codex" | null;
+  readonly populationTool: BackgroundAgentTool | null;
   readonly populationCompleted: boolean;
   readonly commitCommands: string[];
   readonly anchorNotes: string[];
@@ -200,7 +205,7 @@ export function inspectSetupStatus(projectRoot: string): SetupStatus {
       id,
       name: AI_TOOLS[id].name,
       selected: configuredTools.includes(id),
-      cliAvailable: AI_TOOLS[id].cli !== null && isCliAvailable(AI_TOOLS[id].cli),
+      cliAvailable: isBackgroundAgentTool(id) && isCliAvailable(BACKGROUND_AGENT_CLIS[id]),
     })),
     ready: stage === "ready",
   };
@@ -311,17 +316,41 @@ export async function runHeadlessSetup(
     });
   }
 
+  // The agent background sessions run: the user's first selected agent whose
+  // CLI is installed, else any installed one (announced in one line).
+  const findAgent = options.perSubsystem?.findAgent
+    ?? ((tools: readonly AiTool[], requireCommands: boolean) => findAvailableSetupAgent(tools, { projectRoot, signal: options.signal, requireCommands }));
+  const announced = new Set<string>();
+  const announce = (choice: SetupAgentChoice | null) => {
+    const notice = choice === null ? null : describeSetupAgentChoice(choice, selectedTools);
+    if (notice !== null && !announced.has(notice)) {
+      announced.add(notice);
+      options.onMessage?.(notice);
+    }
+  };
+
   // Larger code repositories populate with one session per subsystem from a
   // stored plan; a rerun continues an unfinished plan even over filled files.
+  // An agent limited to file tools always takes this path: the single session
+  // applies its own batches with `mex` commands, which it cannot run.
   let perSubsystemState: SetupPlanState | null = null;
+  let perSubsystemTool: BackgroundAgentTool | undefined;
   let plan: SubsystemPlan | null | undefined;
   if (mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
     const env = options.perSubsystem?.env ?? process.env;
     const resuming = perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
     if (!scaffoldPopulatedAtStart || resuming) {
       if (!resuming) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
-      if (shouldRunPerSubsystem({ plan: plan ?? null, resuming, env })
-        && (options.perSubsystem?.launch !== undefined || await findAvailableSetupAgent(selectedTools, options.signal) !== null)) {
+      const injected = options.perSubsystem?.launch !== undefined;
+      const choice = injected && options.perSubsystem?.findAgent === undefined ? null : await findAgent(selectedTools, false);
+      const fileOnly = choice !== null && !COMMAND_CAPABLE_AGENTS.has(choice.tool);
+      const planned = (plan ?? null) !== null && (plan?.candidates.length ?? 0) > 0;
+      if ((shouldRunPerSubsystem({ plan: plan ?? null, resuming, env }) || (fileOnly && planned && perSubsystemSwitch(env) !== "off"))
+        && (injected || choice !== null)) {
+        if (choice !== null) {
+          perSubsystemTool = choice.tool;
+          announce(choice);
+        }
         const loaded = loadPlanState(projectRoot);
         if (loaded.notice) options.onMessage?.(`Warning: ${loaded.notice}`);
         // An unreadable stored plan is replaced by a fresh one; replay recognizes batches already applied.
@@ -336,7 +365,7 @@ export async function runHeadlessSetup(
   report("population");
 
   let populationFinished = scaffoldPopulatedAtStart;
-  let populationTool: "claude" | "codex" | null = null;
+  let populationTool: BackgroundAgentTool | null = null;
   let populationCompleted = false;
   let coverageNotice: string | undefined;
 
@@ -346,6 +375,7 @@ export async function runHeadlessSetup(
       projectRoot,
       state: perSubsystemState,
       selectedTools,
+      ...(perSubsystemTool === undefined ? {} : { tool: perSubsystemTool }),
       scannerBrief,
       signal: options.signal,
       ...(options.perSubsystem?.parallelRuns === undefined ? {} : { parallelRuns: options.perSubsystem.parallelRuns }),
@@ -369,8 +399,17 @@ export async function runHeadlessSetup(
     populationFinished = isScaffoldPopulated(mexDir);
   } else if (!populationFinished && options.confirmPopulation !== true) {
     throwIfSetupAborted(options.signal);
+    // The single session applies its own batches with `mex` commands: Claude Code or Codex only.
+    let tool: BackgroundAgentTool | undefined;
+    if (options.populate === undefined) {
+      const choice = await findAgent(selectedTools, true);
+      announce(choice);
+      tool = choice?.tool;
+    }
     const launched = await (options.populate ?? launchHeadlessSetupPopulation)({
       selectedTools,
+      ...(tool === undefined ? {} : { tool }),
+      requireCommands: true,
       prompt,
       projectRoot,
       signal: options.signal,

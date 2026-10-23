@@ -22,6 +22,7 @@ import { freemem } from "node:os";
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { AiTool } from "../types.js";
+import type { BackgroundAgentTool } from "../agent-command.js";
 import { isScaffoldPopulated } from "./index.js";
 import {
   HeadlessPopulationError,
@@ -30,7 +31,8 @@ import {
   type HeadlessPopulationOptions,
   type HeadlessPopulationTranscript,
 } from "./headless-population.js";
-import { SetupPopulationError, type SetupPopulationLaunchResult } from "./population.js";
+import { SetupPopulationError } from "./population.js";
+import type { HeadlessPopulationLaunchResult } from "./headless-population.js";
 import type { PopulationAgentUsage } from "./population-activity.js";
 import {
   buildBatchFixPrompt,
@@ -118,6 +120,8 @@ export interface SubsystemPopulationOptions {
   /** The stored or new plan state; updated and saved as work happens. */
   readonly state: SetupPlanState;
   readonly selectedTools: readonly AiTool[];
+  /** The agent every session of this phase runs (MEX chose it once); otherwise each launch chooses. */
+  readonly tool?: BackgroundAgentTool;
   readonly scannerBrief: string | null;
   readonly signal?: AbortSignal;
   readonly parallelRuns?: number;
@@ -126,7 +130,7 @@ export interface SubsystemPopulationOptions {
   readonly onActivity?: (activity: HeadlessPopulationActivity) => void;
   readonly onTranscript?: (entry: HeadlessPopulationTranscript) => void;
   /** Test seams; production uses the headless agent launcher, `os.freemem` and the in-process applier. */
-  readonly launch?: (input: HeadlessPopulationOptions) => Promise<SetupPopulationLaunchResult>;
+  readonly launch?: (input: HeadlessPopulationOptions) => Promise<HeadlessPopulationLaunchResult>;
   readonly applier?: SetupBatchApplier;
   readonly freeMemory?: () => number;
   readonly now?: () => number;
@@ -135,7 +139,7 @@ export interface SubsystemPopulationOptions {
 }
 
 export interface SubsystemPopulationOutcome {
-  readonly tool: "claude" | "codex" | null;
+  readonly tool: BackgroundAgentTool | null;
   /** The shared files are filled (no required placeholder remains). */
   readonly sharedDone: boolean;
   readonly covered: number;
@@ -154,7 +158,7 @@ export class SubsystemPhaseStoppedError extends SetupPopulationError {
   }
 }
 
-/** The agent launcher found no selected Claude Code or Codex CLI. */
+/** The agent launcher found no agent CLI it can run in the background. */
 class MissingAgentError extends Error {}
 
 const STOPPING_CATEGORIES: ReadonlySet<string> = new Set(["cancelled", "authentication", "usage_limit", "launch", "arguments", "prompt"]);
@@ -235,7 +239,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   options.signal?.addEventListener("abort", onAbort, { once: true });
   if (options.signal?.aborted) phase.abort();
   const applier = options.applier ?? createSetupBatchApplier(projectRoot);
-  let lastTool: "claude" | "codex" | null = null;
+  let lastTool: BackgroundAgentTool | null = null;
   let stopError: unknown = null;
   let consecutiveFailures = 0;
   let coveragePhase: SetupCoverageProgress["phase"] = "shared";
@@ -362,7 +366,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     const started = now();
     startedAt.set(unit, started);
     let usage: PopulationAgentUsage | undefined;
-    let tool: "claude" | "codex" | null = null;
+    let tool: BackgroundAgentTool | null = null;
     const record = (outcome: UnitRunRecord["outcome"], failure?: string) => {
       unit.progress.runs.push({
         kind, startedAt: new Date(started).toISOString(), durationMs: Math.max(0, now() - started), outcome, tool,
@@ -373,6 +377,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       const tag = unit.transcriptTag;
       const result = await launch({
         selectedTools: options.selectedTools,
+        ...(options.tool === undefined ? {} : { tool: options.tool }),
         prompt,
         projectRoot,
         signal: phase.signal,
@@ -600,7 +605,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     // The user's cancel: every session was stopped and the progress is saved.
     if (options.signal?.aborted) throw new HeadlessPopulationError("cancelled");
     const base = stopError instanceof MissingAgentError
-      ? "No selected Claude Code or Codex CLI is available, so MEX could not start the subsystem sessions. Install or sign in to one."
+      ? "No supported agent CLI is available, so MEX could not start the subsystem sessions. Install or sign in to one, or run `mex setup next` in your agent's chat."
       : stopError instanceof Error ? stopError.message : String(stopError);
     throw new SubsystemPhaseStoppedError(
       `${base} Population stopped with ${covered} of ${total} subsystems done; rerun \`mex setup\` to continue where it stopped (done subsystems are kept).`,

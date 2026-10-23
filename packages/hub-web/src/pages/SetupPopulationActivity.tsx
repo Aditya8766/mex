@@ -25,11 +25,19 @@ const TARGET_LABELS: Record<NonNullable<PopulationEvent["target"]>, string> = {
   patterns: "project patterns",
 };
 
+const PROVIDER_NAMES: Record<NonNullable<SetupRun["populationTool"]>, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+  copilot: "Copilot",
+  opencode: "OpenCode",
+};
+
 /** Activity timestamps remain independent of the read-only session transcript. */
 export function SetupPopulationActivity({ run, children }: { run: SetupRun; children?: ReactNode }) {
   const activity = run.populationActivity;
   const tool = activity?.tool ?? run.populationTool;
-  const provider = tool === "claude" ? "Claude Code" : tool === "codex" ? "Codex" : "Your agent";
+  const provider = tool ? PROVIDER_NAMES[tool] : "Your agent";
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);

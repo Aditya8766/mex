@@ -1,4 +1,4 @@
-import type { SetupAgentTool } from "./population.js";
+import type { BackgroundAgentTool } from "../agent-command.js";
 
 export type PopulationActivityKind =
   | "starting" | "started" | "reading" | "searching" | "writing"
@@ -38,6 +38,9 @@ interface PopulationActivityDecoder {
   /** The agent's own final error said its usage limit was reached. */
   readonly usageLimited: boolean;
 }
+
+/** Agents whose JSON event format is not documented: only record counts are used. */
+const GENERIC_EVENT_TOOLS: ReadonlySet<BackgroundAgentTool> = new Set(["copilot", "opencode"]);
 
 /** Final provider error text that means the account's usage limit, not a fault of the work. */
 export const USAGE_LIMIT_PATTERN = /usage limit|hit your (?:usage )?limit|limit (?:reached|exceeded)|credit balance is too low|rate_limit_error|quota (?:exceeded|reached)|exceeded your (?:current )?quota/iu;
@@ -79,9 +82,16 @@ function errorTextOf(event: Record<string, unknown>): string {
  * https://github.com/openai/codex/blob/main/sdk/typescript/src/items.ts
  * https://github.com/openai/codex/blob/main/sdk/typescript/src/events.ts
  * https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs
+ * https://cursor.com/docs/cli/reference/output-format
+ *
+ * GitHub Copilot CLI (`--output-format=json`) and OpenCode (`run --format json`)
+ * document only that they print one JSON event per line, not the events
+ * themselves. For them every well-formed record counts as activity, and the
+ * session completed when the CLI exits with status 0 after printing at least
+ * one record; nothing else is read from their records.
  */
 export function createPopulationActivityDecoder(
-  tool: SetupAgentTool,
+  tool: BackgroundAgentTool,
   onSignal: (signal: PopulationActivitySignal) => void,
 ): PopulationActivityDecoder {
   const line = Buffer.alloc(MAX_LINE_BYTES);
@@ -220,6 +230,50 @@ export function createPopulationActivityDecoder(
     }
   };
 
+  const cursorTool = (event: Record<string, unknown>) => {
+    const call = record(event.tool_call);
+    if (!call) return;
+    const id = boundedId(event.call_id);
+    if (event.subtype === "started") {
+      const read = record(call.readToolCall);
+      const write = record(call.writeToolCall);
+      const kind: PopulationActivityKind = read ? "reading" : write ? "writing" : "working";
+      const target = targetForPath(record((read ?? write)?.args)?.path);
+      const signal: PopulationActivitySignal = { kind, state: "running", ...(target ? { target } : {}) };
+      if (id) remember(id, signal);
+      onSignal(signal);
+    } else if (event.subtype === "completed") {
+      const started = id ? tools.get(id) : undefined;
+      if (!id || !started) return;
+      tools.delete(id);
+      const result = record(record(call.readToolCall ?? call.writeToolCall ?? call.function)?.result);
+      onSignal({ ...started, state: result && !("success" in result) ? "failed" : "completed" });
+    }
+  };
+
+  const cursorRecord = (event: Record<string, unknown>) => {
+    if (event.type === "system" && event.subtype === "init") {
+      completed = false;
+      onSignal({ kind: "started", state: "running" });
+    } else if (event.type === "assistant") {
+      onSignal({ kind: "working", state: "running" });
+    } else if (event.type === "tool_call") {
+      cursorTool(event);
+    } else if (event.type === "result") {
+      // The documented terminal record is success only; a failure exits non-zero without one.
+      if (event.subtype === "success" && event.is_error !== true && !failed) {
+        completed = true;
+        onSignal({ kind: "completed", state: "completed" });
+      } else fail();
+    }
+  };
+
+  let records = 0;
+  const genericRecord = () => {
+    records += 1;
+    onSignal(records === 1 ? { kind: "started", state: "running" } : { kind: "working", state: "running" });
+  };
+
   const consumeLine = () => {
     let event: Record<string, unknown> | undefined;
     if (!oversized && length > 0) {
@@ -231,13 +285,16 @@ export function createPopulationActivityDecoder(
     oversized = false;
     if (event) {
       if (tool === "claude") claudeRecord(event);
-      else codexRecord(event);
+      else if (tool === "codex") codexRecord(event);
+      else if (tool === "cursor") cursorRecord(event);
+      else genericRecord();
     }
   };
 
   return {
     get failed() { return failed; },
-    get completed() { return completed && !failed; },
+    // Undocumented event formats: the exit status decides, after at least one record.
+    get completed() { return GENERIC_EVENT_TOOLS.has(tool) ? records > 0 && !failed : completed && !failed; },
     get usage() { return usage; },
     get usageLimited() { return usageLimited; },
     write(chunk) {

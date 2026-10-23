@@ -298,7 +298,7 @@ describe("one session per subsystem", () => {
     state.shared.state = "done";
     const error = await run(root, state, harness(root, { a: ["tool-missing"], b: ["tool-missing"] })).promise.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(SubsystemPhaseStoppedError);
-    expect((error as Error).message).toContain("No selected Claude Code or Codex CLI is available");
+    expect((error as Error).message).toContain("No supported agent CLI is available");
     expect(loadPlanState(root).state!.subsystems.map((unit) => unit.state)).toEqual(["pending", "pending"]);
   });
 

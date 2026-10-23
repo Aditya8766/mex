@@ -150,6 +150,9 @@ export const SetupProgressSchema = z.object({
 
 export const SETUP_ACTIVITY_LIMIT = 40;
 
+/** The agents MEX can run as background setup sessions (Windsurf has no such CLI). */
+export const SETUP_BACKGROUND_AGENTS = ["claude", "codex", "cursor", "copilot", "opencode"] as const;
+
 export const SetupPopulationEventSchema = z.object({
   id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   at: isoTimestamp,
@@ -160,7 +163,7 @@ export const SetupPopulationEventSchema = z.object({
 
 /** Process-local action summaries only; no CLI text, paths, inputs, or output. */
 export const SetupPopulationActivitySchema = z.object({
-  tool: z.enum(["claude", "codex"]),
+  tool: z.enum(SETUP_BACKGROUND_AGENTS),
   startedAt: isoTimestamp,
   lastActivityAt: isoTimestamp.nullable(),
   events: z.array(SetupPopulationEventSchema).max(SETUP_ACTIVITY_LIMIT),
@@ -216,7 +219,7 @@ export const SetupRunSchema = z.object({
   ready: z.boolean(),
   selectedTools: z.array(aiTool).max(8),
   prompt: z.string().max(HUB_LIMITS.maxJsonResponseBytes / 2).nullable(),
-  populationTool: z.enum(["claude", "codex"]).nullable(),
+  populationTool: z.enum(SETUP_BACKGROUND_AGENTS).nullable(),
   populationCompleted: z.boolean(),
   populationActivity: SetupPopulationActivitySchema.optional(),
   populationCoverage: SetupPopulationCoverageSchema.optional(),

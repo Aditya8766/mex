@@ -64,7 +64,8 @@ describe("headless population process", () => {
     expect(buildAgentCommand("codex", "prompt", "interactive")).toEqual({ command: "codex", args: ["prompt"] });
     expect(buildAgentCommand("claude", "prompt", "interactive")).toEqual({ command: "claude", args: ["prompt"] });
     expect(buildAgentCommand("opencode", "prompt", "interactive")).toEqual({ command: "opencode", args: ["run", "prompt"] });
-    expect(buildAgentCommand("cursor", "prompt", "headless")).toBeNull();
+    expect(buildAgentCommand("windsurf", "prompt", "headless")).toBeNull();
+    expect(buildAgentCommand("cursor", "prompt", "interactive")).toBeNull();
     expect(buildAgentCommand("codex", "prompt", "headless", { allowNonGit: true })?.args)
       .toEqual(["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "prompt"]);
   });
@@ -284,7 +285,8 @@ describe("headless population process", () => {
       selectedTools: ["cursor", "claude", "codex", "opencode"],
       __internal: { ...fixture.options.__internal, isAvailable: available },
     })).resolves.toEqual({ tool: "codex", completed: true });
-    expect(available.mock.calls).toEqual([["claude"], ["codex"]]);
+    // Cursor's documented command is `agent`; every selected background agent is tried in order.
+    expect(available.mock.calls).toEqual([["agent"], ["claude"], ["codex"]]);
     expect(fixture.spawn).toHaveBeenCalledTimes(1);
   });
 

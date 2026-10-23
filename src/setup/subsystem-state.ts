@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { PopulationAgentUsage } from "./population-activity.js";
+import { isBackgroundAgentTool, type BackgroundAgentTool } from "../agent-command.js";
 import type { SubsystemPlan, PlannedSubsystem } from "./subsystems.js";
 import { SETUP_OPS_DIRECTORY } from "./prompts.js";
 
@@ -36,7 +37,7 @@ export interface UnitRunRecord {
   readonly startedAt: string;
   readonly durationMs: number;
   readonly outcome: "completed" | "failed" | "stopped" | "applied" | "refused";
-  readonly tool?: "claude" | "codex" | null;
+  readonly tool?: BackgroundAgentTool | null;
   /** A HeadlessPopulationError category, or a short MEX reason. */
   readonly failure?: string;
   readonly usage?: PopulationAgentUsage;
@@ -181,7 +182,7 @@ function readRuns(value: unknown): UnitRunRecord[] | null {
       startedAt: run.startedAt.slice(0, 40),
       durationMs: run.durationMs,
       outcome: run.outcome as UnitRunRecord["outcome"],
-      ...(run.tool === "claude" || run.tool === "codex" || run.tool === null ? { tool: run.tool } : {}),
+      ...((typeof run.tool === "string" && isBackgroundAgentTool(run.tool)) || run.tool === null ? { tool: run.tool as BackgroundAgentTool | null } : {}),
       ...(typeof run.failure === "string" ? { failure: run.failure.slice(0, MAX_REASON_CHARS) } : {}),
       ...(usage && Object.keys(usage).length > 0 ? { usage: usage as PopulationAgentUsage } : {}),
     });

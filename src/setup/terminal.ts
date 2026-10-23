@@ -2,6 +2,7 @@ import { basename, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { AI_TOOLS, type AiTool } from "../types.js";
+import { BACKGROUND_AGENT_CLIS, isBackgroundAgentTool } from "../agent-command.js";
 import { loadConfiguredAiTools } from "../config.js";
 import { isCliAvailable } from "../cli-tools.js";
 import {
@@ -82,7 +83,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
       initialTool: selectedTools[0] ?? (options.tools?.length === 0 ? "continue" : undefined),
       tools: (Object.keys(AI_TOOLS) as AiTool[]).map(id => ({
         id, name: AI_TOOLS[id].name, selected: selectedTools.includes(id),
-        cliAvailable: AI_TOOLS[id].cli !== null && isCliAvailable(AI_TOOLS[id].cli!),
+        cliAvailable: isBackgroundAgentTool(id) && isCliAvailable(BACKGROUND_AGENT_CLIS[id]),
       })),
     };
     let pending: ((action: TerminalSetupAction) => void) | undefined;

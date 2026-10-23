@@ -5,13 +5,13 @@ import type { GroundingDriftSummary } from "../graph/grounding-failures.js";
 import type { WikiDiagnostic } from "../wiki/service.js";
 import { SetupFinalizationError } from "./index.js";
 import { throwIfSetupAborted } from "./phases.js";
-import { HeadlessPopulationError, launchHeadlessSetupPopulation, type HeadlessPopulationOptions } from "./headless-population.js";
+import { HeadlessPopulationError, launchHeadlessSetupPopulation, type HeadlessPopulationLaunchResult, type HeadlessPopulationOptions } from "./headless-population.js";
 
 export interface SetupFinalizeOptions {
   signal?: AbortSignal;
   onMessage?: (message: string) => void;
   selectedTools?: readonly AiTool[];
-  populate?: (input: HeadlessPopulationOptions) => Promise<{ tool: "claude" | "codex" | null; completed: boolean }>;
+  populate?: (input: HeadlessPopulationOptions) => Promise<HeadlessPopulationLaunchResult>;
   onActivity?: HeadlessPopulationOptions["onActivity"];
   onTranscript?: HeadlessPopulationOptions["onTranscript"];
 }
@@ -58,7 +58,8 @@ export async function finalizeWithRepair(
   if (hasRepairWork && options.selectedTools?.some(tool => tool === "claude" || tool === "codex")) {
     throwIfSetupAborted(options.signal);
     try { await (options.populate ?? launchHeadlessSetupPopulation)({
-      projectRoot, selectedTools: options.selectedTools,
+      // The repair turn runs `mex` commands, so only Claude Code or Codex may take it.
+      projectRoot, selectedTools: options.selectedTools, requireCommands: true,
       prompt: buildSetupRepairPrompt(failure.groundingFailures ?? [], failure.wikiDiagnostics ?? []),
       signal: options.signal, onActivity: options.onActivity, onTranscript: options.onTranscript,
     }); } catch (error) {

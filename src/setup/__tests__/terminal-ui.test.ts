@@ -132,9 +132,9 @@ describe("terminal setup HUD", () => {
     const app = await show({ tools: initial.tools.map(tool => ({ ...tool, cliAvailable: tool.id === "opencode" })) });
     expect(app.lastFrame()).toContain("Claude Code  CLI not found");
     expect(app.lastFrame()).toContain("Codex  CLI not found");
-    expect(app.lastFrame()).toContain("Cursor  integration only");
-    expect(app.lastFrame()).toContain("OpenCode  integration only");
-    expect(app.lastFrame()).not.toContain("CLI ready");
+    expect(app.lastFrame()).toContain("Cursor  CLI not found");
+    expect(app.lastFrame()).toContain("OpenCode  CLI ready");
+    expect(app.lastFrame()).toContain("Windsurf  integration only");
     expectFits(app.lastFrame(), 80, 24);
   });
 
