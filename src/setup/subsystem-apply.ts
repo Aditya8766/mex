@@ -5,12 +5,13 @@
  * (same command function: parsing, the Inbox Spec boundary, one atomic batch,
  * replay per opId), with two differences that make it cheap:
  *
- * - one freshness proof for the whole population phase: the code graph is
- *   opened once through its fresh grounding snapshot and held until the phase
- *   ends, instead of re-walking the repository for every apply. Agents of this
- *   phase write only under `.mex/`, and finalize verifies every reference against
- *   a refreshed graph afterwards, so nothing here can make an unverified claim
- *   stick;
+ * - one full freshness proof for the population phase instead of a repository
+ *   walk per apply (see `setup-graph-freshness.ts`): later applies only re-check
+ *   that the proven graph database and HEAD are still in place. The database is
+ *   opened for each apply and closed right after, so nothing is held between
+ *   applies. Agents of this phase write only under `.mex/`, and finalize
+ *   verifies every reference against a refreshed graph afterwards, so nothing
+ *   here can make an unverified claim stick;
  * - applies are serialized: two batches never apply at once.
  *
  * Before applying, MEX checks the batch stays in its lane: create-entry
@@ -41,12 +42,9 @@ export interface BatchScope {
 
 export interface SetupBatchApplier {
   apply(batchFile: string, scope: BatchScope): Promise<BatchApplyOutcome>;
-  /** Release the held graph snapshot. `changed` is true when sources moved during the phase. */
+  /** End of the phase. `changed` is true when the graph or HEAD changed mid-phase and freshness was proved again. */
   close(): Promise<{ readonly changed: boolean }>;
 }
-
-/** A minimal structural view of the grounding snapshot the Wiki apply consumes. */
-type GroundingSnapshot = Parameters<Parameters<import("../wiki/cli/grounding.js").WikiCliGroundingBridge["withFreshGroundingSnapshot"]>[0]>[0];
 
 const MAX_PROBLEMS = 200;
 
@@ -101,59 +99,26 @@ function factCount(envelopes: readonly unknown[], statuses: readonly { index: nu
 }
 
 /**
- * Create the applier for one population phase. The graph snapshot is opened on
- * the first apply and held until `close`; if it cannot be opened, each apply
- * proves freshness itself (slower, never wrong).
+ * Create the applier for one population phase. The graph is proved fresh on
+ * the first apply that needs it and re-proved only when its identity changes;
+ * each apply opens and closes its own read of the database.
  */
-export function createSetupBatchApplier(projectRoot: string): SetupBatchApplier {
+export function createSetupBatchApplier(projectRoot: string, options: {
+  readonly freshness?: import("./setup-graph-freshness.js").SetupGraphFreshness;
+} = {}): SetupBatchApplier {
   const root = resolve(projectRoot);
   let queue: Promise<unknown> = Promise.resolve();
-  let pinned: {
-    readonly bridge: import("../wiki/cli/grounding.js").WikiCliGroundingBridge;
-    readonly release: () => void;
-    readonly settled: Promise<boolean>;
-  } | null | undefined;
+  let freshness = options.freshness;
+  let port: import("../graph/application-adapter.js").RepositoryGraphPort | undefined;
 
-  const open = async (): Promise<NonNullable<typeof pinned> | null> => {
-    if (pinned !== undefined) return pinned;
+  const graphPort = async () => {
+    if (port !== undefined) return port;
+    const { createSetupGraphFreshness } = await import("./setup-graph-freshness.js");
+    freshness ??= createSetupGraphFreshness(root);
     const { createRepositoryGraphPort } = await import("../graph/application-adapter.js");
-    const port = createRepositoryGraphPort(root);
-    let release!: () => void;
-    const released = new Promise<void>((done) => { release = done; });
-    let ready!: (snapshot: GroundingSnapshot) => void;
-    const opened = new Promise<GroundingSnapshot | null>((done) => { ready = done; });
-    let wasOpened = false;
-    const settled = port.withFreshGroundingSnapshot(async (snapshot) => {
-      wasOpened = true;
-      ready(snapshot as GroundingSnapshot);
-      await released;
-    }).then(() => false, () => {
-      if (!wasOpened) ready(null as unknown as GroundingSnapshot);
-      // The snapshot failed its final proof: sources or graph moved during the phase.
-      return wasOpened;
-    });
-    const snapshot = await opened;
-    if (snapshot === null) {
-      pinned = null;
-      return null;
-    }
-    pinned = {
-      release,
-      settled,
-      bridge: {
-        withFreshGroundingSnapshot: async (callback) => callback(snapshot),
-        withFreshGroundingPublication: async (prepare) => {
-          const prepared = await prepare(snapshot);
-          try { await prepared.preflight(); }
-          catch (error) {
-            try { await prepared.discard(); } catch { /* keep the preflight failure */ }
-            throw error;
-          }
-          return prepared.commit();
-        },
-      },
-    };
-    return pinned;
+    // The fresh-session loader is the port's own dependency seam; only how freshness is proved changes.
+    port = createRepositoryGraphPort(root, { __internal: { loadFresh: freshness.loadFresh } });
+    return port;
   };
 
   const applyNow = async (batchFile: string, scope: BatchScope): Promise<BatchApplyOutcome> => {
@@ -162,8 +127,7 @@ export function createSetupBatchApplier(projectRoot: string): SetupBatchApplier 
     if (checked.ok === "missing") return { kind: "missing" };
     if (checked.ok === false) return { kind: "refused", problems: checked.problems };
     if (checked.envelopes.length === 0) return { kind: "applied", facts: 0, operations: 0, replayed: false, warnings: [] };
-    const held = await open();
-    const bridge = held?.bridge ?? (await import("../graph/application-adapter.js")).createRepositoryGraphPort(root);
+    const bridge = await graphPort();
     const config = findConfig(root);
     const lines: string[] = [];
     const { runApply } = await import("../wiki/cli/commands.js");
@@ -217,9 +181,8 @@ export function createSetupBatchApplier(projectRoot: string): SetupBatchApplier 
     },
     async close() {
       await queue.catch(() => undefined);
-      if (!pinned) return { changed: false };
-      pinned.release();
-      return { changed: await pinned.settled };
+      // Nothing is held between applies; report whether freshness had to be proved again.
+      return { changed: (freshness?.fullProofs ?? 0) > 1 };
     },
   };
 }

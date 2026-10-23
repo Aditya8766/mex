@@ -584,7 +584,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     options.signal?.removeEventListener("abort", onAbort);
     let changed = false;
     try { changed = (await applier.close()).changed; } catch { /* nothing held */ }
-    if (changed) message("Source files changed during population; finalize verifies every reference against a refreshed code graph.");
+    if (changed) message("The code graph or Git HEAD changed during population, so MEX proved graph freshness again before the next apply; finalize verifies every reference against a refreshed graph.");
     save();
     coverage();
   }
