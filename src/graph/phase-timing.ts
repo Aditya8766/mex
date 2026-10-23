@@ -5,13 +5,15 @@ import { appendFileSync } from "node:fs";
  *
  * Disabled unless `MEX_GRAPH_PHASE_TIMINGS` names a file. When enabled, each
  * flush appends one JSON line of accumulated phase totals to that file. A flag
- * value such as `1` or `true` is not a path: timings stay off and one warning is
- * printed, instead of writing to a file named `1` in the working directory.
- * Nothing else is printed, and no path or source content enters a record: phase
- * names are fixed labels and values are milliseconds or counts.
+ * value is not a path: `1`, `true`, `yes` or `on` keeps timings off and prints
+ * one warning, instead of writing to a file named `1` in the working directory,
+ * and `0`, `false`, `no` or `off` keeps them off silently. Nothing else is
+ * printed, and no path or source content enters a record: phase names are fixed
+ * labels and values are milliseconds or counts.
  */
 const PHASE_TIMINGS_ENV = "MEX_GRAPH_PHASE_TIMINGS";
-const FLAG_VALUES = new Set(["1", "true", "yes", "on"]);
+const ON_FLAG_VALUES = new Set(["1", "true", "yes", "on"]);
+const OFF_FLAG_VALUES = new Set(["0", "false", "no", "off"]);
 
 const totals = new Map<string, number>();
 let warnedAboutFlagValue = false;
@@ -19,7 +21,9 @@ let warnedAboutFlagValue = false;
 function timingsPath(): string | undefined {
   const value = process.env[PHASE_TIMINGS_ENV];
   if (value === undefined || value === "") return undefined;
-  if (FLAG_VALUES.has(value.trim().toLowerCase())) {
+  const flag = value.trim().toLowerCase();
+  if (OFF_FLAG_VALUES.has(flag)) return undefined;
+  if (ON_FLAG_VALUES.has(flag)) {
     if (!warnedAboutFlagValue) {
       warnedAboutFlagValue = true;
       process.stderr.write(`mex: ${PHASE_TIMINGS_ENV} must name a file, not "${value}"; phase timings are off.\n`);
