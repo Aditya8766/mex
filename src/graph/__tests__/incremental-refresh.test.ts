@@ -311,4 +311,25 @@ describe("incremental refresh falls back to a full extraction past the closure b
     expect(modeOf(1)?.mode).toBe("full");
     expect(modeOf(1)?.fallbackReason).toMatch(/^the changed set reaches \d+ of 131 compiler files$/);
   }, 240_000);
+
+  it("holds no previous cache payload when the fallback extraction starts", async () => {
+    const harness = await startHarness(hubFixture);
+    replace("src/hub.ts", "value: number): number", "value: number, extra = 0): string")(harness.root);
+    const retained: number[] = [];
+    const engine = createGraphEngine({
+      rootDir: harness.root,
+      dbPath: harness.incrementalDb,
+      __internalRefreshStrategy: "incremental",
+      __internalGraphEngineHooks: { beforeFullExtraction: (count: number) => retained.push(count) },
+    } as Parameters<typeof createGraphEngine>[0]);
+    try {
+      const result = await engine.sync([]) as BuildResult & { refresh?: { mode?: string } };
+      expect(result.refresh?.mode).toBe("full");
+    } finally {
+      engine.close();
+    }
+    expect(retained).toEqual([0]);
+    await refresh(harness.root, harness.fullDb, "full");
+    expectSameGraph(harness.incrementalDb, harness.fullDb, EXACT_TABLES, "fallback vs full build, cache rows included");
+  }, 240_000);
 });

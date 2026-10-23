@@ -144,6 +144,8 @@ interface GraphEngineInternalHooks {
   }) => void;
   afterSemanticInputsStaged?: () => void;
   afterCompilerExtraction?: () => void;
+  /** Called as a full extraction starts, with the previous cache payloads still held. */
+  beforeFullExtraction?: (retainedPayloads: number) => void;
   afterFinalSemanticInputRead?: (path: string) => void;
   /** Final path/cancellation seam immediately before SQLite opens or creates the database. */
   beforeDatabaseOpen?: () => void;
@@ -1010,6 +1012,13 @@ async function stageCorpus(
       ));
 
     let compiler: CompilerExtractionResult;
+    // A full extraction reuses nothing, so it must not carry the previous
+    // payloads either: that would peak above a plain build. Emptying the map
+    // also makes every cache row of the new snapshot a changed row, as in a build.
+    const releasePreviousExtraction = (): void => {
+      if (!("reason" in reuse)) reuse.stored.clear();
+      internal.beforeFullExtraction?.("reason" in reuse ? 0 : reuse.stored.size);
+    };
     const extractCompilerFiles = (incremental?: CompilerIncrementalInput): CompilerExtractionResult => {
       const semanticInputLedger = createGraphSemanticInputLedger();
       return timeGraphPhase("compiler.total", () => buildTypeScriptExtraction(root, compilerPaths, {
@@ -1035,6 +1044,7 @@ async function stageCorpus(
     };
     try {
       if ("reason" in plan) {
+        releasePreviousExtraction();
         compiler = extractCompilerFiles();
       } else {
         try {
@@ -1050,6 +1060,7 @@ async function stageCorpus(
         } catch (error) {
           if (!(error instanceof CompilerIncrementalFallback)) throw error;
           plan = { reason: error.reason };
+          releasePreviousExtraction();
           compiler = extractCompilerFiles();
         }
       }
