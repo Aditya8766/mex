@@ -181,7 +181,7 @@ describe("authoring prompts", () => {
   });
 
   it.each(prompts.slice(0, 2))("%s says MEX records the fingerprint", (_name, prompt) => {
-    expect(prompt).toContain("MEX records the fingerprint");
-    expect(prompt).toContain('"groundsTo": [{"node": "<exact id>"}]');
+    expect(prompt).toContain("MEX finds it and records the fingerprints");
+    expect(prompt).toContain('"groundsTo": [{"file": "src/x.ts", "symbol": "parseBody"}]');
   });
 });

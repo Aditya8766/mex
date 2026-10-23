@@ -24,16 +24,16 @@ afterEach(() => {
 });
 
 describe("setup graph-grounding population", () => {
-  it("directs both existing-project paths through broad graph reads and tight grounding", () => {
+  it("directs both existing-project paths through broad file reads and tight grounding", () => {
     for (const prompt of [buildExistingWithBriefPrompt('{"folders":["src"]}'), buildExistingNoBriefPrompt()]) {
-      expect(prompt).toContain('mex graph scope "<task or domain>"');
+      // Code is read with the agent's own file tools; facts name code by file
+      // and symbol, and MEX resolves and records it.
+      expect(prompt).toContain("read code with your normal file tools");
       expect(prompt).toContain("READ BROAD, GROUND TIGHT");
-      expect(prompt).toContain('- node: "<exact id from graph JSONL>"');
+      expect(prompt).toContain('{"file": "src/x.ts", "symbol": "parseBody"}');
       expect(prompt).not.toContain("<exact fingerprint");
-      expect(prompt).toContain("mex://<exact-node-id>");
-      expect(prompt).toContain("Never ground every node returned by scope");
-      expect(prompt).toContain("architecture/stack/conventions files should ground sparsely");
-      expect(prompt).toContain("Pattern files and deep domain files should ground tightly");
+      expect(prompt).not.toContain("--fingerprint");
+      expect(prompt).toContain("Ground a claim to every symbol whose change could make it false");
       expect(prompt).toContain("use that exact launcher consistently");
       expect(prompt).toContain("node dist/cli.js");
       expect(prompt).toContain("Treat substantive existing content as durable project knowledge");
