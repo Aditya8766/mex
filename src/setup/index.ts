@@ -394,7 +394,7 @@ async function finalizeCodeRepoSetupOnce(projectRoot: string, mexDir: string, op
     throw Object.assign(new SetupFinalizationError(`${wiki.reason ?? "Wiki setup did not finish."}${suffix} ${userMessage}`, { userMessage }), { wikiDiagnostics: wiki.diagnostics });
   }
   ok(`Wiki ready with ${wiki.indexedEntities} indexed entit${wiki.indexedEntities === 1 ? "y" : "ies"}`);
-  if (drift) warn(describeGroundingDrift(drift));
+  // The final setup message carries the drift sentence; repeating it here would print it twice.
   return drift;
 }
 

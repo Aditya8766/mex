@@ -73,8 +73,7 @@ describe("finalize leaves recorded knowledge whose code changed alone", () => {
     const before = readFileSync(p.pattern, "utf8");
     writeFileSync(join(p.root, "src", "price.ts"), editedSource());
     const populate = vi.fn(async () => ({ tool: "codex" as const, completed: true }));
-    const messages: string[] = [];
-    const outcome = await finalizeCodeRepoSetup(p.root, p.scaffold, { selectedTools: ["codex"], populate, onMessage: (m) => messages.push(m) });
+    const outcome = await finalizeCodeRepoSetup(p.root, p.scaffold, { selectedTools: ["codex"], populate, ...quiet });
     expect(outcome.dropped).toEqual([]);
     expect(outcome.drift).toMatchObject({ entities: 1, files: [".mex/patterns/pricing.md"] });
     expect(populate).not.toHaveBeenCalled();
@@ -83,7 +82,6 @@ describe("finalize leaves recorded knowledge whose code changed alone", () => {
     expect(text).toContain("changed since they were recorded");
     expect(text).toContain(".mex/patterns/pricing.md");
     expect(text).toContain("mex sync");
-    expect(messages.join("\n")).toContain("mex sync");
   }, 60_000);
 
   it("repairs and drops only the new bad reference; the drifted recorded fact is untouched", async () => {
