@@ -20,9 +20,13 @@ import { buildSetupRepairPrompt } from "../finalize-repair.js";
 /** Every prompt `buildSetupPopulationPrompt` can hand to the headless population agent. */
 const PLAN: SubsystemPlan = {
   source: "graph",
+  ranking: "activity",
   sourceFiles: 120,
   target: { min: 3, max: 4 },
-  candidates: [{ path: "src/router", files: 30, fanIn: 12 }, { path: "src/http", files: 20, fanIn: 4 }],
+  candidates: [
+    { path: "src/router", files: 30, commits: 12, budget: { min: 10, max: 15 } },
+    { path: "src/http", files: 20, commits: 4, budget: { min: 6, max: 10 } },
+  ],
 };
 const HEADLESS_PROMPTS: ReadonlyArray<readonly [string, () => string]> = [
   ["fresh", buildFreshPrompt],
@@ -103,8 +107,13 @@ describe("headless Claude allowlist against the prompts it serves", () => {
   it("does not let the cross-check pass vacuously", () => {
     const named = new Set(HEADLESS_PROMPTS.flatMap(([, build]) => namedMexCommands(build())));
     expect([...named]).toEqual(expect.arrayContaining([
-      "mex graph query", "mex impact", "mex wiki apply", "mex wiki validate",
+      "mex graph query", "mex wiki apply", "mex wiki validate",
     ]));
+    // The population prompts offer no graph-query helper; only the finalize repair turn names where-defined.
+    const population = HEADLESS_PROMPTS.filter(([name]) => name !== "finalize repair")
+      .flatMap(([, build]) => namedMexCommands(build()));
+    expect(population).not.toContain("mex graph query");
+    expect(population).not.toContain("mex impact");
     expect(named).not.toContain("mex wiki link-sections");
     expect(namedMexCommands("run `mex wiki apply op.json --apply`, then mex setup")).toEqual(["mex setup", "mex wiki apply"]);
     expect(namedMexCommands("a mex scaffold at mex://node")).toEqual([]);

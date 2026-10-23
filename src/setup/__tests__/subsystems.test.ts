@@ -5,9 +5,13 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openGraphDatabase } from "../../graph/db/database.js";
 import {
+  LOW_VALUE_FOLDER_NAMES,
   computeSubsystemPlan,
+  factBudgetForRank,
   isExcludedSourcePath,
+  parseGitCommitFiles,
   rankSubsystemCandidates,
+  readGitCommitFiles,
   readGraphSubsystemInputs,
   renderSubsystemCandidates,
   subsystemTarget,
@@ -25,6 +29,11 @@ afterEach(() => {
 
 function filesIn(folder: string, count: number, ext = "ts"): string[] {
   return Array.from({ length: count }, (_, index) => `${folder}/file${index}.${ext}`);
+}
+
+/** `times` commits that each change the first file of every given folder. */
+function commitsTouching(folder: string, times: number): string[][] {
+  return Array.from({ length: times }, () => [`${folder}/file0.ts`]);
 }
 
 describe("subsystemTarget", () => {
@@ -50,48 +59,73 @@ describe("isExcludedSourcePath", () => {
   });
 });
 
-describe("rankSubsystemCandidates", () => {
-  it("splits a src wrapper into its folders, ranked by size", () => {
+describe("factBudgetForRank", () => {
+  it("gives the top third 10-15, the middle third 6-10 and the rest 4-6", () => {
+    const budgets = Array.from({ length: 12 }, (_, index) => factBudgetForRank(index, 12));
+    expect(budgets.slice(0, 4)).toEqual(Array(4).fill({ min: 10, max: 15 }));
+    expect(budgets.slice(4, 8)).toEqual(Array(4).fill({ min: 6, max: 10 }));
+    expect(budgets.slice(8)).toEqual(Array(4).fill({ min: 4, max: 6 }));
+  });
+
+  it("rounds the thirds up for small plans", () => {
+    expect([0, 1, 2].map((index) => factBudgetForRank(index, 3))).toEqual([{ min: 10, max: 15 }, { min: 6, max: 10 }, { min: 4, max: 6 }]);
+    expect([0, 1, 2, 3].map((index) => factBudgetForRank(index, 4).min)).toEqual([10, 10, 6, 4]);
+  });
+});
+
+describe("rankSubsystemCandidates: structure", () => {
+  it("splits a src wrapper into its folders, ranked by size when there is no history", () => {
     const files = [...filesIn("src/router", 20), ...filesIn("src/http", 12), ...filesIn("src/utils", 5), ...filesIn("scripts", 3)];
     const plan = rankSubsystemCandidates({ files });
-    expect(plan.candidates.map((c) => [c.path, c.files])).toEqual([
-      ["src/router", 20], ["src/http", 12], ["src/utils", 5], ["scripts", 3],
+    expect(plan.candidates.map((c) => [c.path, c.files, c.commits])).toEqual([
+      ["src/router", 20, null], ["src/http", 12, null], ["src/utils", 5, null],
     ]);
+    // Three files and no activity: below the plan floor once the target minimum is met.
+    expect(plan.candidates.map((c) => c.path)).not.toContain("scripts");
     expect(plan.sourceFiles).toBe(40);
     expect(plan.target).toEqual({ min: 3, max: 4 });
     expect(plan.source).toBe("tree");
-    expect(plan.candidates.every((c) => c.fanIn === null)).toBe(true);
+    expect(plan.ranking).toBe("size");
   });
 
-  it("keeps top-level folders that are not dominant", () => {
+  it("keeps top-level folders that are not too big", () => {
     const files = [...filesIn("api", 10), ...filesIn("core", 10), ...filesIn("web", 10), ...filesIn("web/inner", 4)];
     expect(rankSubsystemCandidates({ files }).candidates.map((c) => c.path).sort()).toEqual(["api", "core", "web"]);
   });
 
-  it("splits a dominant monorepo folder and looks through single-child wrappers", () => {
+  it("splits a big folder at any depth and looks through single-child wrappers", () => {
     const files = [
-      ...filesIn("packages/core/src/parser", 15), ...filesIn("packages/core/src/render", 10),
-      ...filesIn("packages/cli/src", 8), ...filesIn("tools", 3),
+      ...filesIn("apps/api/src/app/alpha", 40), ...filesIn("apps/api/src/app/beta", 30), ...filesIn("apps/api/src/app/gamma", 20),
+      ...filesIn("libs/dal", 20),
     ];
-    const paths = rankSubsystemCandidates({ files }).candidates.map((c) => c.path);
-    expect(paths).toContain("packages/core/src/parser");
-    expect(paths).toContain("packages/core/src/render");
-    expect(paths).toContain("packages/cli");
-    expect(paths).not.toContain("packages/cli/src");
-    expect(paths).not.toContain("packages");
+    const plan = rankSubsystemCandidates({ files });
+    expect(plan.candidates.map((c) => c.path).sort()).toEqual([
+      "apps/api/src/app/alpha", "apps/api/src/app/beta", "apps/api/src/app/gamma", "libs",
+    ]);
   });
 
-  it("does not look through a wrapper below the second level unless the folder dominates", () => {
-    const files = [...filesIn("app/dashboard/components", 17), ...filesIn("app/dashboard", 3), ...filesIn("lib", 20), ...filesIn("ui", 12)];
-    expect(rankSubsystemCandidates({ files }).candidates.map((c) => c.path).sort()).toEqual(["app/dashboard", "lib", "ui"]);
+  it("keeps a folder whole when it is small enough, however many parts it has", () => {
+    const files = [...filesIn("lib/a", 10), ...filesIn("lib/b", 10), ...filesIn("lib/c", 10), ...filesIn("ui", 24), ...filesIn("web", 24), ...filesIn("cli", 24)];
+    // 102 files / min 3 = 34: lib (30) stays as one area.
+    expect(rankSubsystemCandidates({ files }).candidates.map((c) => c.path).sort()).toEqual(["cli", "lib", "ui", "web"]);
   });
 
-  it("splits an oversized child again but never below the depth cap", () => {
-    const files = [...filesIn("src/big/alpha", 20), ...filesIn("src/big/beta", 20), ...filesIn("src/small", 4)];
-    const paths = rankSubsystemCandidates({ files }).candidates.map((c) => c.path);
-    expect(paths).toEqual(expect.arrayContaining(["src/big/alpha", "src/big/beta", "src/small"]));
-    const deep = rankSubsystemCandidates({ files: [...filesIn("a/b/c/d/e/x", 10), ...filesIn("a/b/c/d/e/y", 10), ...filesIn("z", 3)] });
-    expect(deep.candidates.every((c) => c.path.split("/").length <= 4)).toBe(true);
+  it("repeats the split until each part is under the size limit or cannot be split", () => {
+    const files = [
+      ...filesIn("pkg/big/inner/one", 25), ...filesIn("pkg/big/inner/two", 25), ...filesIn("pkg/big/flat", 60), ...filesIn("other", 10),
+    ];
+    const plan = rankSubsystemCandidates({ files });
+    // 120 / 3 = 40: pkg/big/flat has no parts and stays whole; the rest splits down to depth 4.
+    expect(plan.candidates.map((c) => c.path).sort()).toEqual(["other", "pkg/big/flat", "pkg/big/inner/one", "pkg/big/inner/two"]);
+  });
+
+  it("proposes a split folder's own files beside its parts", () => {
+    const files = [...filesIn("src", 8), ...filesIn("src/router", 20), ...filesIn("src/jsx", 12), ...filesIn("src/tiny", 1), ...filesIn("docs-site", 3)];
+    const plan = rankSubsystemCandidates({ files });
+    const own = plan.candidates.find((c) => c.remainder === true)!;
+    expect(own).toMatchObject({ path: "src", files: 9 });
+    expect(plan.candidates.find((c) => c.path === "src/router")).toMatchObject({ files: 20 });
+    expect(renderSubsystemCandidates(plan)).toContain("src/ (its own files and small subfolders) — 9 files");
   });
 
   it("excludes tests, fixtures, generated, vendored and docs code from counts and candidates", () => {
@@ -101,7 +135,7 @@ describe("rankSubsystemCandidates", () => {
     ];
     const plan = rankSubsystemCandidates({ files });
     expect(plan.candidates.map((c) => c.path)).toEqual(["src/auth"]);
-    // The target scales with every indexed file; only the proposed folders are filtered.
+    // The target scales with every indexed file; only the planned folders are filtered.
     expect(plan.sourceFiles).toBe(new Set(files).size);
   });
 
@@ -113,55 +147,9 @@ describe("rankSubsystemCandidates", () => {
     expect(plan.candidates.map((c) => c.path)).toEqual(["src/core"]);
   });
 
-  it("proposes a dominant folder's own files beside its subfolders", () => {
-    const files = [...filesIn("src", 8), ...filesIn("src/router", 20), ...filesIn("src/jsx", 12), ...filesIn("src/tiny", 1), ...filesIn("docs-site", 3)];
-    const plan = rankSubsystemCandidates({ files, fileEdges: [["docs-site/file0.ts", "src/file0.ts"], ["src/router/file0.ts", "src/file1.ts"]] });
-    const own = plan.candidates.find((c) => c.remainder === true)!;
-    expect(own).toMatchObject({ path: "src", files: 9, fanIn: 2 });
-    expect(plan.candidates.find((c) => c.path === "src/router")).toMatchObject({ files: 20, fanIn: 0 });
-    expect(renderSubsystemCandidates(plan)).toContain("src/ (its own files and small subfolders) — 9 files");
-  });
-
   it("drops folders below the minimum size and files directly in the root", () => {
     const plan = rankSubsystemCandidates({ files: ["main.ts", "util.ts", ...filesIn("tiny", 2), ...filesIn("real", 5)] });
     expect(plan.candidates.map((c) => c.path)).toEqual(["real"]);
-  });
-
-  it("ranks by fan-in as well as size, counting each outside file once", () => {
-    const files = [...filesIn("lib/big", 10), ...filesIn("lib/core", 6), ...filesIn("lib/leaf", 4), ...filesIn("app", 12)];
-    const fileEdges: Array<[string, string]> = [];
-    for (let i = 0; i < 6; i++) for (const target of ["lib/core/file0.ts", "lib/core/file1.ts"]) fileEdges.push([`app/file${i}.ts`, target]);
-    fileEdges.push(["lib/big/file0.ts", "lib/big/file1.ts"], ["lib/leaf/file0.ts", "lib/core/file2.ts"]);
-    const plan = rankSubsystemCandidates({ files, fileEdges });
-    const byPath = new Map(plan.candidates.map((c) => [c.path, c]));
-    expect(plan.source).toBe("graph");
-    expect(byPath.get("lib/core")!.fanIn).toBe(7);
-    expect(byPath.get("lib/big")!.fanIn).toBe(0);
-    expect(byPath.get("lib/leaf")!.fanIn).toBe(0);
-    expect(plan.candidates[0]!.path).toBe("lib/core");
-  });
-
-  it("breaks ties by path and is deterministic", () => {
-    const files = [...filesIn("b", 4), ...filesIn("a", 4), ...filesIn("c", 4)];
-    const first = rankSubsystemCandidates({ files });
-    expect(first.candidates.map((c) => c.path)).toEqual(["a", "b", "c"]);
-    expect(rankSubsystemCandidates({ files: [...files].reverse() })).toEqual(first);
-  });
-
-  it("proposes about twice the target and no more", () => {
-    const files = Array.from({ length: 12 }, (_, i) => filesIn(`mod${String(i).padStart(2, "0")}`, 5)).flat();
-    const plan = rankSubsystemCandidates({ files });
-    expect(plan.target).toEqual({ min: 3, max: 4 });
-    expect(plan.candidates).toHaveLength(8);
-  });
-
-  it("scales the target with the number of source files", () => {
-    const medium = Array.from({ length: 10 }, (_, i) => filesIn(`area${i}`, 60)).flat();
-    expect(rankSubsystemCandidates({ files: medium }).target).toEqual({ min: 5, max: 8 });
-    const large = Array.from({ length: 12 }, (_, i) => filesIn(`area${i}`, 300)).flat();
-    const plan = rankSubsystemCandidates({ files: large });
-    expect(plan.target).toEqual({ min: 8, max: 12 });
-    expect(plan.candidates).toHaveLength(12);
   });
 
   it("returns no candidates for an empty or flat repository", () => {
@@ -170,12 +158,216 @@ describe("rankSubsystemCandidates", () => {
   });
 });
 
+describe("rankSubsystemCandidates: ranking by recent activity", () => {
+  const files = [...filesIn("src/core", 20), ...filesIn("src/web", 20), ...filesIn("src/data", 20), ...filesIn("src/cli", 5)];
+
+  it("ranks by commits touching the folder, ahead of size", () => {
+    const commits = [...commitsTouching("src/cli", 9), ...commitsTouching("src/web", 5), ...commitsTouching("src/core", 2)];
+    const plan = rankSubsystemCandidates({ files, commits });
+    expect(plan.ranking).toBe("activity");
+    expect(plan.candidates.map((c) => [c.path, c.commits])).toEqual([["src/cli", 9], ["src/web", 5], ["src/core", 2], ["src/data", 0]]);
+  });
+
+  it("counts a commit once per folder however many of its files it touches", () => {
+    const plan = rankSubsystemCandidates({
+      files,
+      commits: [["src/core/file0.ts", "src/core/file1.ts", "src/core/file2.ts", "src/web/file0.ts"], ["src/core/file3.ts"]],
+    });
+    expect(plan.candidates.find((c) => c.path === "src/core")!.commits).toBe(2);
+    expect(plan.candidates.find((c) => c.path === "src/web")!.commits).toBe(1);
+  });
+
+  it("uses size as the tie-break between equally active folders", () => {
+    const plan = rankSubsystemCandidates({
+      files: [...filesIn("a", 10), ...filesIn("b", 30), ...filesIn("c", 20)],
+      commits: [["a/file0.ts", "b/file0.ts", "c/file0.ts"]],
+    });
+    expect(plan.candidates.map((c) => c.path)).toEqual(["b", "c", "a"]);
+  });
+
+  it("ignores changes to files outside every folder of the plan", () => {
+    const plan = rankSubsystemCandidates({ files, commits: [["README.md", "src/gone/old.ts", "tests/a.test.ts"], ["src/data/file1.ts"]] });
+    expect(plan.candidates[0]).toMatchObject({ path: "src/data", commits: 1 });
+  });
+
+  it("falls back to size for empty history, or history that touches nothing in the plan", () => {
+    const bySize = rankSubsystemCandidates({ files }).candidates.map((c) => c.path);
+    expect(rankSubsystemCandidates({ files, commits: [] }).ranking).toBe("size");
+    expect(rankSubsystemCandidates({ files, commits: [] }).candidates.map((c) => c.path)).toEqual(bySize);
+    const none = rankSubsystemCandidates({ files, commits: [["README.md"]] });
+    expect(none.ranking).toBe("size");
+    expect(none.candidates.map((c) => c.path)).toEqual(bySize);
+  });
+});
+
+describe("rankSubsystemCandidates: push-down of low-value folders", () => {
+  it("documents exactly the agreed folder names", () => {
+    expect([...LOW_VALUE_FOLDER_NAMES].sort()).toEqual(
+      ["bin", "config", "configs", "devtools", "playground", "sandbox", "scripts", "tooling", "tools"]);
+    for (const kept of ["enterprise", "utils", "helpers", "shared", "internal"]) expect(LOW_VALUE_FOLDER_NAMES.has(kept)).toBe(false);
+  });
+
+  it("ranks a busy scripts or playground folder below real product code but keeps it", () => {
+    const files = [...filesIn("src/core", 20), ...filesIn("src/web", 20), ...filesIn("scripts", 20), ...filesIn("playground", 20)];
+    const commits = [...commitsTouching("scripts", 9), ...commitsTouching("playground", 8), ...commitsTouching("src/core", 4), ...commitsTouching("src/web", 3)];
+    const plan = rankSubsystemCandidates({ files, commits });
+    expect(plan.candidates.map((c) => c.path)).toEqual(["src/core", "src/web", "scripts", "playground"]);
+  });
+
+  it("does not push down enterprise or any other folder by guess", () => {
+    const files = [...filesIn("enterprise", 20), ...filesIn("src/core", 20), ...filesIn("src/web", 20)];
+    const plan = rankSubsystemCandidates({ files, commits: [...commitsTouching("enterprise", 9), ...commitsTouching("src/core", 4)] });
+    expect(plan.candidates[0]!.path).toBe("enterprise");
+  });
+
+  it("matches whole folder names, case-insensitively, anywhere in the path", () => {
+    const files = [...filesIn("src/core", 20), ...filesIn("src/Config", 20), ...filesIn("src/configuration", 20), ...filesIn("src/web", 20)];
+    const commits = [...commitsTouching("src/Config", 5), ...commitsTouching("src/configuration", 5), ...commitsTouching("src/core", 4), ...commitsTouching("src/web", 4)];
+    const order = rankSubsystemCandidates({ files, commits }).candidates.map((c) => c.path);
+    expect(order.indexOf("src/configuration")).toBeLessThan(order.indexOf("src/Config"));
+    expect(order.indexOf("src/Config")).toBe(3);
+  });
+});
+
+describe("rankSubsystemCandidates: the fixed plan", () => {
+  it("gives every subsystem a fact budget by rank", () => {
+    const files = Array.from({ length: 12 }, (_, i) => filesIn(`area${String(i).padStart(2, "0")}`, 300)).flat();
+    const plan = rankSubsystemCandidates({ files });
+    expect(plan.target).toEqual({ min: 8, max: 12 });
+    expect(plan.candidates).toHaveLength(12);
+    expect(plan.candidates.map((c) => c.budget.min)).toEqual([10, 10, 10, 10, 6, 6, 6, 6, 4, 4, 4, 4]);
+    expect(plan.candidates.map((c) => c.budget.max)).toEqual([15, 15, 15, 15, 10, 10, 10, 10, 6, 6, 6, 6]);
+  });
+
+  it("keeps at most the target maximum, however many folders exist", () => {
+    const files = Array.from({ length: 12 }, (_, i) => filesIn(`mod${String(i).padStart(2, "0")}`, 5)).flat();
+    const plan = rankSubsystemCandidates({ files });
+    expect(plan.target).toEqual({ min: 3, max: 4 });
+    expect(plan.candidates).toHaveLength(4);
+  });
+
+  it("scales the target with the number of source files", () => {
+    const medium = Array.from({ length: 10 }, (_, i) => filesIn(`area${i}`, 60)).flat();
+    const mediumPlan = rankSubsystemCandidates({ files: medium });
+    expect(mediumPlan.target).toEqual({ min: 5, max: 8 });
+    expect(mediumPlan.candidates).toHaveLength(8);
+  });
+
+  it("drops tiny folders with no recent activity, but never below the target minimum", () => {
+    const files = [...filesIn("a", 10), ...filesIn("b", 8), ...filesIn("c", 6), ...filesIn("tiny", 3)];
+    const commits = [...commitsTouching("a", 3), ...commitsTouching("b", 2), ...commitsTouching("c", 1)];
+    expect(rankSubsystemCandidates({ files, commits }).candidates.map((c) => c.path)).toEqual(["a", "b", "c"]);
+    // A tiny folder with recent commits stays.
+    const active = rankSubsystemCandidates({ files, commits: [...commits, ...commitsTouching("tiny", 1)] });
+    expect(active.candidates.map((c) => c.path)).toContain("tiny");
+    // Too few other folders: the tiny ones fill the minimum.
+    const sparse = rankSubsystemCandidates({ files: [...filesIn("a", 10), ...filesIn("t1", 3), ...filesIn("t2", 3)], commits: commitsTouching("a", 2) });
+    expect(sparse.candidates.map((c) => c.path)).toEqual(["a", "t1", "t2"]);
+  });
+
+  it("is deterministic, independent of input order, and JSON-serializable", () => {
+    const files = [...filesIn("b", 4), ...filesIn("a", 4), ...filesIn("c", 4)];
+    const commits = [["a/file0.ts", "c/file1.ts"], ["b/file0.ts"]];
+    const first = rankSubsystemCandidates({ files, commits });
+    expect(first.candidates.map((c) => [c.path, c.commits])).toEqual([["a", 1], ["b", 1], ["c", 1]]);
+    expect(rankSubsystemCandidates({ files: [...files].reverse(), commits })).toEqual(first);
+    expect(JSON.parse(JSON.stringify(first))).toEqual(first);
+  });
+
+  it("breaks full ties by path", () => {
+    const plan = rankSubsystemCandidates({ files: [...filesIn("b", 4), ...filesIn("a", 4), ...filesIn("c", 4)] });
+    expect(plan.candidates.map((c) => c.path)).toEqual(["a", "b", "c"]);
+  });
+
+  it("renders path, files and budget in plan order, without fan-in", () => {
+    const plan = rankSubsystemCandidates({ files: [...filesIn("src/a", 4), ...filesIn("src/b", 6)] });
+    expect(renderSubsystemCandidates(plan)).toBe(" 1. src/b/ — 6 files, 10 to 15 facts\n 2. src/a/ — 4 files, 6 to 10 facts");
+    expect(renderSubsystemCandidates(plan)).not.toContain("fan-in");
+  });
+});
+
+describe("git history reading", () => {
+  const git = (root: string, ...args: string[]): void => {
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: root, stdio: "ignore" });
+  };
+  function write(root: string, path: string, text = "x"): void {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
+  function repoWithHistory(): string {
+    const root = tempRoot();
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    for (const path of [...filesIn("src/a", 5), ...filesIn("src/b", 5), ...filesIn("src/c", 5)]) write(root, path);
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "initial");
+    for (let i = 1; i <= 3; i++) {
+      write(root, "src/b/file0.ts", `v${i}`);
+      git(root, "commit", "-q", "-am", `b ${i}`);
+    }
+    write(root, "src/c/file0.ts", "v1");
+    git(root, "commit", "-q", "-am", "c 1");
+    return root;
+  }
+
+  it("parses marker-separated commit output", () => {
+    expect(parseGitCommitFiles("\u0001\nsrc/a.ts\nsrc/b.ts\n\u0001\nsrc/c.ts\n\u0001\n\n")).toEqual([["src/a.ts", "src/b.ts"], ["src/c.ts"]]);
+    expect(parseGitCommitFiles("")).toEqual([]);
+  });
+
+  it("reads one commit entry per commit, newest first", () => {
+    const commits = readGitCommitFiles(repoWithHistory())!;
+    expect(commits).toHaveLength(5);
+    expect(commits[0]).toEqual(["src/c/file0.ts"]);
+    expect(commits[4]).toHaveLength(15);
+  });
+
+  it("ranks a real repository by its recent commits", () => {
+    const plan = computeSubsystemPlan(repoWithHistory())!;
+    expect(plan.ranking).toBe("activity");
+    expect(plan.candidates.map((c) => [c.path, c.commits])).toEqual([["src/b", 4], ["src/c", 2], ["src/a", 1]]);
+  });
+
+  it("takes the git root, a starting revision and a date from the caller", () => {
+    const root = repoWithHistory();
+    const outside = tempRoot();
+    for (const path of [...filesIn("src/a", 5), ...filesIn("src/b", 5), ...filesIn("src/c", 5)]) write(outside, path);
+    const upToThirdCommit = readGitCommitFiles(outside, { gitRoot: root, revision: "HEAD~2" })!;
+    expect(upToThirdCommit).toHaveLength(3);
+    const plan = computeSubsystemPlan(outside, { gitRoot: root, revision: "HEAD~2" })!;
+    expect(plan.candidates.map((c) => [c.path, c.commits])).toEqual([["src/b", 3], ["src/a", 1], ["src/c", 1]]);
+  });
+
+  it("reports paths relative to the project folder inside a larger repository", () => {
+    const root = repoWithHistory();
+    const commits = readGitCommitFiles(join(root, "src", "b"))!;
+    expect(commits.flat().every((path) => path.startsWith("file"))).toBe(true);
+  });
+
+  it("falls back to size without Git, with a bad revision, or with an unusable git root", () => {
+    const plain = tempRoot();
+    for (const path of [...filesIn("src/a", 5), ...filesIn("src/b", 4)]) write(plain, path);
+    expect(readGitCommitFiles(plain)).toBeNull();
+    expect(computeSubsystemPlan(plain)!.ranking).toBe("size");
+    const root = repoWithHistory();
+    expect(readGitCommitFiles(root, { revision: "no-such-revision" })).toBeNull();
+    expect(readGitCommitFiles(root, { revision: "--output=oops" })).toBeNull();
+    expect(readGitCommitFiles(root, { gitRoot: join(root, "does-not-exist") })).toBeNull();
+    expect(computeSubsystemPlan(plain, { gitRoot: join(plain, "missing") })!.ranking).toBe("size");
+  });
+
+  it("returns null for an empty repository with no commits", () => {
+    const root = tempRoot();
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    expect(readGitCommitFiles(root)).toBeNull();
+  });
+});
+
 function insertNode(db: ReturnType<typeof openGraphDatabase>, id: string, file: string): void {
   db.prepare(`INSERT INTO nodes (id, kind, name, qualified_name, identity_key, file_path, language, start_line, end_line,
     start_column, end_column, updated_at) VALUES (?, 'function', ?, ?, ?, ?, 'typescript', 1, 2, 0, 0, 0)`).run(id, id, id, id, file);
 }
 
-function buildFixtureGraph(root: string, files: string[], edges: Array<[string, string]>): void {
+function buildFixtureGraph(root: string, files: string[]): void {
   const mex = join(root, ".mex");
   mkdirSync(mex, { recursive: true });
   const db = openGraphDatabase(join(mex, "graph.db"));
@@ -185,27 +377,21 @@ function buildFixtureGraph(root: string, files: string[], edges: Array<[string, 
       insertFile.run(file);
       insertNode(db, `fn:${file}`, file);
     }
-    const insertEdge = db.prepare("INSERT INTO edges (source, target, kind) VALUES (?, ?, ?)");
-    for (const [from, to] of edges) insertEdge.run(`fn:${from}`, `fn:${to}`, "calls");
-    // A structural edge must not count as a dependency.
-    insertEdge.run(`fn:${files[0]}`, `fn:${files[files.length - 1]}`, "contains");
   } finally {
     db.close();
   }
 }
 
 describe("graph-backed plan", () => {
-  it("reads files and distinct cross-file edges from the built graph", () => {
+  it("reads the indexed files from the built graph", () => {
     const root = tempRoot();
     const files = [...filesIn("src/a", 4), ...filesIn("src/b", 4)];
-    buildFixtureGraph(root, files, [["src/a/file0.ts", "src/b/file0.ts"], ["src/a/file1.ts", "src/b/file0.ts"], ["src/a/file0.ts", "src/a/file1.ts"]]);
+    buildFixtureGraph(root, files);
     const inputs = readGraphSubsystemInputs(root)!;
     expect([...inputs.files].sort()).toEqual([...files].sort());
-    expect(inputs.fileEdges).toHaveLength(3);
     const plan = computeSubsystemPlan(root)!;
     expect(plan.source).toBe("graph");
-    expect(plan.candidates.find((c) => c.path === "src/b")!.fanIn).toBe(2);
-    expect(plan.candidates.find((c) => c.path === "src/a")!.fanIn).toBe(0);
+    expect(plan.candidates.map((c) => c.path).sort()).toEqual(["src/a", "src/b"]);
   });
 
   it("returns null when the graph is missing or unreadable", () => {
@@ -229,7 +415,7 @@ describe("source-tree fallback", () => {
     write(root, "src/core/readme.md");
     const plan = computeSubsystemPlan(root)!;
     expect(plan.source).toBe("tree");
-    expect(plan.candidates.map((c) => [c.path, c.files, c.fanIn])).toEqual([["src/core", 5, null], ["src/web", 4, null]]);
+    expect(plan.candidates.map((c) => [c.path, c.files, c.commits])).toEqual([["src/core", 5, null], ["src/web", 4, null]]);
   });
 
   it("uses the Git listing when available, so ignored folders stay out", () => {
@@ -246,12 +432,8 @@ describe("source-tree fallback", () => {
     write(root, "README.md");
     expect(computeSubsystemPlan(root)).toBeNull();
   });
-});
 
-describe("renderSubsystemCandidates", () => {
-  it("prints path, files and fan-in, omitting fan-in without a graph", () => {
-    const withGraph = rankSubsystemCandidates({ files: filesIn("src/a", 4), fileEdges: [] });
-    expect(renderSubsystemCandidates(withGraph)).toBe(" 1. src/a/ — 4 files, fan-in 0");
-    expect(renderSubsystemCandidates(rankSubsystemCandidates({ files: filesIn("src/a", 4) }))).toBe(" 1. src/a/ — 4 files");
+  it("never throws, even for a project folder that does not exist", () => {
+    expect(computeSubsystemPlan(join(tempRoot(), "missing"))).toBeNull();
   });
 });

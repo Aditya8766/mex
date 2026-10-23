@@ -1,27 +1,37 @@
 /**
- * Subsystem candidates for the setup coverage target.
+ * The subsystem plan for setup coverage.
  *
- * Setup asks the population agent to cover a repository's major code areas, not
- * just the first few it happens to read. MEX proposes the areas so the agent
- * confirms a ranked list instead of inventing one: top-level and second-level
- * source folders ranked by size and by how much the rest of the code depends on
- * them. Everything here is cheap and bounded: one pair of graph queries (file
- * paths and file-to-file edges, no source parsing), or a bounded file listing
- * when the graph is unavailable.
+ * MEX, not the population agent, decides which areas of a repository get
+ * knowledge facts and how many. The plan is deterministic and pure given its
+ * inputs: source folders are split by size at any depth until none is too big to
+ * be one area, ranked by recent Git activity (size when there is no history),
+ * trimmed to the target count, and given a fact budget by rank. Everything here
+ * is cheap and bounded: one graph query for file paths (no source parsing) or a
+ * bounded file listing, and one bounded `git log` call.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { openGraphDatabase } from "../graph/db/database.js";
 
+export interface FactBudget {
+  readonly min: number;
+  readonly max: number;
+}
+
 export interface SubsystemCandidate {
   /** Repo-relative folder with `/` separators. */
   readonly path: string;
   readonly files: number;
-  /** Distinct files outside the folder with an edge into it; `null` when no graph was read. */
-  readonly fanIn: number | null;
+  /** Recent commits touching the folder's files; `null` when no Git history was read. */
+  readonly commits: number | null;
   /** The folder's own files and its small subfolders, beside the larger subfolders listed separately. */
   readonly remainder?: true;
+}
+
+/** One subsystem of the fixed plan: where it is, how big and active it is, and how many facts to write. */
+export interface PlannedSubsystem extends SubsystemCandidate {
+  readonly budget: FactBudget;
 }
 
 export interface SubsystemTarget {
@@ -30,13 +40,15 @@ export interface SubsystemTarget {
 }
 
 export interface SubsystemPlan {
-  /** Where the numbers came from: the built graph, or a listing of the source tree. */
+  /** Where the file list came from: the built graph, or a listing of the source tree. */
   readonly source: "graph" | "tree";
+  /** What ranked the subsystems: recent Git activity, or size alone (no Git, or no history). */
+  readonly ranking: "activity" | "size";
   /** Indexed source files in the whole project (tests included); the target count scales with this. */
   readonly sourceFiles: number;
   readonly target: SubsystemTarget;
-  /** Ranked best first; about twice the target maximum, fewer when the repository has fewer areas. */
-  readonly candidates: readonly SubsystemCandidate[];
+  /** The subsystems to cover, in the order to cover them (best first), between the target minimum and maximum. */
+  readonly candidates: readonly PlannedSubsystem[];
 }
 
 /** Folders whose files never make a subsystem. Matched against any path segment, case-insensitively. */
@@ -71,20 +83,36 @@ const SOURCE_EXTENSIONS = new Set([
 
 /** A folder needs this many files to be proposed on its own. */
 const MIN_FOLDER_FILES = 3;
-/** Never descend below this many path segments when splitting a large folder. */
-const MAX_DEPTH = 4;
-/** A top-level folder is split into its children when they hold at least this share of its files. */
+/** A folder is split into its children only when they hold at least this share of its files. */
 const SPLIT_COVERAGE = 0.6;
-/** A folder holding more than this share of all files is split further even below the top level. */
-const DOMINANT_SHARE = 0.4;
+/** A folder with fewer files than this and no recent commits is not worth a place in the plan. */
+const PLAN_FLOOR_FILES = 5;
+/** Never descend below this many path segments; far deeper than any real module (bounds the recursion). */
+const MAX_DEPTH = 10;
 
-/** Bounds on the fallback listing and the graph read, so setup never stalls on a huge repository. */
+/**
+ * Folder names that mark non-product code. A candidate with one of these as a
+ * path segment keeps its place in the list but its score is multiplied by
+ * `LOW_VALUE_MULTIPLIER`, so real product areas rank above it. Nothing else is
+ * pushed down by guess (`enterprise`, `utils`, `helpers` stay as they are).
+ */
+export const LOW_VALUE_FOLDER_NAMES: ReadonlySet<string> = new Set([
+  "playground", "scripts", "tools", "tooling", "sandbox", "devtools", "bin", "config", "configs",
+]);
+export const LOW_VALUE_MULTIPLIER = 0.25;
+/** Weight of the file share against the activity share in the score; a tie-break only. */
+const SIZE_TIE_BREAK_WEIGHT = 0.1;
+
+/** Bounds on the fallback listing, the graph read and the Git reads, so setup never stalls on a huge repository. */
 export const SUBSYSTEM_LIMITS = Object.freeze({
   treeEntries: 40_000,
   treeDepth: 8,
   graphFiles: 200_000,
-  graphEdgeRows: 1_500_000,
   gitListBytes: 32 * 1024 * 1024,
+  gitLogCommits: 2000,
+  gitLogBytes: 32 * 1024 * 1024,
+  gitLogMonths: 12,
+  gitTimeoutMs: 15_000,
 });
 
 /** How many subsystems to cover, by the number of source files. */
@@ -92,6 +120,13 @@ export function subsystemTarget(sourceFiles: number): SubsystemTarget {
   if (sourceFiles < 300) return { min: 3, max: 4 };
   if (sourceFiles <= 3000) return { min: 5, max: 8 };
   return { min: 8, max: 12 };
+}
+
+/** The fact budget for the subsystem at `index` of `count`: top third 10-15, middle third 6-10, the rest 4-6. */
+export function factBudgetForRank(index: number, count: number): FactBudget {
+  if (index < Math.ceil(count / 3)) return { min: 10, max: 15 };
+  if (index < Math.ceil((2 * count) / 3)) return { min: 6, max: 10 };
+  return { min: 4, max: 6 };
 }
 
 function normalizePath(path: string): string {
@@ -109,8 +144,11 @@ export function isExcludedSourcePath(path: string): boolean {
 export interface SubsystemInputs {
   /** Every indexed or listed source file, repo-relative. */
   readonly files: readonly string[];
-  /** Distinct (from file, to file) dependency pairs; omit when no graph was read. */
-  readonly fileEdges?: ReadonlyArray<readonly [string, string]>;
+  /**
+   * The files changed by each recent commit (repo-relative).
+   * Omit when no history could be read; ranking then falls back to size.
+   */
+  readonly commits?: ReadonlyArray<readonly string[]>;
 }
 
 interface Unit {
@@ -143,76 +181,92 @@ function groupByFolder(files: readonly string[], depth: number): Map<string, str
 }
 
 /**
- * Split a folder into its qualifying children, descending through single-child
- * wrappers (`packages/core/src`), or keep it whole when it has no real parts.
+ * Replace a folder that holds more than `maxFiles` files by its qualifying
+ * children, recursively, until every part is small enough or has no real parts.
+ * A wrapper such as `src/` is looked through (its only child takes its place);
+ * files that stay behind in a split folder are an area of their own.
  */
-function expand(unit: Unit, depth: number, totalFiles: number): Unit[] {
-  if (depth >= MAX_DEPTH) return [unit];
+function expand(unit: Unit, depth: number, maxFiles: number): Unit[] {
+  if (unit.files.length <= maxFiles || depth >= MAX_DEPTH) return [unit];
   const children = [...groupByFolder(unit.files, depth + 1)]
     .filter(([, files]) => files.length >= MIN_FOLDER_FILES)
     .map(([path, files]): Unit => ({ path, files }));
   const covered = children.reduce((sum, child) => sum + child.files.length, 0);
-  const dominant = unit.files.length > totalFiles * DOMINANT_SHARE;
-  if (children.length === 1 && children[0]!.files.length >= unit.files.length * 0.8 && (depth < 2 || dominant)) {
-    // A wrapper such as `src/` or `lib/`: look through it, but only below the second level when the folder dominates.
-    return expand(children[0]!, depth + 1, totalFiles);
-  }
-  const worthSplitting = children.length >= 2 && covered >= unit.files.length * SPLIT_COVERAGE;
-  if (!worthSplitting || !dominant) return [unit];
-  const parts = children.flatMap((child) => expand(child, depth + 1, totalFiles));
-  // Files that stay behind (a `src/` that holds its core modules directly) are an area of their own.
-  const taken = new Set(parts.flatMap((part) => part.files));
+  if (children.length === 0 || covered < unit.files.length * SPLIT_COVERAGE) return [unit];
+  const parts = children.flatMap((child) => expand(child, depth + 1, maxFiles));
+  const taken = new Set(children.flatMap((child) => child.files));
   const rest = unit.files.filter((file) => !taken.has(file));
   if (rest.length >= MIN_FOLDER_FILES) parts.push({ path: unit.path, files: rest, remainder: true });
   return parts;
 }
 
+function isLowValuePath(path: string): boolean {
+  return path.toLowerCase().split("/").some((segment) => LOW_VALUE_FOLDER_NAMES.has(segment));
+}
+
 /**
- * Rank candidate subsystems. Pure: the graph or tree listing is read elsewhere.
+ * Plan the subsystems to cover. Pure and deterministic: the graph, tree listing
+ * and Git history are read elsewhere.
  *
- * Top-level folders become candidates. A folder holding a large share of the
- * repository (the `src/` wrapper, a `packages/` monorepo) is replaced by its
- * children, and any child that is still large is split again, so one area does
- * not swallow everything. Ranking is by size
- * plus twice the distinct outside files that depend on the folder.
+ * 1. Top-level folders are the first candidates. Any candidate holding more than
+ *    `source files / target minimum` files is replaced by its parts, at any depth.
+ * 2. Candidates are scored by their share of recent commits (plus a small share
+ *    of the file count as a tie-break). Without history the score is size alone.
+ *    Folders named in `LOW_VALUE_FOLDER_NAMES` score a quarter as much.
+ * 3. The best `target.max` are kept, skipping tiny folders with no recent
+ *    activity unless that would leave fewer than `target.min`.
+ * 4. Each kept subsystem gets a fact budget by rank.
  */
-export function rankSubsystemCandidates(inputs: SubsystemInputs): SubsystemPlan & { source: "graph" | "tree" } {
+export function rankSubsystemCandidates(inputs: SubsystemInputs): SubsystemPlan {
   const indexed = [...new Set(inputs.files.map(normalizePath))];
   const files = indexed.filter((file) => !isExcludedSourcePath(file)).sort();
   const total = files.length;
+  const target = subsystemTarget(indexed.length);
+  const maxFiles = Math.max(MIN_FOLDER_FILES, Math.floor(total / target.min));
   const top = [...groupByFolder(files, 1)]
     .filter(([, group]) => group.length >= MIN_FOLDER_FILES)
     .map(([path, group]): Unit => ({ path, files: group }));
   // A flat repository (everything in the root, or in one folder with no parts) has no real parts to propose.
-  const units = top.flatMap((unit) => expand(unit, 1, total));
+  const units = top.flatMap((unit) => expand(unit, 1, maxFiles));
 
-  const fanIn = new Map<string, number>();
-  if (inputs.fileEdges !== undefined) {
+  const history = inputs.commits !== undefined && inputs.commits.length > 0 ? inputs.commits : null;
+  const commitCount = new Map<string, number>();
+  if (history !== null) {
     const owner = new Map<string, string>();
-    for (const unit of units) for (const file of unit.files) owner.set(file, unit.remainder ? `${unit.path}\0` : unit.path);
-    const sources = new Map<string, Set<string>>();
-    for (const [from, to] of inputs.fileEdges) {
-      const target = owner.get(normalizePath(to));
-      if (target === undefined || owner.get(normalizePath(from)) === target) continue;
-      const set = sources.get(target) ?? new Set<string>();
-      set.add(normalizePath(from));
-      sources.set(target, set);
+    for (const unit of units) for (const file of unit.files) owner.set(file, unitKey(unit));
+    for (const changed of history) {
+      const touched = new Set<string>();
+      for (const file of changed) {
+        const key = owner.get(normalizePath(file));
+        if (key !== undefined) touched.add(key);
+      }
+      for (const key of touched) commitCount.set(key, (commitCount.get(key) ?? 0) + 1);
     }
-    for (const unit of units) fanIn.set(unitKey(unit), sources.get(unitKey(unit))?.size ?? 0);
   }
+  const totalCommits = [...commitCount.values()].reduce((sum, count) => sum + count, 0);
+  const byActivity = history !== null && totalCommits > 0;
+  const scored = units.map((unit) => {
+    const commits = history === null ? null : commitCount.get(unitKey(unit)) ?? 0;
+    const fileShare = total === 0 ? 0 : unit.files.length / total;
+    const base = byActivity ? (commits ?? 0) / totalCommits + SIZE_TIE_BREAK_WEIGHT * fileShare : fileShare;
+    return { unit, commits, score: base * (isLowValuePath(unit.path) ? LOW_VALUE_MULTIPLIER : 1) };
+  }).sort((a, b) => b.score - a.score || b.unit.files.length - a.unit.files.length
+    || a.unit.path.localeCompare(b.unit.path) || Number(a.unit.remainder === true) - Number(b.unit.remainder === true));
 
-  const hasGraph = inputs.fileEdges !== undefined;
-  const ranked = units
-    .map((unit): SubsystemCandidate => ({
-      path: unit.path, files: unit.files.length, fanIn: hasGraph ? fanIn.get(unitKey(unit)) ?? 0 : null,
-      ...(unit.remainder ? { remainder: true as const } : {}),
-    }))
-    .sort((a, b) => (b.files + 2 * (b.fanIn ?? 0)) - (a.files + 2 * (a.fanIn ?? 0)) || a.path.localeCompare(b.path) || Number(a.remainder === true) - Number(b.remainder === true));
-  const target = subsystemTarget(indexed.length);
-  return { source: hasGraph ? "graph" : "tree", sourceFiles: indexed.length, target, candidates: ranked.slice(0, target.max * 2) };
+  const worthIt = (entry: (typeof scored)[number]): boolean => entry.unit.files.length >= PLAN_FLOOR_FILES || (entry.commits ?? 0) > 0;
+  const chosen = scored.filter(worthIt).slice(0, target.max);
+  for (const entry of scored) {
+    if (chosen.length >= target.min) break;
+    if (!chosen.includes(entry)) chosen.push(entry);
+  }
+  const candidates = chosen.map(({ unit, commits }, index): PlannedSubsystem => ({
+    path: unit.path, files: unit.files.length, commits, ...(unit.remainder ? { remainder: true as const } : {}),
+    budget: factBudgetForRank(index, chosen.length),
+  }));
+  return { source: "tree", ranking: byActivity ? "activity" : "size", sourceFiles: indexed.length, target, candidates };
 }
 
-/** Indexed files and distinct file-to-file edges from the built graph; `null` when the graph cannot be read. */
+/** Indexed source file paths from the built graph; `null` when the graph cannot be read. */
 export function readGraphSubsystemInputs(projectRoot: string): SubsystemInputs | null {
   const databasePath = resolve(projectRoot, ".mex", "graph.db");
   if (!existsSync(databasePath)) return null;
@@ -221,13 +275,7 @@ export function readGraphSubsystemInputs(projectRoot: string): SubsystemInputs |
     database = openGraphDatabase(databasePath, { readOnly: true });
     const files = (database.prepare("SELECT path FROM files LIMIT ?").allArrays(SUBSYSTEM_LIMITS.graphFiles) as string[][])
       .map((row) => row[0]!);
-    if (files.length === 0) return null;
-    const fileEdges = database.prepare(
-      `SELECT DISTINCT s.file_path, t.file_path FROM edges e
-         JOIN nodes s ON s.id = e.source JOIN nodes t ON t.id = e.target
-        WHERE e.kind <> 'contains' AND s.file_path <> t.file_path LIMIT ?`,
-    ).allArrays(SUBSYSTEM_LIMITS.graphEdgeRows) as Array<[string, string]>;
-    return { files, fileEdges };
+    return files.length === 0 ? null : { files };
   } catch {
     return null;
   } finally {
@@ -244,7 +292,8 @@ function isSourceFile(path: string): boolean {
 function listFilesWithGit(projectRoot: string): string[] | null {
   try {
     const output = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
-      cwd: projectRoot, encoding: "utf8", maxBuffer: SUBSYSTEM_LIMITS.gitListBytes, timeout: 15_000, stdio: ["ignore", "pipe", "ignore"],
+      cwd: projectRoot, encoding: "utf8", maxBuffer: SUBSYSTEM_LIMITS.gitListBytes, timeout: SUBSYSTEM_LIMITS.gitTimeoutMs,
+      stdio: ["ignore", "pipe", "ignore"],
     });
     return output.split("\0").filter((path) => path !== "" && isSourceFile(path));
   } catch {
@@ -279,25 +328,76 @@ function walkSourceTree(projectRoot: string): string[] {
   return found;
 }
 
+export interface GitHistoryOptions {
+  /** Directory to run Git in (paths come back relative to it); defaults to the project root. */
+  readonly gitRoot?: string;
+  /** Commit to start from instead of HEAD. */
+  readonly revision?: string;
+  /** A Git date such as `2025-01-01` or `12 months ago`; defaults to twelve months back. */
+  readonly since?: string;
+}
+
+const COMMIT_MARK = "\u0001";
+
+/** Parse `git log --name-only` output whose commits are each introduced by a marker line. */
+export function parseGitCommitFiles(output: string): string[][] {
+  const commits: string[][] = [];
+  let current: string[] | null = null;
+  for (const line of output.split(/\r?\n/u)) {
+    if (line.startsWith(COMMIT_MARK)) {
+      current = [];
+      commits.push(current);
+    } else if (line !== "" && current !== null) {
+      current.push(line);
+    }
+  }
+  return commits.filter((files) => files.length > 0);
+}
+
 /**
- * The coverage plan for a project, or `null` when no source files can be found.
- * Never throws: setup must still produce a prompt when this cannot help.
+ * The files changed by each recent commit from one bounded `git log` call.
+ * `null` outside a usable repository, when Git fails, or when there is no
+ * history in the window, so ranking falls back to size.
  */
-export function computeSubsystemPlan(projectRoot: string): SubsystemPlan | null {
+export function readGitCommitFiles(projectRoot: string, options: GitHistoryOptions = {}): string[][] | null {
   try {
-    const graph = readGraphSubsystemInputs(projectRoot);
-    const inputs = graph ?? { files: listFilesWithGit(projectRoot) ?? walkSourceTree(projectRoot) };
-    const plan = rankSubsystemCandidates(inputs);
-    return plan.candidates.length === 0 ? null : plan;
+    const revision = options.revision;
+    if (revision !== undefined && (revision === "" || revision.startsWith("-"))) return null;
+    const args = [
+      "-c", "core.quotepath=false", "log", "--name-only", "--no-renames", "--relative", "--format=%x01",
+      "-n", String(SUBSYSTEM_LIMITS.gitLogCommits), `--since=${options.since ?? `${SUBSYSTEM_LIMITS.gitLogMonths} months ago`}`,
+      ...(revision === undefined ? [] : [revision]), "--",
+    ];
+    const output = execFileSync("git", args, {
+      cwd: options.gitRoot ?? projectRoot, encoding: "utf8", maxBuffer: SUBSYSTEM_LIMITS.gitLogBytes,
+      timeout: SUBSYSTEM_LIMITS.gitTimeoutMs, stdio: ["ignore", "pipe", "ignore"],
+    });
+    const commits = parseGitCommitFiles(output);
+    return commits.length === 0 ? null : commits;
   } catch {
     return null;
   }
 }
 
-/** The candidate table embedded in the prompt, one line per folder. */
+/**
+ * The coverage plan for a project, or `null` when no source files can be found.
+ * Never throws: setup must still produce a prompt when this cannot help.
+ */
+export function computeSubsystemPlan(projectRoot: string, options: GitHistoryOptions = {}): SubsystemPlan | null {
+  try {
+    const graph = readGraphSubsystemInputs(projectRoot);
+    const files = graph?.files ?? listFilesWithGit(projectRoot) ?? walkSourceTree(projectRoot);
+    const commits = readGitCommitFiles(projectRoot, options);
+    const plan = rankSubsystemCandidates({ files, ...(commits === null ? {} : { commits }) });
+    return plan.candidates.length === 0 ? null : { ...plan, source: graph === null ? "tree" : "graph" };
+  } catch {
+    return null;
+  }
+}
+
+/** The plan embedded in the prompt, one line per subsystem, in the order to cover them. */
 export function renderSubsystemCandidates(plan: SubsystemPlan): string {
-  const lines = plan.candidates.map((candidate, index) =>
-    `${String(index + 1).padStart(2)}. ${candidate.path}/${candidate.remainder ? " (its own files and small subfolders)" : ""} — ${candidate.files} files`
-    + (candidate.fanIn === null ? "" : `, fan-in ${candidate.fanIn}`));
-  return lines.join("\n");
+  return plan.candidates.map((candidate, index) =>
+    `${String(index + 1).padStart(2)}. ${candidate.path}/${candidate.remainder ? " (its own files and small subfolders)" : ""}`
+    + ` — ${candidate.files} files, ${candidate.budget.min} to ${candidate.budget.max} facts`).join("\n");
 }

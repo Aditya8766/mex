@@ -29,9 +29,10 @@ describe("buildSetupPopulationPrompt coverage target", () => {
     const root = project(sources);
     for (const brief of ["{}", null]) {
       const prompt = await buildSetupPopulationPrompt("code-repo", "existing", brief, root);
-      expect(prompt).toContain("src/billing/ — 6 files");
-      expect(prompt).toContain("src/search/ — 4 files");
-      expect(prompt).toContain("cover 3 to 4 major subsystems");
+      expect(prompt).toContain("src/billing/ — 6 files, 10 to 15 facts");
+      expect(prompt).toContain("src/search/ — 4 files, 6 to 10 facts");
+      expect(prompt).toContain("3 subsystems");
+      expect(prompt).toContain("MEX has fixed the plan below");
     }
   });
 

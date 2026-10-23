@@ -16,7 +16,7 @@ const PLAN: SubsystemPlan = rankSubsystemCandidates({
     ...Array.from({ length: 12 }, (_, i) => `src/http/h${i}.ts`),
     ...Array.from({ length: 6 }, (_, i) => `src/util/u${i}.ts`),
   ],
-  fileEdges: [["src/http/h0.ts", "src/router/r0.ts"], ["src/util/u0.ts", "src/router/r1.ts"]],
+  commits: [["src/router/r0.ts"], ["src/router/r1.ts", "src/http/h0.ts"]],
 });
 
 const EXISTING: ReadonlyArray<readonly [string, () => string]> = [
@@ -48,9 +48,14 @@ describe("population completion guidance", () => {
 describe.each(EXISTING)("%s prompt", (_name, build) => {
   const prompt = build();
 
-  it("teaches reading code with file tools and keeps graph commands optional", () => {
+  it("teaches reading code with file tools and offers no graph-query helper", () => {
     expect(prompt).toContain("Understand the code by reading it");
-    expect(prompt).toContain("optional helper");
+    expect(prompt).toContain("Do not use\nthe code graph to discover what code does");
+    expect(prompt).not.toContain("who-calls");
+    expect(prompt).not.toContain("where-defined");
+    expect(prompt).not.toContain("mex impact");
+    expect(prompt).not.toContain("optional helper");
+    expect(prompt).toContain("never copy or invent node ids or\nfingerprints");
     expect(prompt).toContain("READ BROAD, GROUND TIGHT");
     expect(prompt).not.toContain("Do not walk the source tree");
     expect(prompt).not.toContain("do NOT explore the filesystem");
@@ -84,8 +89,8 @@ describe.each(EXISTING)("%s prompt", (_name, build) => {
     expect(prompt).toContain("COMPLETE");
   });
 
-  it("asks for 8 to 15 facts per subsystem, an overview and a routing row, without padding", () => {
-    expect(prompt).toContain("8 to 15 facts");
+  it("asks for facts per subsystem, an overview and a routing row, without padding", () => {
+    expect(prompt).toMatch(/8 to 15 facts|within its fact budget/);
     expect(prompt).toContain("`type: component`");
     expect(prompt).toContain("routing row");
     expect(prompt).toContain("No padding");
@@ -107,21 +112,33 @@ describe.each(EXISTING)("%s prompt", (_name, build) => {
 });
 
 describe("coverage target in the prompt", () => {
-  it("embeds the ranked candidates and the target count", () => {
+  it("lists exactly the planned subsystems with budgets and says to cover them in order", () => {
     const prompt = buildExistingWithBriefPrompt("{}", PLAN);
     expect(prompt).toContain("about 48 indexed source files");
-    expect(prompt).toContain("cover 3 to 4 major subsystems");
-    expect(prompt).toContain(" 1. src/router/ — 30 files, fan-in 2");
-    expect(prompt).toContain(" 2. src/http/ — 12 files, fan-in 0");
-    expect(prompt).toContain("Confirm or adjust this list");
-    expect(prompt).toContain("code graph by size and fan-in");
+    expect(prompt).toContain("MEX has fixed the plan below");
+    expect(prompt).toContain("3 subsystems");
+    expect(prompt).toContain(" 1. src/router/ — 30 files, 10 to 15 facts");
+    expect(prompt).toContain(" 2. src/http/ — 12 files, 6 to 10 facts");
+    expect(prompt).toContain(" 3. src/util/ — 6 files, 4 to 6 facts");
+    expect(prompt).toContain("Cover exactly these, in this order, each within\nthe fact budget shown");
+    expect(prompt).toContain("recent Git activity");
+    expect(prompt).toContain("For each subsystem in the list, in the order listed");
+    expect(prompt).not.toContain("fan-in");
   });
 
-  it("says the list came from the source tree, without fan-in, when no graph was read", () => {
+  it("no longer asks the agent to confirm, merge, drop or add subsystems", () => {
+    const prompt = buildExistingWithBriefPrompt("{}", PLAN);
+    expect(prompt).not.toContain("Confirm or adjust");
+    expect(prompt).not.toContain("confirmed subsystem");
+    expect(prompt).not.toContain("split or add");
+    expect(prompt).toContain("Do not add, drop, merge or split subsystems");
+  });
+
+  it("says the plan was ranked by size when there is no Git history", () => {
     const tree = rankSubsystemCandidates({ files: Array.from({ length: 5 }, (_, i) => `core/c${i}.ts`) });
     const section = buildCoverageSection(tree);
-    expect(section).toContain("from the source tree by size");
-    expect(section).toContain(" 1. core/ — 5 files");
+    expect(section).toContain("ranked by size, because there is no usable Git history");
+    expect(section).toContain(" 1. core/ — 5 files, 10 to 15 facts");
     expect(section).not.toContain("fan-in");
   });
 
@@ -132,9 +149,9 @@ describe("coverage target in the prompt", () => {
     }
   });
 
-  it("scales the stated target with the plan", () => {
+  it("scales the number of planned subsystems with the project size", () => {
     const large = rankSubsystemCandidates({ files: Array.from({ length: 12 }, (_, i) => Array.from({ length: 300 }, (_, j) => `m${i}/f${j}.ts`)).flat() });
-    expect(buildCoverageSection(large)).toContain("cover 8 to 12 major subsystems");
+    expect(buildCoverageSection(large)).toContain("12 subsystems");
   });
 });
 

@@ -20,11 +20,9 @@ const ALIAS_GUIDANCE = ALIAS_AUTHORING_GUIDANCE;
 const KNOWLEDGE_WORKFLOW = `
 HOW TO WORK — read code with your normal file tools
 
-Understand the code by reading it: list folders, search, open files. The code
-graph at .mex/graph.db is only an optional helper for questions such as who
-calls a function: \`mex graph query who-calls <symbol>\`, \`mex graph query
-where-defined <symbol>\`, \`mex impact <symbol|file>\`. Do not use it to discover
-what code does, and never copy or invent node ids or fingerprints.
+Understand the code by reading it: list folders, search, open files. Do not use
+the code graph to discover what code does, and never copy or invent node ids or
+fingerprints.
 
 Run one \`mex\` command per shell call. Never join commands with \`&&\`, \`;\` or a
 pipe: the host refuses compound commands. Run \`mex --help\`, \`mex wiki --help\` or
@@ -95,27 +93,27 @@ succeeds, do not apply that file again. Leave \`grounds_to: []\` in file
 frontmatter; groundings belong on facts.
 `;
 
-function subsystemSteps(): string {
+function subsystemSteps(planned: boolean): string {
   return `
-For each confirmed subsystem, in order:
+For each ${planned ? "subsystem in the list, in the order listed" : "confirmed subsystem, in order"}:
 1. Read its code: entry points, the files other code depends on, error and
    edge-case branches.
 2. Write \`.mex/context/<slug>.md\`: frontmatter (name, description, triggers,
    edges, last_updated, \`type: component\`) and one short overview (purpose,
    responsibilities, main entry points, how it connects to other subsystems).
    Behavior claims go in facts, not in the overview.
-3. Write that subsystem's 8 to 15 facts as one operation file (split above
+3. Write that subsystem's ${planned ? "facts, within its fact budget from the list," : "8 to 15 facts"} as one operation file (split above
    about 20) and apply it with one call.
 4. Add a routing row for the file to \`.mex/ROUTER.md\`.
 5. Update the progress file (below).
 
-No padding: if a subsystem has fewer real behaviors worth a fact, write fewer
+No padding: if a subsystem has fewer real behaviors worth a fact${planned ? " than its budget minimum" : ""}, write fewer
 and say so in the progress file. Quality of facts matters more than count.
 
 PROGRESS FILE: before you write any facts, create \`${SETUP_PROGRESS_FILE}\` (ignored
-by Git) listing every confirmed subsystem, one per line, such as
+by Git) listing every ${planned ? "subsystem in the list" : "confirmed subsystem"}, one per line, such as
 \`- [ ] src/router/ -> context/router.md — todo\`. After each subsystem change its
-line to \`done, <n> facts\` (add the reason if you wrote fewer than 8). Re-read this
+line to \`done, <n> facts\` (add the reason if you wrote fewer than ${planned ? "its budget minimum" : "8"}). Re-read this
 file whenever you are unsure what is already done, for example after your
 context was compacted, and continue with the first subsystem that is not done.
 When every subsystem is done and the final steps below are finished, add a last
@@ -132,27 +130,21 @@ COVERAGE — cover the whole project, not the first files you read
 Choose the major subsystems yourself from the folder layout, ignoring tests,
 fixtures, generated, vendored and docs folders. How many depends on size: under
 300 source files, 3 to 4; up to 3,000, 5 to 8; more, 8 to 12.
-${subsystemSteps()}`;
+${subsystemSteps(false)}`;
   }
-  const { min, max } = plan.target;
-  const count = `${min} to ${max}`;
-  const basis = plan.source === "graph"
-    ? "the code graph by size and fan-in (distinct outside files that depend on the folder)"
-    : "the source tree by size";
+  const basis = plan.ranking === "activity"
+    ? "recent Git activity (commits touching each folder), then size"
+    : "size, because there is no usable Git history";
   return `
 COVERAGE — cover the whole project, not the first files you read
 
-This project has about ${plan.sourceFiles} indexed source files, so cover ${count} major subsystems.
-MEX ranked these candidate folders (tests, fixtures, generated, vendored and
-docs code excluded) from ${basis}:
+This project has about ${plan.sourceFiles} indexed source files. MEX has fixed the plan below:
+${plan.candidates.length} subsystems (tests, fixtures, generated, vendored and docs code
+excluded), ranked by ${basis}. Cover exactly these, in this order, each within
+the fact budget shown. Do not add, drop, merge or split subsystems.
 
 ${renderSubsystemCandidates(plan)}
-
-Confirm or adjust this list: drop or merge folders that are not real subsystems
-(utilities, glue, configuration), split or add one that is, and settle on
-${count} in total. Make sure the entry points and the most depended-on areas
-are included.
-${subsystemSteps()}`;
+${subsystemSteps(true)}`;
 }
 
 const POPULATION_MERGE_RULES = `
