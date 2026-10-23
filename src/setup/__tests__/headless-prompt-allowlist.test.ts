@@ -14,14 +14,34 @@ import {
   buildExistingWithBriefPrompt,
   buildFreshPrompt,
 } from "../prompts.js";
+import type { SubsystemPlan } from "../subsystems.js";
 
 /** Every prompt `buildSetupPopulationPrompt` can hand to the headless population agent. */
+const PLAN: SubsystemPlan = {
+  source: "graph",
+  sourceFiles: 120,
+  target: { min: 3, max: 4 },
+  candidates: [{ path: "src/router", files: 30, fanIn: 12 }, { path: "src/http", files: 20, fanIn: 4 }],
+};
 const HEADLESS_PROMPTS: ReadonlyArray<readonly [string, () => string]> = [
   ["fresh", buildFreshPrompt],
-  ["existing with brief", () => buildExistingWithBriefPrompt("{}")],
-  ["existing without brief", buildExistingNoBriefPrompt],
+  ["existing with brief", () => buildExistingWithBriefPrompt("{}", PLAN)],
+  ["existing with brief, no candidates", () => buildExistingWithBriefPrompt("{}", null)],
+  ["existing without brief", () => buildExistingNoBriefPrompt(PLAN)],
+  ["existing without brief, no candidates", () => buildExistingNoBriefPrompt(null)],
   ["agent memory", buildAgentMemoryPrompt],
 ];
+
+/**
+ * Named in the closing "Finish" paragraph only, as something to do after the
+ * agent returns; the agent is told not to run it itself.
+ */
+const FINISH_ONLY_COMMANDS = new Set(["mex setup"]);
+
+function withoutFinish(prompt: string): string {
+  const index = prompt.lastIndexOf("Finish:");
+  return index === -1 ? prompt : prompt.slice(0, index);
+}
 
 /**
  * The `mex <command> [<subcommand>]` invocations a prompt names, resolved against
@@ -29,8 +49,13 @@ const HEADLESS_PROMPTS: ReadonlyArray<readonly [string, () => string]> = [
  */
 function namedMexCommands(prompt: string): string[] {
   const found = new Set<string>();
-  for (const match of prompt.matchAll(/\bmex\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/g)) {
+  if (/\bmex --help\b/.test(prompt)) found.add("mex --help");
+  for (const match of prompt.matchAll(/\bmex\s+([a-z][a-z-]*)(?:\s+(--help|[a-z][a-z-]*))?/g)) {
     const top = program.commands.find((command) => command.name() === match[1]);
+    if (top !== undefined && match[2] === "--help") {
+      found.add(`mex ${top.name()} --help`);
+      continue;
+    }
     if (top === undefined) continue;
     const sub = match[2] === undefined ? undefined : top.commands.find((command) => command.name() === match[2]);
     found.add(sub === undefined ? `mex ${top.name()}` : `mex ${top.name()} ${sub.name()}`);
@@ -46,30 +71,36 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-const FINISH_ONLY_COMMANDS = new Set(["mex setup"]);
-function withoutFinish(prompt: string): string {
-  const index = prompt.lastIndexOf("Finish:");
-  return index === -1 ? prompt : prompt.slice(0, index);
-}
-
 describe("headless Claude allowlist against the prompts it serves", () => {
   it.each(HEADLESS_PROMPTS)("permits every mex command the %s prompt tells the agent to run", (_name, build) => {
     const prompt = build();
-    const body = withoutFinish(prompt);
-    for (const command of namedMexCommands(body)) {
+    for (const command of namedMexCommands(withoutFinish(prompt))) {
       expect(isHeadlessClaudeMexCommandAllowed(command), `${command} is named by the prompt but denied headless`).toBe(true);
     }
-    // A person runs these after the agent returns; the agent is never told to.
-    for (const command of namedMexCommands(prompt)) {
-      if (FINISH_ONLY_COMMANDS.has(command)) expect(namedMexCommands(body), `${command} must only appear in the Finish paragraph`).not.toContain(command);
+    for (const command of namedMexCommands(prompt).filter((named) => FINISH_ONLY_COMMANDS.has(named))) {
+      expect(withoutFinish(prompt)).not.toContain(command);
     }
+  });
+
+  it("permits every --help form the prompts name, and the validate self-check", () => {
+    const helpForms = new Set<string>();
+    for (const [, build] of HEADLESS_PROMPTS) {
+      for (const match of build().matchAll(/`(mex(?: [a-z][a-z-]*)* --help)`/g)) helpForms.add(match[1]!);
+    }
+    expect([...helpForms].sort()).toEqual(["mex --help", "mex wiki --help", "mex wiki apply --help"]);
+    for (const form of helpForms) expect(isHeadlessClaudeMexCommandAllowed(form), form).toBe(true);
+    expect(isHeadlessClaudeMexCommandAllowed("mex wiki validate")).toBe(true);
+    expect(isHeadlessClaudeMexCommandAllowed("mex wiki apply .mex/local/setup-ops/router.json --apply")).toBe(true);
+    // Compound commands are the host's to refuse; the prompt says to run one command per call.
+    expect(buildExistingWithBriefPrompt("{}", PLAN)).toContain("Run one `mex` command per shell call");
   });
 
   it("does not let the cross-check pass vacuously", () => {
     const named = new Set(HEADLESS_PROMPTS.flatMap(([, build]) => namedMexCommands(build())));
     expect([...named]).toEqual(expect.arrayContaining([
-      "mex graph scope", "mex graph get", "mex graph query", "mex impact", "mex wiki apply", "mex wiki link-sections",
+      "mex graph query", "mex impact", "mex wiki apply", "mex wiki validate",
     ]));
+    expect(named).not.toContain("mex wiki link-sections");
     expect(namedMexCommands("run `mex wiki apply op.json --apply`, then mex setup")).toEqual(["mex setup", "mex wiki apply"]);
     expect(namedMexCommands("a mex scaffold at mex://node")).toEqual([]);
   });
@@ -84,9 +115,10 @@ describe("headless Claude allowlist against the prompts it serves", () => {
   it("allows only commands that exist, as narrow prefixes", () => {
     for (const command of HEADLESS_CLAUDE_MEX_COMMANDS) {
       const [, top, sub] = command.split(" ");
+      if (top === "--help") continue;
       const topCommand = program.commands.find((candidate) => candidate.name() === top);
       expect(topCommand, `${command} is not a mex command`).toBeDefined();
-      if (sub !== undefined) expect(topCommand!.commands.map((candidate) => candidate.name())).toContain(sub);
+      if (sub !== undefined && sub !== "--help") expect(topCommand!.commands.map((candidate) => candidate.name())).toContain(sub);
     }
     for (const shell of ["Bash", "PowerShell"]) {
       for (const command of HEADLESS_CLAUDE_MEX_COMMANDS) expect(HEADLESS_CLAUDE_ALLOWED_TOOLS).toContain(`${shell}(${command}:*)`);

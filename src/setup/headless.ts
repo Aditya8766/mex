@@ -279,7 +279,7 @@ export async function runHeadlessSetup(
     });
   }
 
-  const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief);
+  const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot);
   options.onPopulationPrompt?.(prompt);
   report("population");
 
