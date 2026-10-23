@@ -109,7 +109,7 @@ describe.each(EXISTING)("%s prompt", (_name, build) => {
 describe("coverage target in the prompt", () => {
   it("embeds the ranked candidates and the target count", () => {
     const prompt = buildExistingWithBriefPrompt("{}", PLAN);
-    expect(prompt).toContain("about 48 source files");
+    expect(prompt).toContain("about 48 indexed source files");
     expect(prompt).toContain("cover 3 to 4 major subsystems");
     expect(prompt).toContain(" 1. src/router/ — 30 files, fan-in 2");
     expect(prompt).toContain(" 2. src/http/ — 12 files, fan-in 0");

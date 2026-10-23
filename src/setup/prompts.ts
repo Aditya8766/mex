@@ -147,9 +147,9 @@ ${subsystemSteps()}`;
   return `
 COVERAGE — cover the whole project, not the first files you read
 
-This project has about ${plan.sourceFiles} source files (tests, fixtures, generated,
-vendored and docs code excluded), so cover ${count} major subsystems. MEX ranked
-these candidate folders from ${basis}:
+This project has about ${plan.sourceFiles} indexed source files, so cover ${count} major subsystems.
+MEX ranked these candidate folders (tests, fixtures, generated, vendored and
+docs code excluded) from ${basis}:
 
 ${renderSubsystemCandidates(plan)}
 

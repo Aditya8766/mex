@@ -101,7 +101,25 @@ describe("rankSubsystemCandidates", () => {
     ];
     const plan = rankSubsystemCandidates({ files });
     expect(plan.candidates.map((c) => c.path)).toEqual(["src/auth"]);
-    expect(plan.sourceFiles).toBe(6);
+    // The target scales with every indexed file; only the proposed folders are filtered.
+    expect(plan.sourceFiles).toBe(new Set(files).size);
+  });
+
+  it("sizes the target by indexed files, tests included", () => {
+    const files = [...filesIn("src/core", 40), ...filesIn("test/core", 300)];
+    const plan = rankSubsystemCandidates({ files });
+    expect(plan.sourceFiles).toBe(340);
+    expect(plan.target).toEqual({ min: 5, max: 8 });
+    expect(plan.candidates.map((c) => c.path)).toEqual(["src/core"]);
+  });
+
+  it("proposes a dominant folder's own files beside its subfolders", () => {
+    const files = [...filesIn("src", 8), ...filesIn("src/router", 20), ...filesIn("src/jsx", 12), ...filesIn("src/tiny", 1), ...filesIn("docs-site", 3)];
+    const plan = rankSubsystemCandidates({ files, fileEdges: [["docs-site/file0.ts", "src/file0.ts"], ["src/router/file0.ts", "src/file1.ts"]] });
+    const own = plan.candidates.find((c) => c.remainder === true)!;
+    expect(own).toMatchObject({ path: "src", files: 9, fanIn: 2 });
+    expect(plan.candidates.find((c) => c.path === "src/router")).toMatchObject({ files: 20, fanIn: 0 });
+    expect(renderSubsystemCandidates(plan)).toContain("src/ (its own files and small subfolders) — 9 files");
   });
 
   it("drops folders below the minimum size and files directly in the root", () => {
