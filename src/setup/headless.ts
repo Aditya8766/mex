@@ -120,6 +120,8 @@ export interface HeadlessSetupResult {
   readonly commitCommands: string[];
   readonly anchorNotes: string[];
   readonly message: string;
+  /** What finalization changed or left for review (dropped references, drifted facts); already part of `message`. */
+  readonly groundingNotice?: string;
 }
 
 const STEP_LABELS: Record<SetupProgressStep, string> = {
@@ -343,6 +345,12 @@ export async function runHeadlessSetup(
     throwIfSetupAborted(options.signal);
   }
 
+  const groundingNotice = [
+    finalized.dropped.length
+      ? `Dropped references: ${finalized.dropped.slice(0, 3).map(f => `${f.file} → ${f.node}`).join("; ")}${finalized.dropped.length > 3 ? `; and ${finalized.dropped.length - 3} more` : ""}.`
+      : "",
+    describeGroundingDrift(finalized.drift),
+  ].filter(Boolean).join(" ");
   const status = inspectSetupStatus(projectRoot);
   return {
     mode,
@@ -355,10 +363,9 @@ export async function runHeadlessSetup(
     populationCompleted: populationFinished,
     commitCommands: mode === "code-repo" ? setupCommitCheckpointCommands(selectedTools) : [],
     anchorNotes,
+    ...(groundingNotice ? { groundingNotice } : {}),
     message: mode === "code-repo"
-      ? "Graph and Wiki are ready. Review and commit the canonical MEX setup."
-        + (finalized.dropped.length ? ` Dropped references: ${finalized.dropped.slice(0, 5).map(f => `${f.file} → ${f.node}`).join("; ")}${finalized.dropped.length > 5 ? `; and ${finalized.dropped.length - 5} more` : ""}.` : "")
-        + (finalized.drift ? ` ${describeGroundingDrift(finalized.drift)}` : "")
+      ? "Graph and Wiki are ready. Review and commit the canonical MEX setup." + (groundingNotice ? ` ${groundingNotice}` : "")
       : "Setup complete.",
   };
 }
