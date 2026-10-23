@@ -139,8 +139,8 @@ ${subsystemSteps(false)}`;
 COVERAGE — cover the whole project, not the first files you read
 
 This project has about ${plan.sourceFiles} indexed source files. MEX has fixed the plan below:
-${plan.candidates.length} subsystems (tests, fixtures, generated, vendored and docs code
-excluded), ranked by ${basis}. Cover exactly these, in this order, each within
+${plan.candidates.length} subsystems (tests, fixtures, generated, vendored and docs code excluded),
+ranked by ${basis}. Cover exactly these, in this order, each within
 the fact budget shown. Do not add, drop, merge or split subsystems.
 
 ${renderSubsystemCandidates(plan)}
