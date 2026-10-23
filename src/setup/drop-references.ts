@@ -1,14 +1,22 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import YAML from "yaml";
 import { replaceGroundingDocument, type GroundingBaselineFailure } from "../graph/runtime.js";
 import { GRAPH_CORPUS_LIMITS } from "../graph/corpus-policy.js";
 import { parseDocument, type YamlRegion } from "../wiki/markdown/parse.js";
 import { applyEdits, type PatchEdit } from "../wiki/markdown/patch.js";
+import { SetupFinalizationError } from "./index.js";
+import { entityBlockGroundings } from "../wiki/grounding/document-reader.js";
 
 /** Delete only selected sequence items and link syntax; never render a YAML store. */
-export function dropReferenceText(content: string, nodes: ReadonlySet<string>): string {
+export function preserveKey(entity: string | null, node: string): string { return `${entity ?? ""}\0${node}`; }
+
+/**
+ * `preserve` lists (entity, node) pairs that are recorded knowledge and must
+ * stay even when the same node is being removed elsewhere in the file.
+ */
+export function dropReferenceText(content: string, nodes: ReadonlySet<string>, preserve: ReadonlySet<string> = new Set()): string {
   const parsed = parseDocument(content);
   const edits: PatchEdit[] = [];
   const regions: YamlRegion[] = [
@@ -18,10 +26,13 @@ export function dropReferenceText(content: string, nodes: ReadonlySet<string>): 
   for (const region of regions) {
     const doc = YAML.parseDocument(region.text);
     if (doc.errors.length) continue; // malformed metadata belongs to the repair turn
+    const ownerValue: unknown = region.text === parsed.frontmatter?.text ? doc.getIn(["mex", "id"]) : doc.get("id");
+    const owner = typeof ownerValue === "string" ? ownerValue : null;
     for (const path of [["grounds_to"], ["mex", "grounds_to"]]) {
       const seq = doc.getIn(path, true);
       if (!YAML.isSeq(seq) || !seq.range) continue;
-      const selected = seq.items.map(item => YAML.isMap(item) && nodes.has(String(item.get("node"))));
+      const selected = seq.items.map(item => YAML.isMap(item) && nodes.has(String(item.get("node")))
+        && !preserve.has(preserveKey(owner, String(item.get("node")))));
       if (!selected.some(Boolean)) continue;
       const add = (start: number, end: number, text = "") => edits.push({ start: region.innerStart + start, end: region.innerStart + end, text, label: "unverifiable grounding" });
       if (selected.every(Boolean)) {
@@ -54,6 +65,7 @@ export function dropReferenceText(content: string, nodes: ReadonlySet<string>): 
   }
   for (const link of parsed.links) {
     if (!nodes.has(link.nodeId)) continue;
+    if ([...preserve].some(key => key.endsWith(`\0${link.nodeId}`))) continue;
     const raw = content.slice(link.start, link.end);
     const label = raw.startsWith("<") && raw.endsWith(">")
       ? raw.slice(1, -1) : /^\[([\s\S]*)\]\s*\(/.exec(raw)?.[1];
@@ -63,18 +75,64 @@ export function dropReferenceText(content: string, nodes: ReadonlySet<string>): 
   return applyEdits(content, edits).text;
 }
 
-export function dropSetupReferences(projectRoot: string, mexDir: string, failures: readonly GroundingBaselineFailure[]): void {
+/**
+ * Remove references the graph cannot verify. Only `new` failures are ever
+ * removed: a drift entry is recorded knowledge, and is left byte for byte as written.
+ *
+ * Every document is checked and rewritten in memory first, so a document that
+ * cannot be edited safely stops the pass before any file changes. Each failure
+ * names the file and the next step, and a rerun of setup picks up from the files.
+ */
+export function dropSetupReferences(projectRoot: string, mexDir: string, all: readonly GroundingBaselineFailure[]): string[] {
+  const failures = all.filter(f => f.kind === "new");
+  const notices: string[] = [];
   const config = { projectRoot, scaffoldRoot: mexDir, aiTools: [] };
+  const stop = (message: string): never => { throw new SetupFinalizationError(message); };
+  const pending: { path: string; content: string; next: string }[] = [];
   for (const file of new Set(failures.map(f => f.file))) {
+    const nodes = failures.filter(f => f.file === file).map(f => f.node);
     const path = resolve(projectRoot, file);
-    if (statSync(path).size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) throw new Error("Grounding document exceeds the bounded read limit.");
-    const content = readFileSync(path, "utf8");
+    let content: string;
+    try {
+      if (statSync(path).size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) {
+        stop(`${file} is too large for setup to edit. Remove the unverifiable reference ${nodes[0]} by hand, then rerun \`mex setup\`.`);
+      }
+      content = readFileSync(path, "utf8");
+    } catch (error) {
+      if (error instanceof SetupFinalizationError) throw error;
+      return stop(`${file} could not be read to remove the unverifiable reference ${nodes[0]} (${error instanceof Error ? error.message : String(error)}). Restore or fix the file, then rerun \`mex setup\`.`);
+    }
     const digest = createHash("sha256").update(content).digest("hex");
     if (failures.some(f => f.file === file && f.contentHash !== undefined && f.contentHash !== digest)) {
-      throw new Error("Grounding document changed after verification; retry setup.");
+      stop(`${file} was edited while setup was checking it, so nothing was removed from it. Rerun \`mex setup\`.`);
     }
-    const next = dropReferenceText(content, new Set(failures.filter(f => f.file === file).map(f => f.node)));
-    if (content === next) throw new Error("Unverifiable references changed before removal; retry setup.");
-    replaceGroundingDocument(config, path, content, next, GRAPH_CORPUS_LIMITS.maxSourceFileBytes);
+    let next: string;
+    const preserve = new Set(all.filter(f => f.kind === "drift" && f.file === file).map(f => preserveKey(f.entity, f.node)));
+    try { next = dropReferenceText(content, new Set(nodes), preserve); }
+    catch (error) {
+      return stop(`Setup could not safely remove the unverifiable reference ${nodes[0]} from ${file} (${error instanceof Error ? error.message : String(error)}). Delete that grounds_to entry or mex:// link by hand, then rerun \`mex setup\`.`);
+    }
+    if (content === next) {
+      stop(`Setup could not find the unverifiable reference ${nodes[0]} in ${file} to remove it. Delete that grounds_to entry or mex:// link by hand (or fix its YAML), then rerun \`mex setup\`.`);
+    }
+    // A block fact left with no code grounding keeps its prose; say so.
+    const removed = new Map<string, Set<string>>();
+    for (const f of failures.filter(f => f.file === file && f.entity)) removed.set(f.entity!, (removed.get(f.entity!) ?? new Set()).add(f.node));
+    const before = new Map(entityBlockGroundings(content).reduce<[string, string[]][]>((all2, e) => { const hit = all2.find(([id]) => id === e.entity); if (hit) hit[1].push(e.grounding.node); else all2.push([e.entity, [e.grounding.node]]); return all2; }, []));
+    const after = new Set(entityBlockGroundings(next).map(e => e.entity));
+    for (const [entity, gone] of removed) {
+      const had = before.get(entity);
+      if (had && !after.has(entity) && had.every(n => gone.has(n))) {
+        notices.push(`Warning: ${file}: entity ${entity} now has no code grounding; its text was kept. Ground it again with mex wiki apply, or leave it as plain knowledge.`);
+      }
+    }
+    pending.push({ path, content, next });
   }
+  for (const { path, content, next } of pending) {
+    try { replaceGroundingDocument(config, path, content, next, GRAPH_CORPUS_LIMITS.maxSourceFileBytes); }
+    catch (error) {
+      stop(`${relative(projectRoot, path).replaceAll("\\", "/")} changed while setup was removing unverifiable references (${error instanceof Error ? error.message : String(error)}). Rerun \`mex setup\`.`);
+    }
+  }
+  return notices;
 }
