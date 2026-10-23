@@ -46,10 +46,22 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+const FINISH_ONLY_COMMANDS = new Set(["mex setup"]);
+function withoutFinish(prompt: string): string {
+  const index = prompt.lastIndexOf("Finish:");
+  return index === -1 ? prompt : prompt.slice(0, index);
+}
+
 describe("headless Claude allowlist against the prompts it serves", () => {
   it.each(HEADLESS_PROMPTS)("permits every mex command the %s prompt tells the agent to run", (_name, build) => {
-    for (const command of namedMexCommands(build())) {
+    const prompt = build();
+    const body = withoutFinish(prompt);
+    for (const command of namedMexCommands(body)) {
       expect(isHeadlessClaudeMexCommandAllowed(command), `${command} is named by the prompt but denied headless`).toBe(true);
+    }
+    // A person runs these after the agent returns; the agent is never told to.
+    for (const command of namedMexCommands(prompt)) {
+      if (FINISH_ONLY_COMMANDS.has(command)) expect(namedMexCommands(body), `${command} must only appear in the Finish paragraph`).not.toContain(command);
     }
   });
 
