@@ -473,7 +473,9 @@ function resolveSetupStage(input: {
 /** One line for the progress view: subsystems done, skipped and in progress. */
 export function describeCoverage(coverage: SetupCoverageProgress): string {
   if (coverage.phase === "shared") return `Filling the shared files before ${coverage.total} subsystem sessions`;
-  if (coverage.phase === "final") return `${coverage.done}/${coverage.total} subsystems done; writing patterns, routing rows and edges`;
+  if (coverage.phase === "final") {
+    return `${coverage.done}/${coverage.total} subsystems done${coverage.skipped > 0 ? `, ${coverage.skipped} skipped` : ""}; writing patterns, routing rows and edges`;
+  }
   const running = coverage.subsystems.filter((entry) => entry.state === "running").map((entry) => `${entry.path}/`);
   return `${coverage.done}/${coverage.total} subsystems done`
     + (coverage.skipped > 0 ? `, ${coverage.skipped} skipped` : "")

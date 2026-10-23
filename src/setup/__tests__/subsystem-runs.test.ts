@@ -407,3 +407,13 @@ describe("one session per subsystem", () => {
     expect(h.launches.map((entry) => entry.kind)).not.toContain("final");
   });
 });
+
+describe("the progress line", () => {
+  it("says what is done, skipped and running in every phase", async () => {
+    const { describeCoverage } = await import("../headless.js");
+    const subsystems = [{ path: "src/a", state: "done" as const }, { path: "src/b", state: "skipped" as const }, { path: "src/c", state: "running" as const }];
+    expect(describeCoverage({ phase: "shared", total: 3, done: 0, skipped: 0, subsystems })).toBe("Filling the shared files before 3 subsystem sessions");
+    expect(describeCoverage({ phase: "subsystems", total: 3, done: 1, skipped: 1, subsystems })).toBe("1/3 subsystems done, 1 skipped · working on src/c/");
+    expect(describeCoverage({ phase: "final", total: 3, done: 1, skipped: 1, subsystems })).toBe("1/3 subsystems done, 1 skipped; writing patterns, routing rows and edges");
+  });
+});
