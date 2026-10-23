@@ -4,16 +4,33 @@ import { appendFileSync } from "node:fs";
  * Opt-in per-phase wall-clock timing for graph maintenance.
  *
  * Disabled unless `MEX_GRAPH_PHASE_TIMINGS` names a file. When enabled, each
- * flush appends one JSON line of accumulated phase totals to that file. Nothing
- * is ever printed, and no path or source content enters a record: phase names
- * are fixed labels and values are milliseconds or counts.
+ * flush appends one JSON line of accumulated phase totals to that file. A flag
+ * value such as `1` or `true` is not a path: timings stay off and one warning is
+ * printed, instead of writing to a file named `1` in the working directory.
+ * Nothing else is printed, and no path or source content enters a record: phase
+ * names are fixed labels and values are milliseconds or counts.
  */
 const PHASE_TIMINGS_ENV = "MEX_GRAPH_PHASE_TIMINGS";
+const FLAG_VALUES = new Set(["1", "true", "yes", "on"]);
 
 const totals = new Map<string, number>();
+let warnedAboutFlagValue = false;
+
+function timingsPath(): string | undefined {
+  const value = process.env[PHASE_TIMINGS_ENV];
+  if (value === undefined || value === "") return undefined;
+  if (FLAG_VALUES.has(value.trim().toLowerCase())) {
+    if (!warnedAboutFlagValue) {
+      warnedAboutFlagValue = true;
+      process.stderr.write(`mex: ${PHASE_TIMINGS_ENV} must name a file, not "${value}"; phase timings are off.\n`);
+    }
+    return undefined;
+  }
+  return value;
+}
 
 function enabled(): boolean {
-  return typeof process.env[PHASE_TIMINGS_ENV] === "string" && process.env[PHASE_TIMINGS_ENV] !== "";
+  return timingsPath() !== undefined;
 }
 
 export function recordGraphPhase(phase: string, milliseconds: number): void {
@@ -43,14 +60,15 @@ export async function timeGraphPhaseAsync<T>(phase: string, run: () => Promise<T
 
 /** Append the accumulated totals under one fixed label, then reset them. */
 export function flushGraphPhaseTimings(label: string): void {
-  if (!enabled()) {
+  const path = timingsPath();
+  if (path === undefined) {
     totals.clear();
     return;
   }
   const phases = Object.fromEntries([...totals.entries()].map(([phase, ms]) => [phase, Math.round(ms * 10) / 10]));
   totals.clear();
   try {
-    appendFileSync(process.env[PHASE_TIMINGS_ENV]!, `${JSON.stringify({ label, pid: process.pid, phases })}\n`);
+    appendFileSync(path, `${JSON.stringify({ label, pid: process.pid, phases })}\n`);
   } catch {
     // Diagnostics must never change the outcome of a maintenance operation.
   }
