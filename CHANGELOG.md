@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
 - `mex graph refresh` no longer fails validation on a dangling edge when a cached compiler capture points at a declaration outside the indexed files; the edge is dropped, or kept as an unresolved reference, and the file records a diagnostic. Full builds keep their strict validation.
 - A graph build no longer fails with "Lexical environment is suspended" on a getter nested inside another getter's type literal.
 - Graph builds of large monorepos use bounded memory: each compiler project is released when it finishes, parsed-source reuse is capped, and a type that would print without limit is truncated (and counted) instead of exhausting the heap. Output that fits the budget is unchanged. Building also stops creating compiler projects once every source file has an owner.
+- `mex graph query who-calls` and `mex impact` no longer let test callers crowd out real ones. Production results come first in both, and while any non-test result exists, results from test files are left out; the summary reports how many as `omittedTestNodes` and suggests the same command with the new `--include-tests` flag. A target in a test file keeps its test results, and a target only tests call still shows them. On Hono, `mex impact compose` returned one production caller and six test callbacks; it now returns all three direct production callers and their callers, and counts the 31 test results (#289).
+- Call results carry `callLine`, the first line of the call in the caller's file, so a long caller is located by its call rather than by a span such as lines 1486–54200. A fact record for a declaration longer than 200 lines reports `lineStart` and `lineCount` instead of `lineEnd` (#289).
+- Source from a checkout with CRLF line endings no longer carries a carriage return on every line; one Hono scope call had 292, each escaped in the JSON (#289).
+- In source detail, `mex graph scope` counts nodes returned only as source in `returnedNodes`, which reported 0 while returning 12 declarations (#289).
 - Headless Claude setup can run `mex wiki apply` and `mex wiki link-sections`, which the population prompt asks for. Before, both were denied, so the agent wrote operation files that nothing applied and the Wiki finished with no code-linked facts.
 - Background population during setup is stopped only after 15 minutes without any output, instead of on a fixed time limit.
 - Setup finalization names each grounding reference it could not verify (file, entity, node id and reason) instead of only a count.
@@ -20,6 +24,7 @@ All notable changes to this project will be documented in this file.
 
 ### Compatibility
 
+- Graph JSONL output (protocol v3, unchanged version): summaries no longer include `sourceBackedNodes`, which repeated node ids already in the source records; summaries of `graph query` and `impact` may include `omittedTestNodes`; call results may include `callLine`; and fact records for declarations over 200 lines carry `lineCount` in place of `lineEnd`. Pass `--include-tests` to restore test-file results (#289).
 - `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) are new diagnostic codes in `mex graph status` output; the status value and exit code are unchanged. Graph schemas are unchanged (#205).
 - The bare graph summary adds `operation` (`unchanged`, `refresh` or `rebuild`) and refresh work counts when applicable. A fresh graph reports zero files indexed (#208).
 
