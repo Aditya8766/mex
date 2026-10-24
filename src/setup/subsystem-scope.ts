@@ -21,7 +21,7 @@ const GIT_STATUS_BYTES = 8 * 1024 * 1024;
 
 type Snapshot = Map<string, string>;
 
-/** Canonical `.mex/` files, keyed `.mex/<path>`: everything but `local/` and the derived databases. */
+/** Canonical `.mex/` files, keyed `.mex/<path>`: everything but `local/` and the derived databases and their sidecars (`graph.db-audit.json`). */
 function snapshotScaffold(projectRoot: string): Snapshot {
   const snapshot: Snapshot = new Map();
   const mexDir = resolve(projectRoot, ".mex");
@@ -35,7 +35,7 @@ function snapshotScaffold(projectRoot: string): Snapshot {
       if (entry.isDirectory()) {
         if (relative === "" && entry.name === "local") continue;
         visit(path);
-      } else if (entry.isFile() && !/\.db(?:-[a-z]+)?$/iu.test(entry.name) && !/\.db\.|\.tmp$/iu.test(entry.name)) {
+      } else if (entry.isFile() && !/\.db(?:$|[-.])/iu.test(entry.name) && !/\.tmp$/iu.test(entry.name)) {
         snapshot.set(`.mex/${path}`, fileStamp(resolve(mexDir, path)));
       }
       if (snapshot.size >= MAX_WATCHED_FILES) return;
