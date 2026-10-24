@@ -11,7 +11,7 @@ import {
 } from "./coverage.js";
 import type { GraphEdge, GraphNode } from "./types.js";
 import {
-  compactFact, groupByFile, planFileSource, readNodeSource, selectScope, sourceHash,
+  compactFact, groupByFile, planFileSource, readNodeSource, selectScope, sourceHash, splitSourceLines,
   type CompactFact, type DetailLevel, type RankedScopeFile, type ScopedCandidate, type SourceRange,
 } from "./scope.js";
 import {
@@ -1172,7 +1172,7 @@ function graphGetFullSourceBudget(opts: AgentOptions, fullSource: Rec): number {
 }
 
 function readNodeSourceBuffer(node: GraphNode, source: string, maxLines: number): SourceRange {
-  const lines = source.split("\n");
+  const lines = splitSourceLines(source);
   const body = lines.slice(node.startLine - 1, node.endLine);
   const truncated = maxLines > 0 && body.length > maxLines;
   const kept = truncated ? body.slice(0, maxLines) : body;
@@ -2856,7 +2856,7 @@ function liveStaleFallbacks(
   const out: RankedScopeFile[] = [];
   for (const filePath of staleFiles) {
     let lines: string[];
-    try { lines = readFileSync(resolve(rootDir, filePath), "utf-8").split("\n"); }
+    try { lines = splitSourceLines(readFileSync(resolve(rootDir, filePath), "utf-8")); }
     catch { continue; }
     const matched = terms.filter((term) => lines.some((line) => line.toLowerCase().includes(term)));
     if (matched.length === 0) continue;

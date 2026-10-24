@@ -239,6 +239,40 @@ describe("runGraphScope", () => {
     expect(joined).toContain("helper");
   });
 
+  it("renders source from a CRLF checkout without carriage returns (#289)", async () => {
+    const isolated = mkdtempSync(join(tmpdir(), "mex-scope-crlf-"));
+    writeFileSync(join(isolated, "crlf.ts"), [
+      "export function parseRoute(path: string): string[] {",
+      "  return path.split(\"/\");",
+      "}",
+      "export function matchRoute(path: string): boolean {",
+      "  return parseRoute(path).length > 0;",
+      "}",
+      "",
+    ].join("\r\n"));
+    const isolatedEngine = createGraphEngine({ rootDir: isolated });
+    await isolatedEngine.build(isolated);
+    const db = openSqlite(join(isolated, ".mex", "graph.db"));
+    const isolatedDeps: AgentCommandDeps = {
+      open: () => ({ graph: isolatedEngine, db, close: () => {} }), write: (line) => lines.push(line),
+    };
+    try {
+      const scoped = capture(() => runGraphScope("match route", isolated, isolatedDeps, {}));
+      const id = (scoped.find((r) => r.type === "source")!.ranges as SourceRange[])[0]!.nodeIds[0]!;
+      const fetched = capture(() => runGraphGet([id], isolated, isolatedDeps));
+      for (const records of [scoped, fetched]) {
+        const sources = records.filter((r) => r.type === "source");
+        expect(sources.length).toBeGreaterThan(0);
+        expect(JSON.stringify(sources)).toContain("parseRoute");
+        expect(JSON.stringify(sources)).not.toContain("\\r");
+      }
+    } finally {
+      db.close();
+      isolatedEngine.close();
+      rmSync(isolated, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an output-token budget too small for honest protocol framing", () => {
     const records = capture(() => runGraphScope("run", root, deps, { maxOutputTokens: 60 }));
     expect(records).toHaveLength(1);
