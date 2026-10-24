@@ -785,6 +785,7 @@ describe("no unscoped scaffold writes", () => {
       "src/setup/headless-population.ts": "creates and removes only its own byte-exact Cursor permission file while background sessions run; never a user's file",
       "src/setup/ignore.ts": "creates or appends only the setup-managed .mex/.gitignore rules",
       "src/setup/next.ts": "writes the checkout-local one-paste task files, plan view and call lock under .mex/local; never Wiki Markdown",
+      "src/setup/subsystem-links.ts": "writes setup navigation from finished batches: frontmatter edges, marker-bounded ROUTER and pattern INDEX rows, and new pattern files it never overwrites",
       "src/setup/subsystem-runs.ts": "writes the checkout-local plan progress view and marks applied batch files under .mex/local; never Wiki Markdown",
       "src/setup/subsystem-state.ts": "atomically saves the checkout-local setup plan state under .mex/local and sets a corrupt one aside",
       "src/setup/unfinished.ts": "adds or removes only its own marker-bounded setup notice in root instruction files that already point to MEX, never .mex/",

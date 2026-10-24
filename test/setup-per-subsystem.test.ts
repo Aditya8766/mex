@@ -12,7 +12,7 @@ import { runHeadlessSetup } from "../src/setup/headless.js";
 import type { HeadlessPopulationOptions } from "../src/setup/headless-population.js";
 import type { SetupCoverageProgress } from "../src/setup/subsystem-runs.js";
 import { checkBatchFile } from "../src/setup/subsystem-apply.js";
-import { SETUP_PLAN_STATE_FILE, loadPlanState } from "../src/setup/subsystem-state.js";
+import { SETUP_PLAN_STATE_FILE, loadPlanState, unitBatchFile } from "../src/setup/subsystem-state.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -208,7 +208,8 @@ describe("per-subsystem setup on a real graph", () => {
     await expect(runHeadlessSetup({ projectRoot: root, tools: ["claude"], perSubsystem: { env: { MEX_SETUP_PER_SUBSYSTEM: "1" }, launch: stopAfterShared, parallelRuns: 1 } }))
       .rejects.toThrow(/could not authenticate.*rerun `mex setup` to continue/su);
     const stored = loadPlanState(root).state!;
-    expect(stored.shared.state).toBe("done");
+    // The shared batch may still be waiting for the graph when the stop lands; it is on disk either way.
+    expect(stored.shared.state === "done" || existsSync(join(root, unitBatchFile("shared")))).toBe(true);
     // A new folder would change a freshly computed plan; the stored one is kept.
     mkdirSync(join(root, "src", "delta"));
     for (const name of ["one", "two", "three", "four", "five"]) writeFileSync(join(root, "src", "delta", `${name}.ts`), `export const ${name} = 1;\n`);
@@ -221,15 +222,15 @@ describe("per-subsystem setup on a real graph", () => {
     expect(loadPlanState(root).state!.plan).toEqual(stored.plan);
 
     // An unreadable stored plan is set aside with a notice and replaced; the batches
-    // already on disk replay, so only the final pass runs a session again.
+    // already on disk replay, so no earlier unit runs a session again.
     writeFileSync(join(root, SETUP_PLAN_STATE_FILE), "{ not json");
     const messages: string[] = [];
     const third = simulatedAgent(root);
     const replaced = await runHeadlessSetup({ projectRoot: root, tools: ["claude"], perSubsystem: { env: { MEX_SETUP_PER_SUBSYSTEM: "1" }, launch: third.launch }, onMessage: (message) => messages.push(message) });
     expect(replaced.ready).toBe(true);
     expect(messages.some((message) => message.startsWith("Warning: The stored setup plan (.mex/local/setup-plan.json) could not be used because it is not valid JSON"))).toBe(true);
-    // The new plan also has the folder added since; only it and the final pass need a session.
-    expect(third.prompts.map((prompt) => prompt.slice(0, 40))).toEqual(["You are writing the MEX knowledge for on", "You are finishing an AI context scaffold"]);
+    // The new plan also has the folder added since; only it needs a session.
+    expect(third.prompts.map((prompt) => prompt.slice(0, 40))).toEqual(["You are writing the MEX knowledge for on"]);
     expect(third.prompts[0]).toContain("- Code: src/delta/");
     expect(loadPlanState(root).state!.subsystems.every((unit) => unit.state === "done")).toBe(true);
     expect(readdirSync(join(root, ".mex", "local")).some((name) => name.startsWith("setup-plan.json.unreadable-"))).toBe(true);

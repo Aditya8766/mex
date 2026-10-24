@@ -1,6 +1,6 @@
 /**
- * Setup's batch applies prove graph freshness once, hold nothing between
- * applies, and prove again when the graph database or HEAD changes.
+ * Setup's batch applies prove each batch's freshness, hold nothing between
+ * applies, and report when the graph database or HEAD changed mid-phase.
  */
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -50,7 +50,7 @@ function batch(root: string, name: string): string {
 }
 
 describe("setup batch applies and graph freshness", () => {
-  it("proves once, holds nothing between applies, and proves again after a rebuild or a new HEAD", async () => {
+  it("proves every batch, holds nothing between applies, and reports a rebuild or a new HEAD", async () => {
     const root = await project();
     const loadFull = vi.fn(loadFreshGraphReadSession);
     const freshness = createSetupGraphFreshness(root, { loadFull });
@@ -59,7 +59,8 @@ describe("setup batch applies and graph freshness", () => {
 
     expect(await applier.apply(batch(root, "alpha"), scope("alpha"))).toMatchObject({ kind: "applied", facts: 1 });
     expect(await applier.apply(batch(root, "beta"), scope("beta"))).toMatchObject({ kind: "applied", facts: 1 });
-    expect([freshness.fullProofs, freshness.quickChecks, loadFull.mock.calls.length]).toEqual([1, 1, 1]);
+    expect(loadFull).toHaveBeenCalledTimes(2);
+    expect(freshness.changed).toBe(false);
     expect(readFileSync(join(root, ".mex/context/beta.md"), "utf8")).toContain("beta trims its input");
 
     // Nothing is held between applies: a full rebuild replaces the database in place.
@@ -67,30 +68,30 @@ describe("setup batch applies and graph freshness", () => {
     await createRepositoryGraphPort(root).rebuild();
     expect(graphIdentity(root)).not.toBe(before);
     expect(await applier.apply(batch(root, "gamma"), scope("gamma"))).toMatchObject({ kind: "applied", facts: 1 });
-    expect([freshness.fullProofs, loadFull.mock.calls.length]).toEqual([2, 2]);
+    expect(loadFull).toHaveBeenCalledTimes(3);
+    expect(freshness.changed).toBe(true);
 
-    // A new HEAD also needs a new proof (the graph records the commit it indexed).
+    // A new HEAD is proved like any other batch (the graph records the commit it indexed).
     git(root, "commit", "--allow-empty", "-qm", "next");
     const afterHead = await applier.apply(batch(root, "delta"), scope("delta"));
-    expect(freshness.fullProofs).toBe(3);
+    expect(loadFull).toHaveBeenCalledTimes(4);
     expect(afterHead).toMatchObject({ kind: "applied", facts: 1 });
 
     expect(await applier.close()).toEqual({ changed: true });
   }, 180_000);
 
-  it("re-proves when the database file changes even with the same HEAD", async () => {
+  it("reports a database file change even with the same HEAD", async () => {
     const root = await project();
     const freshness = createSetupGraphFreshness(root);
     const applier = createSetupBatchApplier(root, { freshness });
-    await applier.apply(batch(root, "alpha"), { opIdPrefix: "setup_alpha_", files: ["context/alpha.md"] });
+    expect(await applier.apply(batch(root, "alpha"), { opIdPrefix: "setup_alpha_", files: ["context/alpha.md"] })).toMatchObject({ kind: "applied" });
+    expect(freshness.changed).toBe(false);
     // Another writer touches the database (here: a no-op write transaction that still rewrites the file).
     const { openGraphDatabase } = await import("../src/graph/db/database.js");
     const db = openGraphDatabase(join(root, ".mex", "graph.db"));
     db.exec("CREATE TABLE IF NOT EXISTS setup_probe (x); DROP TABLE setup_probe;");
     db.close();
-    await applier.apply(batch(root, "beta"), { opIdPrefix: "setup_beta_", files: ["context/beta.md"] });
-    expect(freshness.fullProofs).toBe(2);
-    expect(freshness.quickChecks).toBe(0);
+    expect(await applier.apply(batch(root, "beta"), { opIdPrefix: "setup_beta_", files: ["context/beta.md"] })).toMatchObject({ kind: "applied" });
     expect(await applier.close()).toEqual({ changed: true });
   }, 180_000);
 });
