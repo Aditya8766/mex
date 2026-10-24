@@ -1,3 +1,4 @@
+import { committedReferenceLookup, type GroundingDocumentReader, type GroundingFailureKind } from "./grounding-failures.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -56,7 +57,21 @@ export interface GroundingRuntime {
   close(): void;
 }
 
+export interface GroundingBaselineFailure {
+  file: string;
+  node: string;
+  reason: string;
+  entity: string | null;
+  /** `new` may be repaired or dropped by setup; `drift` is recorded knowledge whose code changed and is never touched by it. */
+  kind: GroundingFailureKind;
+  contentHash?: string;
+}
+
 export interface GroundingBaselineCaptureResult {
+  /** Bounded exact failures; omitted when there are none. Additional failures are returned by the next capture after dropping a batch. */
+  failures?: GroundingBaselineFailure[];
+  /** Exact number of unverifiable references that are drift (a subset of `skipped`), however many `failures` the bound kept. */
+  driftCount?: number;
   captured: number;
   skipped: number;
 }
@@ -65,6 +80,8 @@ export interface GroundingBaselineCaptureOptions {
   /** Renew only these explicitly reviewed entries, after revalidating their exact facts. */
   acceptedGroundings?: readonly GroundingBaselineAcceptance[];
   warn?: (message: string) => void;
+  /** Wiki structure (block-entity groundings, entity ownership); supplied by the Wiki. */
+  documentReader?: GroundingDocumentReader;
 }
 
 /** An in-process review bound to one document revision and one exact graph fact. */
@@ -85,6 +102,8 @@ export interface GroundingBaselineReview {
 
 const GROUNDING_REVIEW_MAX_BYTES = 64 * 1024;
 const GROUNDING_REVIEW_MAX_ENTRIES = 64;
+/** Most failures of each kind one capture reports. */
+const GROUNDING_FAILURE_BOUND = 1024;
 
 export interface ReadOnlyGroundingRuntimeResult {
   graphStatus: GraphStatus;
@@ -729,12 +748,30 @@ export function refreshGroundingBaselines(
   }
   let captured = 0;
   let skipped = 0;
+  const failures: GroundingBaselineFailure[] = [];
+  let driftCount = 0;
+  const kept = { new: 0, drift: 0 };
+  // Each kind has its own bound, so a mass of drifted facts cannot hide a new mistake.
+  const failed = (file: string, node: string, reason: string, entity: string | null, contentHash: string, kind: GroundingFailureKind) => {
+    if (kind === "drift") driftCount += 1;
+    if (kept[kind] < GROUNDING_FAILURE_BOUND) {
+      kept[kind] += 1;
+      failures.push({ file, node, reason, entity, kind, contentHash });
+    }
+  };
   for (const filePath of scaffoldFiles) {
     const readLimit = accepted === undefined ? GRAPH_CORPUS_LIMITS.maxSourceFileBytes : GROUNDING_REVIEW_MAX_BYTES;
     const content = readBoundedText(filePath, readLimit);
     const groundings = extractGroundings(content);
     const anchors = findMexAnchors(content);
-    if (groundings.length === 0 && anchors.length === 0) continue;
+    // Block entities keep their groundings in their own metadata; they are
+    // verified, never captured or rewritten here (the Wiki owns their baselines).
+    const reader = options.documentReader;
+    const blockGroundings = accepted === undefined ? reader?.blockGroundings(content) ?? [] : [];
+    if (groundings.length === 0 && anchors.length === 0 && blockGroundings.length === 0) continue;
+    const entityFor = reader?.failureEntities(content) ?? (() => null);
+    const committed = committedReferenceLookup(config.projectRoot, filePath, reader);
+    const contentHash = hashText(content);
     const scaffoldFile = relative(config.projectRoot, filePath).replaceAll("\\", "/");
     let dirty = false;
     const pendingBaselines: GroundedSource[] = [];
@@ -749,6 +786,14 @@ export function refreshGroundingBaselines(
       if (accepted !== undefined && acceptance === undefined) continue;
       const grounding = groundingByNode.get(nodeId);
       const previous = runtime.fingerprints.getGroundedSource(scaffoldFile, nodeId);
+      // Recorded knowledge is never an authoring mistake: a body or code hash
+      // in the Markdown, a cached baseline, or the reference already being in
+      // the committed file. A bare fingerprint does not count, since setup
+      // agents copy one from the graph into every reference they write.
+      let kindCache: GroundingFailureKind | undefined;
+      const kindOf = (): GroundingFailureKind => kindCache ??= grounding?.bodyHash !== undefined
+        || grounding?.codeHash !== undefined || previous !== null || committed(nodeId) !== false
+        ? "drift" : "new";
       if (accepted === undefined && grounding && grounding.bodyHash === undefined && previous) {
         // Legacy backfill preserves the historical baseline, even if code has changed.
         grounding.bodyHash = previous.bodyHash;
@@ -758,6 +803,7 @@ export function refreshGroundingBaselines(
       const node = runtime.graph.getNode(nodeId);
       if (!fingerprint || node?.id !== nodeId || !node.bodyHash) {
         skipped += 1;
+        failed(scaffoldFile, nodeId, "Node is unavailable or has no verifiable body.", entityFor(nodeId), contentHash, kindOf());
         options.warn?.(`Skipped grounding baseline for unavailable node ${nodeId} in ${scaffoldFile}.`);
         continue;
       }
@@ -769,6 +815,7 @@ export function refreshGroundingBaselines(
           || !sameFingerprint(acceptance.fingerprint, serialized)
           || acceptance.bodyHash !== node.bodyHash) {
           skipped += 1;
+          failed(scaffoldFile, nodeId, "Grounding review changed; explicit review is required.", entityFor(nodeId), contentHash, kindOf());
           options.warn?.(`Grounding review changed for ${nodeId} in ${scaffoldFile}; review it again.`);
           continue;
         }
@@ -777,6 +824,7 @@ export function refreshGroundingBaselines(
         if ((grounding && !sameFingerprint(grounding.fingerprint, serialized))
           || (baselineHash !== undefined && baselineHash !== node.bodyHash)) {
           skipped += 1;
+          failed(scaffoldFile, nodeId, "Fingerprint or body baseline differs from the current graph; explicit review is required.", entityFor(nodeId), contentHash, kindOf());
           options.warn?.(`Preserved changed grounding ${nodeId} in ${scaffoldFile}; explicit review is required.`);
           continue;
         }
@@ -787,6 +835,7 @@ export function refreshGroundingBaselines(
       const baseline = currentBaseline(config, scaffoldFile, nodeId, serialized, runtime);
       if (baseline === null) {
         skipped += 1;
+        failed(scaffoldFile, nodeId, "Node has no verifiable source body.", entityFor(nodeId), contentHash, kindOf());
         options.warn?.(`Skipped grounding baseline for non-body node ${nodeId} in ${scaffoldFile}.`);
         continue;
       }
@@ -811,6 +860,29 @@ export function refreshGroundingBaselines(
         }
       }
     }
+    for (const { entity, grounding: block } of blockGroundings) {
+      const node = runtime.graph.getNode(block.node);
+      const fingerprint = runtime.reconciler.getFingerprint(block.node);
+      const baseline = runtime.fingerprints.getBaseline({ kind: "entity", id: entity }, block.node);
+      let reason: string | null = null;
+      if (!fingerprint || node?.id !== block.node || !node.bodyHash) reason = "Node is unavailable or has no verifiable body.";
+      else {
+        const baselineHash = block.bodyHash ?? baseline?.bodyHash;
+        if (!sameFingerprint(block.fingerprint, serializeFingerprint(fingerprint))
+          || (baselineHash !== undefined && baselineHash !== node.bodyHash)) {
+          reason = "Fingerprint or body baseline differs from the current graph; explicit review is required.";
+        }
+      }
+      if (reason === null) continue;
+      if (failures.some((f) => f.file === scaffoldFile && f.node === block.node && f.entity === entity)) continue;
+      skipped += 1;
+      const kind: GroundingFailureKind = block.bodyHash !== undefined || block.codeHash !== undefined
+        || baseline !== null || committed(block.node) !== false ? "drift" : "new";
+      failed(scaffoldFile, block.node, reason, entity, contentHash, kind);
+      options.warn?.(kind === "drift"
+        ? `Preserved changed grounding ${block.node} of entity ${entity} in ${scaffoldFile}; explicit review is required.`
+        : `Skipped unverifiable grounding ${block.node} of entity ${entity} in ${scaffoldFile}.`);
+    }
     if (readBoundedText(filePath, readLimit) !== content) {
       skipped += pendingBaselines.length;
       options.warn?.(`Grounding document ${scaffoldFile} changed during capture; review it again.`);
@@ -826,7 +898,10 @@ export function refreshGroundingBaselines(
       options.warn?.(`Grounding document ${scaffoldFile} changed before publication; review it again.`);
       continue;
     }
-    if (dirty) replaceGroundingDocument(config, filePath, content, writeGroundings(content, groundings), readLimit);
+    const published = dirty ? writeGroundings(content, groundings) : content;
+    if (dirty) replaceGroundingDocument(config, filePath, content, published, readLimit);
+    const publishedHash = hashText(published);
+    for (const failure of failures) if (failure.file === scaffoldFile) failure.contentHash = publishedHash;
     // Markdown is authoritative. A failed document publication leaves its old
     // cache untouched; a cache failure after publication cannot erase history.
     for (const baseline of pendingBaselines) {
@@ -837,7 +912,7 @@ export function refreshGroundingBaselines(
     }
     captured += pendingBaselines.length;
   }
-  return { captured, skipped };
+  return { captured, skipped, ...(driftCount ? { driftCount } : {}), ...(failures.length ? { failures } : {}) };
 }
 
 /** Produce a bounded review from current graph facts without changing a baseline. */

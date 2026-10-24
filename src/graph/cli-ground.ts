@@ -6,6 +6,7 @@ import type { MexConfig } from "../types.js";
 import { AI_TOOLS } from "../types.js";
 import { isCliAvailable } from "../cli-tools.js";
 import { runToolInteractive } from "../sync/index.js";
+import type { GroundingDocumentReader } from "./grounding-failures.js";
 import { captureGroundingBaselines } from "./runtime.js";
 
 export interface GroundMigrationOptions {
@@ -16,6 +17,8 @@ export interface GroundMigrationDeps {
   runAgent?: (prompt: string, cwd: string) => boolean;
   write?: (line: string) => void;
   confirmAuthored?: () => Promise<boolean>;
+  /** Wiki structure for baseline capture; the CLI passes the Wiki's reader in. */
+  documentReader?: GroundingDocumentReader;
 }
 
 /** Prompt for agent-authored, prose-preserving migration of pre-0.7 scaffolds. */
@@ -101,6 +104,7 @@ export async function runGraphGround(
   const runAgent = deps.runAgent ?? configuredAgent(config);
   if (runAgent && runAgent(prompt, config.projectRoot)) {
     const result = await captureGroundingBaselines(config, {
+      documentReader: deps.documentReader,
       warn: (message) => write(`Warning: ${message}`),
     });
     if (result.captured > 0) write(`Captured ${result.captured} grounding baseline(s).`);
@@ -113,6 +117,7 @@ export async function runGraphGround(
   const confirmAuthored = deps.confirmAuthored ?? confirmManualMigration;
   if (await confirmAuthored()) {
     const result = await captureGroundingBaselines(config, {
+      documentReader: deps.documentReader,
       warn: (message) => write(`Warning: ${message}`),
     });
     if (result.captured > 0) write(`Captured ${result.captured} grounding baseline(s).`);

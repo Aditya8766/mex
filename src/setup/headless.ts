@@ -13,6 +13,7 @@ import { AGENT_SKILL_TARGETS, OFFICIAL_MEX_SKILLS } from "../agent-skills/types.
 import { SetupError, classifySetupFileSystemError } from "./errors.js";
 import { classifySetupAgentAssetsError } from "./agent-errors.js";
 import type { GraphMaintenanceProgress } from "../team/contracts/graph.js";
+import { describeGroundingDrift } from "../graph/grounding-failures.js";
 import { launchHeadlessSetupPopulation, type HeadlessPopulationActivity, type HeadlessPopulationTranscript } from "./headless-population.js";
 import {
   detectProjectState,
@@ -119,6 +120,8 @@ export interface HeadlessSetupResult {
   readonly commitCommands: string[];
   readonly anchorNotes: string[];
   readonly message: string;
+  /** What finalization changed or left for review (dropped references, drifted facts); already part of `message`. */
+  readonly groundingNotice?: string;
 }
 
 const STEP_LABELS: Record<SetupProgressStep, string> = {
@@ -327,16 +330,27 @@ export async function runHeadlessSetup(
     };
   }
 
+  let finalized: import("./finalize-repair.js").SetupFinalizeOutcome = { dropped: [], drift: null };
   if (mode === "code-repo") {
     report("finalize");
     throwIfSetupAborted(options.signal);
-    await finalizeCodeRepoSetup(projectRoot, mexDir, {
+    finalized = await finalizeCodeRepoSetup(projectRoot, mexDir, {
+      selectedTools: options.confirmPopulation ? [] : selectedTools,
+      populate: options.populate,
+      onActivity: options.onPopulationActivity,
+      onTranscript: options.onPopulationTranscript,
       signal: options.signal,
       onMessage: options.onMessage,
     });
     throwIfSetupAborted(options.signal);
   }
 
+  const groundingNotice = [
+    finalized.dropped.length
+      ? `Dropped references: ${finalized.dropped.slice(0, 3).map(f => `${f.file} → ${f.node}`).join("; ")}${finalized.dropped.length > 3 ? `; and ${finalized.dropped.length - 3} more` : ""}.`
+      : "",
+    describeGroundingDrift(finalized.drift),
+  ].filter(Boolean).join(" ");
   const status = inspectSetupStatus(projectRoot);
   return {
     mode,
@@ -349,8 +363,9 @@ export async function runHeadlessSetup(
     populationCompleted: populationFinished,
     commitCommands: mode === "code-repo" ? setupCommitCheckpointCommands(selectedTools) : [],
     anchorNotes,
+    ...(groundingNotice ? { groundingNotice } : {}),
     message: mode === "code-repo"
-      ? "Graph and Wiki are ready. Review and commit the canonical MEX setup."
+      ? "Graph and Wiki are ready. Review and commit the canonical MEX setup." + (groundingNotice ? ` ${groundingNotice}` : "")
       : "Setup complete.",
   };
 }

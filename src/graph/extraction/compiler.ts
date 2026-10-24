@@ -21,7 +21,7 @@ import {
   sep,
 } from "node:path";
 import ts from "typescript";
-import { recordGraphPhase, timeGraphPhase } from "../phase-timing.js";
+import { flushGraphPhaseTimings, recordGraphPhase, timeGraphPhase } from "../phase-timing.js";
 
 // v3 (#240): checker-rendered signatures no longer embed absolute module paths.
 // v4 (#209): checker-rendered unions list their members in one canonical order.
@@ -537,6 +537,9 @@ export function buildTypeScriptExtraction(
   /** Internal construction observer; no source identity crosses this seam. */
   onFileCaptured?: (completed: number) => void,
 ): CompilerExtractionResult {
+  reportedRenderTruncations = 0;
+  recordGraphPhase("compiler.truncatedRenders", 0);
+  recordGraphPhase("compiler.renderFallbacks", 0);
   const root = resolve(rootDir);
   const inputs = new CompilerInputLedger(root, options);
   const candidates = collectCandidates(root, candidateFiles, inputs);
@@ -770,11 +773,14 @@ export function buildTypeScriptExtraction(
   };
 
   for (const project of processingOrder) {
+    // Later projects cannot contribute facts once every candidate has an owner.
+    // Avoid constructing another program and checker for those empty projects.
+    if (candidates.length > 0 && claimed.size === candidates.length) break;
     // Program creation parses every root file; a single malformed source (e.g.
     // a hostile test fixture) can hit a TS-internal assertion. Isolate the
     // failure to this project so its files fall back to tree-sitter extraction
     // instead of aborting the whole corpus (issue #140 follow-up finding).
-    let program: ts.Program;
+    let program: ts.Program | undefined;
     const programStarted = performance.now();
     try {
       program = createProgram({
@@ -786,6 +792,7 @@ export function buildTypeScriptExtraction(
         host: inputs.compilerHost({ ...project.parsed.options, skipLibCheck: true, noEmit: true }),
       });
     } catch {
+      inputs.releaseProjectSources();
       crashedProjects.add(project);
       // Poison only files no healthier, more specific project has already
       // extracted — a crash cannot retroactively un-stage a good extraction.
@@ -799,19 +806,25 @@ export function buildTypeScriptExtraction(
     }
     const owned = candidates.filter((file) => {
       if (claimed.has(file) || poisonedFiles.has(file)) return false;
-      try { return program.getSourceFile(file) !== undefined; }
+      try { return program!.getSourceFile(file) !== undefined; }
       catch { return false; }
     });
     for (const file of owned) claimed.add(file);
-    timeGraphPhase("compiler.capture", () => processProject(project, program, owned));
-    // program goes out of scope here — the peak-memory point of the old
-    // implementation (every program + checker alive simultaneously) is gone.
+    try {
+      timeGraphPhase("compiler.capture", () => processProject(project, program!, owned));
+    } finally {
+      // V8 can keep the loop's captured context on the stack through the
+      // inferred and finishing passes. Scope exit alone does not release it.
+      program = undefined;
+      inputs.releaseProjectSources();
+    }
   }
 
   // Files from a crashed project stay out of the inferred program too — the
   // poison root file would crash it as well. They fall back to tree-sitter.
   const uncovered = candidates.filter((file) => !claimed.has(file) && !poisonedFiles.has(file));
   let inferredProject: ParsedProject | undefined;
+  let inferredProgram: ts.Program | undefined;
   if (uncovered.length > 0) {
     const inferredOptions: ts.CompilerOptions = {
       allowJs: true,
@@ -825,7 +838,7 @@ export function buildTypeScriptExtraction(
       ...options.inferredCompilerOptions,
     };
     try {
-      const program = timeGraphPhase("compiler.program", () => createProgram({
+      inferredProgram = timeGraphPhase("compiler.program", () => createProgram({
         rootNames: uncovered,
         options: inferredOptions,
         host: inputs.compilerHost(inferredOptions),
@@ -840,13 +853,16 @@ export function buildTypeScriptExtraction(
         },
         diagnostics: [],
       };
-      timeGraphPhase("compiler.capture", () => processProject(inferredProject!, program, uncovered));
+      timeGraphPhase("compiler.capture", () => processProject(inferredProject!, inferredProgram!, uncovered));
     } catch (error) {
       // An incremental refresh that must extract in full says so; it is not
       // a poisoned root, and extracting these files with tree-sitter would
       // publish a graph a full extraction never produces.
       if (error instanceof CompilerIncrementalFallback) throw error;
       // Poison among the uncovered roots: leave them all to tree-sitter.
+    } finally {
+      inferredProgram = undefined;
+      inputs.releaseProjectSources();
     }
   }
 
@@ -896,6 +912,7 @@ export function buildTypeScriptExtraction(
   }
 
   recordGraphPhase("compiler.finish", performance.now() - finishStarted);
+  flushGraphPhaseTimings("compiler.extract");
 
   const summaryProjects: ParsedProject[] = [
     ...parsedProjects.filter((project) => !crashedProjects.has(project)),
@@ -1129,6 +1146,24 @@ function restoreCapture(capture: CompilerFileCapture, rootPrefix: string): Captu
 }
 
 /**
+ * The context for the child visits of the canonical rewrites, which only
+ * reorder type members and need no lexical environments. The transformation's
+ * own context asserts on them: a getter inside a getter's type literal
+ * (`{ get a(): { get b(): T } }`) starts a lexical environment while the
+ * enclosing one is suspended, the compiler throws "Lexical environment is
+ * suspended", and the whole graph build failed.
+ */
+function withoutLexicalEnvironments(context: ts.TransformationContext): ts.TransformationContext {
+  return {
+    ...context,
+    startLexicalEnvironment: () => {},
+    suspendLexicalEnvironment: () => {},
+    resumeLexicalEnvironment: () => {},
+    endLexicalEnvironment: () => undefined,
+  };
+}
+
+/**
  * What an importer can observe of a file: the SHA-256 of its declaration
  * emit, without comments, or undefined when it cannot be emitted. Bodies,
  * private implementation and comments are absent; every exported and
@@ -1156,8 +1191,9 @@ function fileDeclarationSignature(program: ts.Program, sourceFile: ts.SourceFile
   // with what it checked first; a union means the same in any order, so its
   // members are sorted and the signature is a function of the code (#209).
   const canonical = ts.transform(declarations, [(context) => {
+    const children = withoutLexicalEnvironments(context);
     const visit = (node: ts.Node): ts.Node => {
-      const visited = ts.visitEachChild(node, visit, context);
+      const visited = ts.visitEachChild(node, visit, children);
       if (!ts.isUnionTypeNode(visited)) return visited;
       const members = visited.types
         .map((type) => ({ type, text: printer.printNode(ts.EmitHint.Unspecified, type, declarations) }))
@@ -1392,8 +1428,9 @@ class CompilerInputLedger {
   private readonly directoryFiles = new Map<string, Set<string>>();
   private readonly directoryChildren = new Map<string, Set<string>>();
   private readonly declinedConfigs = new Map<string, string>();
-  /** Parsed source files shared by every program of one extraction; see {@link compilerHost}. */
+  /** Bounded parsed-file reuse, including shared library declarations (#209). */
   private readonly sourceFiles = new Map<string, ts.SourceFile>();
+  private sourceFileBytes = 0;
   /**
    * Existence answers by the exact name asked. Every program of a repository
    * with many tsconfig projects resolves the same imports through the same
@@ -1652,12 +1689,11 @@ class CompilerInputLedger {
         onError?.(`Could not read compiler input ${fileName}.`);
         return undefined;
       }
-      // A repository with several tsconfig projects parsed its shared sources
-      // and every library once per project (issue #209). A parsed and bound
-      // source file is shared between programs whose settings agree on every
-      // option that affects parsing or binding: the rule TypeScript itself
-      // applies when it reuses source files across programs. The bytes are
-      // the ledger's, identical for the whole extraction.
+      // Reuse parsed and bound files only where the settings agree on every
+      // option that affects parsing or binding, as TypeScript itself does.
+      // Executable sources are released after each project; the bounded
+      // declaration cache preserves cross-project library sharing (#209).
+      // The ledger's bytes are identical for the whole extraction.
       //
       // A declaration file (the libraries above all) is shared more widely.
       // Every other input its parse and bind read is in the key below: module
@@ -1676,7 +1712,15 @@ class CompilerInputLedger {
         parse.jsDocParsingMode ?? "",
       ].join("\u0000");
       const shared = this.sourceFiles.get(key);
-      if (shared && shared.text === source) return shared;
+      if (shared && shared.text === source) {
+        this.sourceFiles.delete(key);
+        this.sourceFiles.set(key, shared);
+        return shared;
+      }
+      if (shared) {
+        this.sourceFiles.delete(key);
+        this.sourceFileBytes -= shared.text.length * 2;
+      }
       const parsed = ts.createSourceFile(
         fileName,
         source,
@@ -1684,7 +1728,22 @@ class CompilerInputLedger {
         true,
         scriptKindForFile(fileName),
       );
-      this.sourceFiles.set(key, parsed);
+      // Bound both text and entry count: bound ASTs/symbols are much larger
+      // than their source, and an extraction can visit many disjoint projects.
+      // Eviction only removes the ledger's reference; an active program still
+      // owns its files. In particular, libraries remain shared while cached.
+      const bytes = source.length * 2;
+      if (bytes <= MAX_SHARED_SOURCE_BYTES) {
+        while (this.sourceFiles.size >= MAX_SHARED_SOURCE_FILES
+          || this.sourceFileBytes + bytes > MAX_SHARED_SOURCE_BYTES) {
+          const oldestKey = this.sourceFiles.keys().next().value!;
+          const oldest = this.sourceFiles.get(oldestKey)!;
+          this.sourceFiles.delete(oldestKey);
+          this.sourceFileBytes -= oldest.text.length * 2;
+        }
+        this.sourceFiles.set(key, parsed);
+        this.sourceFileBytes += bytes;
+      }
       return parsed;
     };
     const host: ts.CompilerHost = {
@@ -1733,6 +1792,15 @@ class CompilerInputLedger {
           resolveLibrary(libraryName, resolveFrom, programOptions, host, libraryCache),
       } : {}),
     } as ts.CompilerHost;
+  }
+
+  /** Only the bounded library/declaration cache may outlive a project. */
+  releaseProjectSources(): void {
+    for (const [key, sourceFile] of this.sourceFiles) {
+      if (sourceFile.isDeclarationFile) continue;
+      this.sourceFiles.delete(key);
+      this.sourceFileBytes -= sourceFile.text.length * 2;
+    }
   }
 
   private realpath(path: string, base: Pick<ts.CompilerHost, "realpath">): string {
@@ -1820,6 +1888,9 @@ class CompilerInputLedger {
 
 /** TypeScript's declaration file names, including `.d.<extension>.ts`. */
 const DECLARATION_FILE = /\.d(\.[^./\\]+)?\.[cm]?ts$/iu;
+
+const MAX_SHARED_SOURCE_FILES = 512;
+const MAX_SHARED_SOURCE_BYTES = 16 * 1024 * 1024;
 
 /**
  * The compiler options a parsed and bound source file depends on: the set
@@ -2863,29 +2934,71 @@ const signaturePrinter = ts.createPrinter({
   newLine: ts.NewLineKind.LineFeed,
 });
 const CHECKER_TEXT_LIMIT = 2_000_000;
+const CHECKER_RENDER_BUDGET = 100_000;
 const RENDER_FLAGS = ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.IgnoreErrors;
+let reportedRenderTruncations = 0;
+
+interface RenderOutcome { truncated?: boolean }
+interface BudgetedNodeBuilder {
+  typeToTypeNode(type: ts.Type, enclosing: ts.Node, flags: ts.NodeBuilderFlags,
+    internalFlags: undefined, tracker: undefined, maximumLength: number,
+    verbosityLevel: undefined, out: RenderOutcome): ts.TypeNode | undefined;
+  signatureToSignatureDeclaration(signature: ts.Signature, kind: ts.SyntaxKind.CallSignature,
+    enclosing: ts.Node, flags: ts.NodeBuilderFlags, internalFlags: undefined, tracker: undefined,
+    maximumLength: number, verbosityLevel: undefined, out: RenderOutcome): ts.SignatureDeclaration | undefined;
+}
+
+function budgetedNodeBuilder(checker: ts.TypeChecker): BudgetedNodeBuilder {
+  // Runtime-only budget/out parameters bound a dependency's recursive conditional types.
+  return checker as BudgetedNodeBuilder;
+}
+
+function recordRenderOutcome(out: RenderOutcome, enclosing: ts.Node): void {
+  if (!out.truncated) return;
+  recordGraphPhase("compiler.truncatedRenders", 1);
+  // Locations stay out of phase records; opt-in diagnostics report at most ten.
+  if (process.env.MEX_GRAPH_PHASE_TIMINGS && reportedRenderTruncations++ < 10) {
+    const source = enclosing.getSourceFile();
+    const { line } = source.getLineAndCharacterOfPosition(enclosing.getStart(source));
+    console.warn(`Compiler render truncated: ${source.fileName}:${line + 1}`);
+  }
+}
 
 function renderType(checker: ts.TypeChecker, type: ts.Type, enclosing: ts.Node): string {
-  const node = checker.typeToTypeNode(type, enclosing, RENDER_FLAGS);
-  if (!node) return checker.typeToString(type, enclosing, ts.TypeFormatFlags.NoTruncation);
+  const out: RenderOutcome = {};
+  const node = budgetedNodeBuilder(checker).typeToTypeNode(
+    type, enclosing, RENDER_FLAGS, undefined, undefined, CHECKER_RENDER_BUDGET, undefined, out,
+  );
+  recordRenderOutcome(out, enclosing);
+  if (!node) {
+    recordGraphPhase("compiler.renderFallbacks", 1);
+    return checker.typeToString(type, enclosing, ts.TypeFormatFlags.NoTruncation);
+  }
   return printCanonical(typePrinter, node, enclosing.getSourceFile());
 }
 
 function renderSignature(checker: ts.TypeChecker, signature: ts.Signature, enclosing: ts.Node): string {
-  const node = checker.signatureToSignatureDeclaration(
+  const out: RenderOutcome = {};
+  const node = budgetedNodeBuilder(checker).signatureToSignatureDeclaration(
     signature,
     ts.SyntaxKind.CallSignature,
     enclosing,
     RENDER_FLAGS | ts.NodeBuilderFlags.WriteTypeParametersInQualifiedName,
+    undefined, undefined, CHECKER_RENDER_BUDGET, undefined, out,
   );
-  if (!node) return checker.signatureToString(signature, enclosing, ts.TypeFormatFlags.NoTruncation);
+  recordRenderOutcome(out, enclosing);
+  if (!node) {
+    recordGraphPhase("compiler.renderFallbacks", 1);
+    return checker.signatureToString(signature, enclosing, ts.TypeFormatFlags.NoTruncation);
+  }
   return printCanonical(signaturePrinter, node, enclosing.getSourceFile()).replace(/;$/u, "");
 }
 
 function printCanonical(printer: ts.Printer, node: ts.Node, sourceFile: ts.SourceFile): string {
   const transformed = ts.transform(node, [(context) => {
+    const children = withoutLexicalEnvironments(context);
     const visit = (current: ts.Node): ts.Node => {
-      const visited = ts.visitEachChild(current, visit, context);
+      const visited = ts.visitEachChild(current, visit, children);
       if (ts.isTypeLiteralNode(visited)) {
         // A mapped or spread object type lists its properties in the type-id
         // order of its key literals. Members are ordered by name, stably, so
