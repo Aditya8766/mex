@@ -36,13 +36,10 @@ import type { GraphEngine, SourceChunkMatch } from "./engine.js";
 import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
 import { FingerprintStore } from "./fingerprint-store.js";
 import type { GroundingBaseline, GroundingSubject } from "./grounding.js";
-import {
-  GraphMaintenanceError,
-  rebuildGraph,
-  refreshGraph,
-} from "./maintenance.js";
+import type { rebuildGraph, refreshGraph } from "./maintenance.js";
 import {
   loadFreshGraphReadSession,
+  readStableContainedSource,
   type InternalFreshGraphReadSession,
   type InternalFreshGraphReadResult,
 } from "./read-session.js";
@@ -160,6 +157,8 @@ export interface RepositoryGraphGroundedNode {
 export interface RepositoryGraphGroundingSnapshot {
   /** Exact immutable graph snapshot revision, for composite Wiki cursors. */
   readonly revision: string;
+  /** Apply-only exact source proof, also for a committed link whose node disappeared. */
+  verifySource?(path: string): void;
   /** Missing targets cannot be reconciled conclusively across a parse gap. */
   readonly incompleteReason?: string;
   getNode(nodeId: string): RepositoryGraphGroundedNode | null;
@@ -236,6 +235,8 @@ interface AdapterDependencies {
 
 export interface RepositoryGraphPortOptions {
   dbPath?: string;
+  /** Session policy for consumers that also bind freshness to a workflow's HEAD. Must preserve source/configuration and final-boundary proofs. */
+  loadFreshSession?: typeof loadFreshGraphReadSession;
   /** Hub construction runs separately; ordinary readers and CLI keep their defaults. */
   candidateExecution?: "process";
   /** @internal Deterministic dependency seams for adapter conformance tests. */
@@ -261,9 +262,9 @@ export class RepositoryGraphPort implements GraphPort {
     this.#candidateExecution = options.candidateExecution;
     this.#deps = {
       inspectStatus: options.__internal?.inspectStatus ?? inspectGraphStatus,
-      loadFresh: options.__internal?.loadFresh ?? loadFreshGraphReadSession,
-      refresh: options.__internal?.refresh ?? refreshGraph,
-      rebuild: options.__internal?.rebuild ?? rebuildGraph,
+      loadFresh: options.loadFreshSession ?? options.__internal?.loadFresh ?? loadFreshGraphReadSession,
+      refresh: options.__internal?.refresh ?? (async (...args) => (await import("./maintenance.js")).refreshGraph(...args)),
+      rebuild: options.__internal?.rebuild ?? (async (...args) => (await import("./maintenance.js")).rebuildGraph(...args)),
     };
   }
 
@@ -391,21 +392,24 @@ export class RepositoryGraphPort implements GraphPort {
    */
   async withFreshGroundingSnapshot<T>(
     callback: (snapshot: RepositoryGraphGroundingSnapshot) => T | Promise<T>,
+    options?: { sourceScope?: Set<string> },
   ): Promise<T> {
     try {
       // Comment and layout comparisons parse source; without grammars every
       // such hash is null and a changed body simply stays `changed`.
       await prepareCodeHashing().catch(() => undefined);
       const read = await this.#withFresh(async (context) => {
-        const snapshot = this.#groundingSnapshot(context);
+        const snapshot = this.#groundingSnapshot(context, options?.sourceScope);
         try {
-          return await callback(snapshot.value);
+          const value = await callback(snapshot.value);
+          snapshot.assertSources();
+          return value;
         } catch (error) {
           throw new GroundingSnapshotCallbackError(error);
         } finally {
           snapshot.revoke();
         }
-      }, undefined, true);
+      }, undefined, true, options?.sourceScope);
       return read.value;
     } catch (error) {
       if (error instanceof GroundingSnapshotCallbackError) throw error.cause;
@@ -563,9 +567,10 @@ export class RepositoryGraphPort implements GraphPort {
     }
   }
 
-  #groundingSnapshot(context: FreshContext): {
+  #groundingSnapshot(context: FreshContext, sourceScope?: Set<string>): {
     value: RepositoryGraphGroundingSnapshot;
     revoke(): void;
+    assertSources(): void;
   } {
       const store = new FingerprintStore(context.session.db);
       const reconciler = new MinHashReconciler(store);
@@ -576,8 +581,29 @@ export class RepositoryGraphPort implements GraphPort {
       const incompleteReason = incomplete
         ? `The code graph has incomplete parses${gaps.length ? ` in ${gaps.slice(0, 8).join(", ").slice(0, 1_024)}${gaps.length > 8 ? ", …" : ""}` : ""}. This target cannot be verified. Fix those files or explicitly exclude intentional fixtures, then run \`mex graph\`.`
         : undefined;
+      const verifiedSources = new Set<string>();
+      let sourceRefusal: MexPortError | undefined;
+      const verifySource = (path: string): void => {
+        if (!sourceScope) return;
+        assertActive();
+        sourceScope.add(validateRequestedPath(path));
+        if (verifiedSources.has(path)) return;
+        try {
+          const indexed = context.session.db.prepare("SELECT content_hash FROM files WHERE path = ?").get(path) as
+            { content_hash: string } | undefined;
+          if (!indexed || sha256(readStableContainedSource(this.#projectRoot, path).toString("utf8")) !== indexed.content_hash) {
+            throw new Error("Source changed");
+          }
+          verifiedSources.add(path);
+        } catch {
+          sourceRefusal = portError("INDEX_STALE", 409, "Graph inputs changed",
+            "The graph's source or configuration changed. Refresh it before verifying groundings.");
+          throw sourceRefusal;
+        }
+      };
       const getVerifiedNode = (nodeId: string) => {
         const node = context.session.graph.getNode(nodeId);
+        if (node) verifySource(node.filePath);
         return node && (!incomplete || healthyFiles.has(node.filePath)) ? node : null;
       };
       const evidence = createGroundingEvidence({
@@ -592,6 +618,7 @@ export class RepositoryGraphPort implements GraphPort {
       };
       const snapshot: RepositoryGraphGroundingSnapshot = {
         revision: context.revision,
+        ...(sourceScope ? { verifySource } : {}),
         ...(incompleteReason ? { incompleteReason } : {}),
         getSymbols(nodeIds) {
           assertActive();
@@ -606,7 +633,8 @@ export class RepositoryGraphPort implements GraphPort {
               // declaration belongs in this direct-symbol projection.
               return node?.id === id ? [projectNode(node)] : [];
             });
-          } catch {
+          } catch (error) {
+            if (error instanceof MexPortError) throw error;
             throw interruptedRead("The graph grounding snapshot could not read symbols safely.");
           }
         },
@@ -621,17 +649,19 @@ export class RepositoryGraphPort implements GraphPort {
               startLine: node.startLine,
               endLine: node.endLine,
             };
-          } catch {
+          } catch (error) {
+            if (error instanceof MexPortError) throw error;
             throw interruptedRead("The graph grounding snapshot could not read a node safely.");
           }
         },
         getFingerprint(nodeId) {
           assertActive();
           try {
-            if (incomplete && !getVerifiedNode(nodeId)) return null;
+            if ((incomplete || sourceScope) && !getVerifiedNode(nodeId)) return null;
             const fingerprint = store.get(nodeId);
             return fingerprint === null ? null : serializeFingerprint(fingerprint);
-          } catch {
+          } catch (error) {
+            if (error instanceof MexPortError) throw error;
             throw interruptedRead("The graph grounding snapshot could not read a fingerprint safely.");
           }
         },
@@ -640,8 +670,13 @@ export class RepositoryGraphPort implements GraphPort {
           try {
             if (incomplete) return null;
             const fingerprint = deserializeFingerprint(committedFingerprint);
-            return fingerprint === null ? null : reconciler.reconcile(nodeId, fingerprint, bodyHash);
-          } catch {
+            if (fingerprint === null) return null;
+            const result = reconciler.reconcile(nodeId, fingerprint, bodyHash);
+            if (sourceScope && result.kind === "MOVED") getVerifiedNode(result.nodeId);
+            if (sourceScope && result.kind === "AMBIGUOUS") getVerifiedNode(result.candidate);
+            return result;
+          } catch (error) {
+            if (error instanceof MexPortError) throw error;
             throw interruptedRead("The graph grounding snapshot could not reconcile a code reference safely.");
           }
         },
@@ -691,6 +726,7 @@ export class RepositoryGraphPort implements GraphPort {
       };
       return {
         value: snapshot,
+        assertSources() { if (sourceRefusal) throw sourceRefusal; },
         revoke() {
           active = false;
         },
@@ -709,7 +745,7 @@ export class RepositoryGraphPort implements GraphPort {
         ? await this.#deps.refresh(this.#projectRoot, executionOptions)
         : await this.#deps.rebuild(this.#projectRoot, executionOptions);
     } catch (error) {
-      throw translateMaintenanceError(error);
+      throw await translateMaintenanceError(error);
     }
   }
 
@@ -717,6 +753,7 @@ export class RepositoryGraphPort implements GraphPort {
     build: (context: FreshContext) => T | Promise<T>,
     afterValidation?: (value: T) => void | Promise<void>,
     allowParseDegraded = false,
+    sourceScope?: Set<string>,
   ): Promise<{
     revision: string;
     status: GraphStatus;
@@ -728,6 +765,7 @@ export class RepositoryGraphPort implements GraphPort {
         dbPath: this.#dbPath,
         loadSession: true,
         ...(allowParseDegraded ? { allowDegradedReads: true } : {}),
+        ...(sourceScope ? { sourceScope } : {}),
       });
     } catch {
       throw interruptedRead("The graph changed or became unavailable before the read began.");
@@ -1782,7 +1820,8 @@ function errorForStatus(status: GraphStatus): MexPortError {
   }
 }
 
-function translateMaintenanceError(error: unknown): MexPortError {
+async function translateMaintenanceError(error: unknown): Promise<MexPortError> {
+  const { GraphMaintenanceError } = await import("./maintenance.js");
   if (error instanceof MexPortError) return error;
   if (!(error instanceof GraphMaintenanceError)) {
     return portError(

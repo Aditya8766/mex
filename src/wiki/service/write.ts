@@ -15,6 +15,7 @@
 
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
+import { parseWikiMarkdown } from "../markdown/codec.js";
 import { diagnostic, hasBlockingDiagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
@@ -23,6 +24,7 @@ import type { GroundingResolver } from "../index/write.js";
 import { createHash } from "node:crypto";
 import { prepareWikiRebuild, rebuildWikiIndex, type RebuildOptions, type RebuildResult } from "../index/rebuild.js";
 import { refreshWikiIndex } from "../index/refresh.js";
+import { readContainedSource } from "../index/source-read.js";
 import { payloadHashOf, planOperation, type PlanOptions, type WikiPatchPlan } from "../operations/plan.js";
 import { applyPlannedOperationBatch, planOperationBatchReport } from "../operations/batch.js";
 import { acquireWikiMaintenanceLease } from "../index/dbfile.js";
@@ -70,7 +72,12 @@ export interface WikiWriteOptions extends WikiServiceOptions {
  */
 function groundingResolverFor(options: WikiWriteOptions): { resolveGrounding?: GroundingResolver } {
   const graph = options.graph ?? null;
-  return graph === null ? {} : { resolveGrounding: (grounding, context) => resolveGrounding(grounding, graph, context) };
+  return graph === null ? {} : {
+    resolveGrounding: Object.assign(
+      (grounding: Parameters<GroundingResolver>[0], context?: Parameters<GroundingResolver>[1]) => resolveGrounding(grounding, graph, context),
+      graph.revision === undefined ? {} : { graphRevision: graph.revision },
+    ),
+  };
 }
 
 function applyOptionsFrom(options: WikiWriteOptions): ApplyOptions {
@@ -168,6 +175,8 @@ export function wikiApplyOperation(
     apply?: boolean;
     plan?: WikiPatchPlan;
     expectedPreviewRevision?: string;
+    /** Explicit maintenance such as reground keeps a full refresh. */
+    targetedGroundings?: boolean;
   },
 ): ServiceResult<ApplyData> {
   // A file-level create cannot be freshly planned after its one metadata map
@@ -177,7 +186,34 @@ export function wikiApplyOperation(
     const replay = completedCreateReplay(envelope, options.scaffoldRoot);
     if (replay !== null) return replay;
   }
+  if (options.graph?.verifySource) {
+    // Prove new links before the planner translates expected edit failures
+    // into diagnostics. A stale source must retain the graph refusal path.
+    const validated = validateOperation(envelope, rootContext());
+    if (validated.ok && (validated.value.type === "create-entry" || validated.value.type === "set-grounding")) {
+      for (const grounding of validated.value.payload.groundsTo ?? []) {
+        if (grounding.file) options.graph.verifySource(grounding.file);
+        if ("node" in grounding) options.graph.getNode(grounding.node);
+      }
+    }
+  }
   const planned = wikiPlanOperation(envelope, options);
+  if (planned.data.plan && options.graph?.verifySource) {
+    // Include removed links and other entities sharing a changed file.
+    // The plan owns these contained, revision-bound source bytes.
+    for (const file of planned.data.plan.files) {
+      for (const text of [file.baseText, file.proposedText]) {
+        for (const { entity } of parseWikiMarkdown({ path: file.path, text,
+          ...(options.registry === undefined ? {} : { registry: options.registry }),
+        }).entities) {
+          for (const grounding of entity.groundsTo) {
+            if (grounding.file) options.graph.verifySource(grounding.file);
+            options.graph.getNode(grounding.node);
+          }
+        }
+      }
+    }
+  }
   if (options.apply !== true || !planned.data.planned) {
     return {
       data: { ...planned.data, applied: false, replayed: false, changedFiles: [], createdIds: [] },
@@ -185,7 +221,7 @@ export function wikiApplyOperation(
     };
   }
 
-  const applyOptions: ApplyOptions = applyOptionsFrom(options);
+  const applyOptions: ApplyOptions = { ...applyOptionsFrom(options), targetedGroundings: options.targetedGroundings !== false };
   const result = options.plan !== undefined && options.expectedPreviewRevision !== undefined
     ? applyPlannedOperation(options.plan, {
         ...applyOptions,
@@ -332,7 +368,7 @@ function recordedIds(ids: readonly string[]): () => EntityId {
  */
 export function wikiApplyOperationBatch(
   envelopes: unknown,
-  options: WikiWriteOptions & { apply?: boolean },
+  options: WikiWriteOptions & { apply?: boolean; targetedGroundings?: boolean },
 ): ServiceResult<ApplyBatchData> {
   const data: ApplyBatchData = {
     batch: true, planned: false, applied: false, replayed: false, operations: [],
@@ -441,14 +477,47 @@ export function wikiApplyOperationBatch(
 
   // -- 3. plan, and apply under one lease ---------------------------------
   const write = options.apply === true && !refusedEarly;
+  const applyOptions: ApplyOptions = { ...applyOptionsFrom(options), targetedGroundings: options.targetedGroundings !== false };
+  // New links must keep the same stale-graph refusal as single apply, before
+  // planning translates an expected edit failure into a diagnostic.
+  if (options.graph?.verifySource) {
+    for (const index of pending) {
+      const operation = operations[index];
+      if (operation?.type === "create-entry" || operation?.type === "set-grounding") {
+        for (const grounding of operation.payload.groundsTo ?? []) {
+          if (grounding.file) options.graph.verifySource(grounding.file);
+          if ("node" in grounding) options.graph.getNode(grounding.node);
+        }
+      }
+    }
+  }
+  const verifyText = (path: string, text: string | null): void => {
+    if (!options.graph?.verifySource || text === null) return;
+    for (const { entity } of parseWikiMarkdown({ path, text,
+      ...(options.registry === undefined ? {} : { registry: options.registry }),
+    }).entities) {
+      for (const grounding of entity.groundsTo) {
+        if (grounding.file) options.graph.verifySource(grounding.file);
+        options.graph.getNode(grounding.node);
+      }
+    }
+  };
   const lease = write ? acquireWikiMaintenanceLease(indexPathFor(options), "operation", scaffoldRoot) : null;
   try {
     const resume = interrupted as { index: number; createdIds: readonly string[] } | null;
     let toPlan = pending;
     if (resume !== null && write) {
+      // Recovery may publish an already-written file without a new plan.
+      // Prove its siblings before resuming and refreshing that file's rows.
+      if (options.graph?.verifySource) {
+        for (const file of recordFor(log, operations[resume.index]!.opId).intent!.files) {
+          const path = resolve(scaffoldRoot, file);
+          if (existsSync(path)) verifyText(file, readContainedSource(scaffoldRoot, path));
+        }
+      }
       // Finished through the single-operation path, which reuses the recorded
       // ids and recognises a write that landed before the process died.
-      const resumed = applyOperation(envelopes[resume.index], { ...applyOptionsFrom(options), maintenanceLease: lease! });
+      const resumed = applyOperation(envelopes[resume.index], { ...applyOptions, maintenanceLease: lease! });
       if (!resumed.ok) {
         refuse(resume.index, resumed.diagnostics);
         return finish();
@@ -475,6 +544,12 @@ export function wikiApplyOperationBatch(
       }
       if (refusedEarly) return finish();
       const plans = planned.plan.operations;
+      for (const plan of plans) {
+        for (const file of plan.files) {
+          verifyText(file.path, file.baseText);
+          verifyText(file.path, file.proposedText);
+        }
+      }
       plans.forEach((plan, position) => {
         const index = toPlan[position]!;
         outcomes[index]!.files = plan.files.map((file) => file.path);
@@ -486,7 +561,7 @@ export function wikiApplyOperationBatch(
       if (!write) return finish();
 
       const applied = applyPlannedOperationBatch(planned.plan, {
-        ...applyOptionsFrom(options),
+        ...applyOptions,
         expectedPreviewRevision: planned.plan.previewRevision,
         maintenanceLease: lease!,
       });
