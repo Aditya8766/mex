@@ -1834,11 +1834,22 @@ describe("test-file call results (#289)", () => {
     writeFileSync(join(project, "src", "lib.ts"), [
       "export function compose(value: number): number { return value * 2; }",
       "export function onlyTested(value: number): number { return value + 1; }",
+      "export function measure(value: number): number { return value - 1; }",
       "",
     ].join("\n"));
     writeFileSync(join(project, "src", "app.ts"), [
       "import { compose } from \"./lib\";",
       "export function run(): number { return compose(1); }",
+      "",
+    ].join("\n"));
+    // A 252-line caller: its own span is too long to report as a location.
+    writeFileSync(join(project, "src", "big.ts"), [
+      "import { measure } from \"./lib\";",
+      "export function bigCaller(): number {",
+      "  let total = 0;",
+      ...Array.from({ length: 248 }, (_, index) => `  total += ${index};`),
+      "  return measure(total);",
+      "}",
       "",
     ].join("\n"));
     writeFileSync(join(project, "src", "lib.test.ts"), [
@@ -1903,6 +1914,28 @@ describe("test-file call results (#289)", () => {
     const callers = names(all, "caller");
     expect(callers[0]).toBe("run");
     expect(callers).toHaveLength(7);
+  });
+
+  it("call results carry the line of the call", () => {
+    const callers = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps));
+    expect(callers.find((record) => record.name === "run")).toMatchObject({ filePath: "src/app.ts", callLine: 2 });
+    // what-calls: the call is in the queried function's file.
+    const callees = capture(() => runGraphQuery("what-calls", "run", project, projectDeps));
+    expect(callees.find((record) => record.name === "compose")).toMatchObject({ filePath: "src/lib.ts", callLine: 2 });
+    const impact = capture(() => runImpact("compose", project, projectDeps));
+    expect(impact.find((record) => record.type === "caller" && record.name === "run")).toMatchObject({ callLine: 2 });
+    const downstream = capture(() => runImpact("run", project, projectDeps, { direction: "callees" }));
+    expect(downstream.find((record) => record.type === "callee" && record.name === "compose")).toMatchObject({ callLine: 2 });
+  });
+
+  it("reports a declaration over 200 lines by its start and length, not its full span", () => {
+    const records = capture(() => runGraphQuery("who-calls", "measure", project, projectDeps));
+    const caller = records.find((record) => record.name === "bigCaller")!;
+    expect(caller).toMatchObject({ filePath: "src/big.ts", lineStart: 2, lineCount: 252, callLine: 252 });
+    expect(caller).not.toHaveProperty("lineEnd");
+    // Short declarations keep their full span.
+    const short = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps));
+    expect(short.find((record) => record.name === "run")).toMatchObject({ lineStart: 2, lineEnd: 2 });
   });
 });
 

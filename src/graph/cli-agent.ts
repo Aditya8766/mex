@@ -115,7 +115,7 @@ export function runImpact(
 
     // Definitions and directed dependencies share one returned-node cap.
     const rootsSorted = roots.sort(byId);
-    const impacted = new Map<string, { node: GraphNode; depth: number; root: string }>();
+    const impacted = new Map<string, ImpactNeighbor>();
     for (const entry of transitiveCallNeighbors(session.graph, rootsSorted, opts.depth, direction)) impacted.set(entry.node.id, entry);
     // Nearest first; within a depth, production code before tests, fixtures
     // and other low-value paths, as `graph query` already orders call results.
@@ -185,11 +185,14 @@ export function runImpact(
       if (!fact) continue;
       // Reached by following call edges, which is exactly what drifted
       // resolution can get wrong.
+      const callLine = impactCallLine(session.graph, entry, direction);
       const record: Rec = markResolutionStale(session,
         {
           type: direction === "callers" ? "caller" : direction === "callees" ? "callee" : "dependency",
           depth: entry.depth, root: entry.root,
-          ...agentFactFields(fact, opts), ...callbackEnclosingSymbol(session, entry.node),
+          ...agentFactFields(fact, opts),
+          ...(callLine !== undefined ? { callLine } : {}),
+          ...callbackEnclosingSymbol(session, entry.node),
         });
       if (!ledger.tryAdd(record)) { truncated = true; break; }
       factRecords.push(record);
@@ -259,15 +262,15 @@ export function runGraphQuery(
     if (emitTargetSourceDrifted(session, write, target, nodes)) return;
 
     // Preserve (queried target, result) pairs; dedupe by that pair, not by result id alone.
-    const pairs: Array<{ targetId: string; node: GraphNode }> = [];
+    const pairs: Array<{ targetId: string; node: GraphNode; callLine?: number }> = [];
     const seen = new Set<string>();
     for (const queried of nodes.sort(byId)) {
-      const related = relation === "where-defined" ? [queried] : relatedCallNodes(session.graph, queried, relation);
-      for (const node of related) {
+      const related = relation === "where-defined" ? [{ node: queried }] : relatedCallNodes(session.graph, queried, relation);
+      for (const { node, callLine } of related) {
         const key = `${queried.id} ${node.id}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        pairs.push({ targetId: queried.id, node });
+        pairs.push({ targetId: queried.id, node, ...(callLine !== undefined ? { callLine } : {}) });
       }
     }
 
@@ -294,7 +297,9 @@ export function runGraphQuery(
       // resolution; the call relations are edges and are not.
       const base: Rec = {
         type: "result", relation, target: pair.targetId,
-        ...agentFactFields(fact, opts), ...callbackEnclosingSymbol(session, pair.node),
+        ...agentFactFields(fact, opts),
+        ...(pair.callLine !== undefined ? { callLine: pair.callLine } : {}),
+        ...callbackEnclosingSymbol(session, pair.node),
       };
       const record: Rec = relation === "where-defined" ? base : markResolutionStale(session, base);
       if (!ledger.tryAdd(record)) { truncated = true; break; }
@@ -1229,6 +1234,9 @@ function emitAll(write: (line: string) => void, meta: Rec, records: Rec[]): void
   for (const record of records) write(JSON.stringify(record));
 }
 
+/** Longest declaration whose full line range a fact record reports. */
+const MAX_REPORTED_SPAN_LINES = 200;
+
 /**
  * Scope is the high-frequency discovery command, so its default manifest avoids
  * repeating response-level state on every fact. Source records already carry
@@ -1238,8 +1246,16 @@ function agentFactFields(fact: CompactFact, opts: AgentOptions): Rec {
   const { detail: _detail, sourceIncluded: _sourceIncluded, bodyHash, qualifiedName, signature, ...core } = fact;
   const compactSignature = signature?.replace(/\s+/g, " ").trim();
   const signatureLimit = opts.detail === "standard" ? 320 : 180;
+  // A whole-declaration span such as lines 1486-54200 is not a location
+  // anyone can use (#289). A long declaration keeps its start line and says
+  // how long it is instead of inviting a read of the whole range.
+  const lineCount = fact.lineEnd - fact.lineStart + 1;
+  const located = lineCount > MAX_REPORTED_SPAN_LINES
+    ? Object.fromEntries(Object.entries(core).map(([key, value]) => (
+      key === "lineEnd" ? ["lineCount", lineCount] : [key, value])))
+    : core;
   return {
-    ...core,
+    ...located,
     ...(qualifiedName !== fact.name ? { qualifiedName } : {}),
     ...(compactSignature ? {
       signature: compactSignature.length <= signatureLimit
@@ -2577,11 +2593,24 @@ function includeTestsCommand(command: string, target: string): string {
   return `${command} ${argument} --include-tests`;
 }
 
-function relatedCallNodes(graph: GraphEngine, queried: GraphNode, relation: Exclude<QueryRelation, "where-defined">): GraphNode[] {
+/**
+ * Call neighbors of a queried node, each with `callLine`: the line of its
+ * first call, in the caller's file (the result for who-calls, the queried
+ * node for what-calls). Untyped fallback edges carry no line.
+ */
+function relatedCallNodes(
+  graph: GraphEngine,
+  queried: GraphNode,
+  relation: Exclude<QueryRelation, "where-defined">,
+): Array<{ node: GraphNode; callLine?: number }> {
   const typed = relation === "who-calls"
     ? (graph.getIncoming?.(queried.id, ["calls"]) ?? [])
     : (graph.getOutgoing?.(queried.id, ["calls"]) ?? []);
   if (typed.length > 0) {
+    const firstCallLine = new Map<string, number>();
+    for (const { node, edge } of typed) {
+      if (edge.line !== undefined) firstCallLine.set(node.id, Math.min(edge.line, firstCallLine.get(node.id) ?? edge.line));
+    }
     return dedupeNeighbors(typed)
       .sort((left, right) => {
         const pathDelta = Number(isLowValueGraphPath(left.node.filePath)) - Number(isLowValueGraphPath(right.node.filePath));
@@ -2590,12 +2619,15 @@ function relatedCallNodes(graph: GraphEngine, queried: GraphNode, relation: Excl
         if (lineDelta !== 0) return lineDelta;
         return left.node.id.localeCompare(right.node.id);
       })
-      .map((entry) => entry.node);
+      .map(({ node }) => {
+        const callLine = firstCallLine.get(node.id);
+        return callLine === undefined ? { node } : { node, callLine };
+      });
   }
   const fallback = relation === "who-calls" ? graph.getCallers(queried.id) : graph.getCallees(queried.id);
   return fallback.sort((left, right) =>
     Number(isLowValueGraphPath(left.filePath)) - Number(isLowValueGraphPath(right.filePath)) || left.id.localeCompare(right.id),
-  );
+  ).map((node) => ({ node }));
 }
 
 function dedupeNeighbors(entries: GraphNeighbor[]): GraphNeighbor[] {
@@ -2614,18 +2646,26 @@ function nodesForFile(session: AgentGraphSession, rootDir: string, target: strin
   return rows.map((row) => session.graph.getNode(row.id)).filter((node): node is GraphNode => node !== null);
 }
 
+interface ImpactNeighbor {
+  node: GraphNode;
+  depth: number;
+  root: string;
+  /** The node this one was reached from: the one it calls, or that calls it. */
+  via: string;
+}
+
 function transitiveCallNeighbors(
   graph: GraphEngine,
   roots: readonly GraphNode[],
   maxDepth: number,
   direction: ImpactDirection,
-): Array<{ node: GraphNode; depth: number; root: string }> {
+): ImpactNeighbor[] {
   // One multi-source breadth-first walk visits a shared caller once. Repeating
   // the entire walk for every definition made file-seed work scale with both
   // the number of definitions and the size of their overlapping call trees.
   const seen = new Set(roots.map((node) => node.id));
-  const queue = roots.map((node) => ({ node, depth: 0, root: node.id }));
-  const results: Array<{ node: GraphNode; depth: number; root: string }> = [];
+  const queue: Array<Omit<ImpactNeighbor, "via"> & { via?: string }> = roots.map((node) => ({ node, depth: 0, root: node.id }));
+  const results: ImpactNeighbor[] = [];
   for (let head = 0; head < queue.length; head += 1) {
     const current = queue[head]!;
     if (current.depth >= maxDepth) continue;
@@ -2635,12 +2675,28 @@ function transitiveCallNeighbors(
     for (const neighbor of neighbors.sort(byId)) {
       if (seen.has(neighbor.id)) continue;
       seen.add(neighbor.id);
-      const entry = { node: neighbor, depth: current.depth + 1, root: current.root };
+      const entry = { node: neighbor, depth: current.depth + 1, root: current.root, via: current.node.id };
       results.push(entry);
       queue.push(entry);
     }
   }
   return results;
+}
+
+/** First line on which `callerId` calls `calleeId`, from typed call edges. */
+function firstCallLine(graph: GraphEngine, callerId: string, calleeId: string): number | undefined {
+  let first: number | undefined;
+  for (const { node, edge } of graph.getOutgoing?.(callerId, ["calls"]) ?? []) {
+    if (node.id === calleeId && edge.line !== undefined) first = Math.min(edge.line, first ?? edge.line);
+  }
+  return first;
+}
+
+/** The call that links an impacted node to the node it was reached from. */
+function impactCallLine(graph: GraphEngine, entry: ImpactNeighbor, direction: ImpactDirection): number | undefined {
+  if (direction === "callees") return firstCallLine(graph, entry.via, entry.node.id);
+  return firstCallLine(graph, entry.node.id, entry.via)
+    ?? (direction === "both" ? firstCallLine(graph, entry.via, entry.node.id) : undefined);
 }
 
 /**
