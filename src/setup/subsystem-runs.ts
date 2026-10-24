@@ -516,7 +516,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       }
     }
     consecutiveFailures += 1;
-    if (unit.kind !== "final" && consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
+    if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
       unit.progress.state = "pending";
       stopWith(new SubsystemPhaseStoppedError(
         `${CONSECUTIVE_FAILURE_LIMIT} agent sessions in a row failed (${error instanceof Error ? error.message : String(error)}), so this is not one subsystem's problem.`
@@ -556,11 +556,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       }
       if (problems === null) {
         if (batchPath !== null) archiveAppliedBatch(unit);
-        let written = await runAgent(unit, unit.writePrompt(), "write");
-        if (!written.ok && unit.kind === "final" && !stopsPhase(written.error) && !phase.signal.aborted) {
-          message("The final session failed; retrying patterns, routing rows and edges once.");
-          written = await runAgent(unit, unit.writePrompt(), "write");
-        }
+        const written = await runAgent(unit, unit.writePrompt(), "write");
         if (guard) reportScope(guard.take(), running.size === 1 ? [unit] : [...running]);
         if (!written.ok) {
           await sessionFailed(unit, written.error, "write");

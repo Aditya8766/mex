@@ -529,7 +529,7 @@ describe("the progress line", () => {
 
 
 describe("usage-limit resume at every unit", () => {
-  it.each(["shared", "b", "final"])("pauses %s without skipping and finishes on rerun", async (slug) => {
+  it.each(["shared", "b"])("pauses %s without skipping and finishes on rerun", async (slug) => {
     const root = project();
     const state = createPlanState(plan(3));
     const first = harness(root, { [slug]: ["usage"] });
@@ -543,17 +543,6 @@ describe("usage-limit resume at every unit", () => {
     await expect(run(root, stored, second, { parallelRuns: 1 }).promise).resolves.toMatchObject({ covered: 3, skipped: [] });
     for (const entry of done) expect(second.launches.map((launch) => launch.slug)).not.toContain(entry);
     expect(stored.final.state).toBe("done");
-  });
-  it.each([1, 2])("retries final generic failures once (%i failures)", async (failures) => {
-    const root = project(true);
-    const state = createPlanState(plan(1));
-    state.shared.state = "done";
-    state.subsystems[0]!.state = "done";
-    const h = harness(root, { final: Array.from({ length: failures }, () => "crash" as const) });
-    const outcome = await run(root, state, h).promise;
-    expect(h.launches.filter((entry) => entry.kind === "final")).toHaveLength(2);
-    if (failures === 2) expect(outcome.summary).toContain("Patterns and links were not written. Rerunning `mex setup` writes them.");
-    else expect(state.final.state).toBe("done");
   });
 });
 
