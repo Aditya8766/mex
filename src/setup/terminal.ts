@@ -259,7 +259,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
           const { projectSetupStatus } = await import("../hub/setup/readiness.js");
           const finished = await projectSetupStatus(projectRoot);
           const message = finished.mode === "agent-memory" || finished.ready
-            ? "Setup complete. Hub stopped. Run `mex hub` to open Hub again."
+            ? `Setup complete.${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Hub stopped. Run \`mex hub\` to open Hub again.`
             : `${validated.message} Hub stopped. Run \`mex setup --browser\` to reopen the completion page.`;
           outcome = { outcome: "complete", exitCode: 0, message };
         } catch (error) {
