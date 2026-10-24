@@ -10,6 +10,7 @@ import { MEX_ANCHOR_START } from "../anchor.js";
 import { loadConfiguredAiTools, loadConfiguredSetupMode, hasConfiguredAiTools } from "../../config.js";
 import * as config from "../../config.js";
 import { SetupError } from "../errors.js";
+import * as phases from "../phases.js";
 
 const roots: string[] = [];
 
@@ -62,6 +63,31 @@ describe("headless setup status", () => {
 });
 
 describe("headless setup run", () => {
+  it("starts background sessions before graph completion and preserves the graph failure for recovery", async () => {
+    const root = gitRepo();
+    for (let index = 0; index < 8; index += 1) writeFileSync(join(root, "src", `feature${index}.ts`), `export const feature${index} = true;\n`);
+    let fail!: (error: Error) => void;
+    const graph = new Promise<void>((_resolve, reject) => { fail = reject; });
+    vi.spyOn(phases, "buildSetupGraph").mockImplementation(() => graph);
+    const launch = vi.fn(async (input: population.HeadlessPopulationOptions) => {
+      const batch = /(?:- Batch file: |JSON array in `)(\.mex\/local\/setup-ops\/[^`\s]+\.json)/u.exec(input.prompt)![1]!;
+      if (batch.endsWith("shared.json")) writePopulatedScaffold(join(root, ".mex"));
+      mkdirSync(join(root, ".mex/local/setup-ops"), { recursive: true });
+      writeFileSync(join(root, batch), "[]");
+      return { tool: "codex" as const, completed: true };
+    });
+    const apply = vi.fn();
+    const pending = runHeadlessSetup({ projectRoot: root, tools: [], perSubsystem: {
+      env: { MEX_SETUP_PER_SUBSYSTEM: "force" }, launch, freeMemory: () => 64 * 1024 ** 3,
+      trackSource: false, applier: { apply, close: async () => ({ changed: false }) },
+    } }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(launch.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(apply).not.toHaveBeenCalled();
+    fail(new Error("Graph worker failed; rerun mex setup"));
+    expect(await pending).toMatchObject({ message: "Graph worker failed; rerun mex setup" });
+    const stored = JSON.parse(readFileSync(join(root, ".mex/local/setup-plan.json"), "utf8"));
+    expect(stored.graph).toMatchObject({ outcome: "failed", startedAt: expect.any(String), finishedAt: expect.any(String), durationMs: expect.any(Number) });
+  });
   it("returns an actionable expected error for malformed config without replacing it", async () => {
     const root = fixture();
     mkdirSync(join(root, ".mex"));

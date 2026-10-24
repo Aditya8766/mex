@@ -21,6 +21,7 @@ export interface TerminalSetupView {
   phaseStartedAt?: number;
   lastActivityAt?: number;
   progress?: { completed?: number; total?: number; unit?: string };
+  concurrentPopulation?: string;
   error?: string;
   hubUrl?: string;
   populationAgent?: string | null;
@@ -181,6 +182,7 @@ function phaseLines(view: TerminalSetupView): Line[] {
 }
 
 function phaseLine(view: TerminalSetupView, step: SetupProgressStep, label: string): Line {
+  if (step === "population" && view.activeStep === "graph" && view.concurrentPopulation) return { text: `[now ] ${label}`, color: COLOR.accent, bold: true };
   if (view.completedSteps.includes(step)) return { text: `[done] ${label}`, color: COLOR.complete };
   if (view.screen === "hub") return { text: `[skip] ${label}`, color: COLOR.muted };
   if (view.activeStep === step) {

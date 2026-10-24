@@ -286,6 +286,13 @@ describe("terminal setup HUD", () => {
     expect(app.frames).toHaveLength(frames);
   });
 
+  it("shows graph and knowledge active together while sessions populate during the build", async () => {
+    const app = await show({ screen: "progress", activeStep: "graph", concurrentPopulation: "1/5 subsystems done", detail: "Graph: parsing 30/100 · shared files running · working on src/a/" });
+    expect(app.lastFrame()).toContain("[now ] Code graph");
+    expect(app.lastFrame()).toContain("[now ] Project knowledge");
+    expect(app.lastFrame()).not.toContain("[done] Code graph");
+  });
+
   it("does not animate configuration, manual choices, errors, Hub, or stopping work", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     vi.setSystemTime(100_000);

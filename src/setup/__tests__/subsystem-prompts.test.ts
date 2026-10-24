@@ -18,6 +18,14 @@ const ROUTER: SubsystemPromptEntry = {
 const CORE: SubsystemPromptEntry = { ...ROUTER, path: "src", remainder: true, wikiFile: "context/src-core.md", batchFile: ".mex/local/setup-ops/src-core.json", opIdPrefix: "setup_src_core_" };
 
 describe("per-subsystem prompts", () => {
+  it("returns navigation and patterns as data only for engine-driven sessions", () => {
+    const prompt = buildSubsystemPrompt({ subsystem: ROUTER, nested: [], planned: [ROUTER, CORE], navigationData: true });
+    expect(prompt).toContain('"setup" object');
+    expect(prompt).toContain("Return 0–1 pattern");
+    expect(prompt).toContain("context/src-core.md");
+    expect(buildSharedFilesPrompt({ briefJson: null, batchFile: "b.json", opIdPrefix: "p_", subsystems: [], navigationData: true })).toContain("Return 2–3 cross-cutting patterns");
+    expect(buildSubsystemPrompt({ subsystem: ROUTER, nested: [] })).not.toContain('"setup" object');
+  });
   it("scopes a subsystem session to its folder, budget, Wiki file and batch file, with no mex command", () => {
     const prompt = buildSubsystemPrompt({ subsystem: ROUTER, nested: [] });
     expect(prompt).toContain("- Code: src/router/\n");

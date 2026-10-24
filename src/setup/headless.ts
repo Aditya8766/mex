@@ -28,6 +28,7 @@ import {
   type SetupAgentChoice,
 } from "./headless-population.js";
 import type { SetupBatchApplier } from "./subsystem-apply.js";
+import { populateDuringGraph } from "./concurrent-graph.js";
 import { createPlanState, hasUnfinishedPlanState, loadPlanState, savePlanState, type SetupPlanState } from "./subsystem-state.js";
 import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup, syncSetupNotice } from "./unfinished.js";
 import {
@@ -324,7 +325,7 @@ export async function runHeadlessSetup(
     scannerBrief = await scanSetupCodebase(projectRoot, mexDir);
   }
 
-  if (mode === "code-repo") {
+  if (mode === "code-repo" && options.stopBeforePopulation === true) {
     report("graph");
     await buildSetupGraph(projectRoot, {
       background: true,
@@ -375,7 +376,7 @@ export async function runHeadlessSetup(
     const env = options.perSubsystem?.env ?? process.env;
     const resuming = perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
     if (!scaffoldPopulatedAtStart || resuming) {
-      if (!resuming) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+      if (!resuming) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot, { useGraph: false });
       const injected = options.perSubsystem?.launch !== undefined;
       const choice = injected && options.perSubsystem?.findAgent === undefined ? null : await findAgent(selectedTools, false);
       const fileOnly = choice !== null && !COMMAND_CAPABLE_AGENTS.has(choice.tool);
@@ -389,18 +390,22 @@ export async function runHeadlessSetup(
         const loaded = loadPlanState(projectRoot);
         if (loaded.notice) options.onMessage?.(`Warning: ${loaded.notice}`);
         // An unreadable stored plan is replaced by a fresh one; replay recognizes batches already applied.
-        if (loaded.state === null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+        if (loaded.state === null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot, { useGraph: false });
         // The one-paste flow's single-unit form has no subsystem plan to continue.
         const stored = loaded.state?.queue?.mode === "single" ? null : loaded.state;
-        if (stored === null && loaded.state !== null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+        if (stored === null && loaded.state !== null && plan === undefined) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot, { useGraph: false });
         perSubsystemState = stored ?? (plan ? createPlanState(plan) : null);
       }
     }
   }
 
+  if (mode === "code-repo" && perSubsystemState === null) {
+    report("graph");
+    await buildSetupGraph(projectRoot, { background: true, signal: options.signal, onProgress: options.onGraphProgress });
+  }
   const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan);
   options.onPopulationPrompt?.(prompt);
-  report("population");
+  if (perSubsystemState === null) report("population");
 
   // A `mex setup next` plan part-way through its subsystems must not be finalized
   // early just because its shared files are filled: without an agent to run the
@@ -426,13 +431,40 @@ export async function runHeadlessSetup(
   try {
   if (perSubsystemState !== null) {
     throwIfSetupAborted(options.signal);
-    const outcome = await runSubsystemPopulation({
+    const populationState = perSubsystemState;
+    let currentCoverage: SetupCoverageProgress | undefined;
+    let graphDetail = "Graph building";
+    const outcome = await populateDuringGraph({
+      signal: options.signal,
+      build: async (signal) => {
+        const started = Date.now();
+        populationState.graph = { startedAt: new Date(started).toISOString(), outcome: "running" };
+        savePlanState(projectRoot, populationState);
+        report("graph", "Building graph while agent sessions populate knowledge");
+        try {
+          await buildSetupGraph(projectRoot, { background: true, signal, onProgress: (progress) => {
+            options.onGraphProgress?.(progress);
+            graphDetail = `Graph: ${progress.phase}${progress.total === undefined ? "" : ` ${progress.completed ?? 0}/${progress.total}`}`;
+            report("graph", `${graphDetail} · ${currentCoverage ? describeCoverage(currentCoverage) : "Starting agent sessions"}`);
+          } });
+          populationState.graph.outcome = "completed";
+        } catch (error) {
+          populationState.graph.outcome = "failed";
+          throw error;
+        } finally {
+          populationState.graph.finishedAt = new Date().toISOString();
+          populationState.graph.durationMs = Date.now() - started;
+          savePlanState(projectRoot, populationState);
+        }
+      },
+      populate: (graphReady, signal) => runSubsystemPopulation({
       projectRoot,
-      state: perSubsystemState,
+      state: populationState,
       selectedTools,
       ...(perSubsystemTool === undefined ? {} : { tool: perSubsystemTool }),
       scannerBrief,
-      signal: options.signal,
+      signal,
+      graphReady,
       ...(options.perSubsystem?.parallelRuns === undefined ? {} : { parallelRuns: options.perSubsystem.parallelRuns }),
       ...(options.perSubsystem?.launch ? { launch: options.perSubsystem.launch } : {}),
       ...(options.perSubsystem?.applier ? { applier: options.perSubsystem.applier } : {}),
@@ -442,13 +474,18 @@ export async function runHeadlessSetup(
       onActivity: options.onPopulationActivity,
       onTranscript: options.onPopulationTranscript,
       onCoverage: (coverage) => {
+        currentCoverage = coverage;
         options.onPopulationCoverage?.(coverage);
-        report("population", describeCoverage(coverage));
+        const graph = populationState.graph;
+        report(graph?.outcome === "completed" ? "population" : "graph", `${graph?.outcome === "running" ? `${graphDetail} · ` : graph?.outcome === "failed" ? "Graph stopped; batches saved · " : ""}${describeCoverage(coverage)}`);
       },
+      }),
     }).catch(async (error: unknown) => {
       // Stopped part-way (cancel, sign-in, usage limit): leave a readable Wiki, never `migration_required`.
-      const { ensureWikiIndexUsable } = await import("./next.js");
-      await ensureWikiIndexUsable(projectRoot);
+      if (populationState.graph?.outcome === "completed") {
+        const { ensureWikiIndexUsable } = await import("./next.js");
+        await ensureWikiIndexUsable(projectRoot);
+      }
       throw error;
     });
     throwIfSetupAborted(options.signal);
@@ -618,6 +655,8 @@ export function describeCoverage(coverage: SetupCoverageProgress): string {
   }
   const running = coverage.subsystems.filter((entry) => entry.state === "running").map((entry) => `${entry.path}/`);
   return `${coverage.done}/${coverage.total} subsystems done`
+    + (coverage.shared === undefined ? "" : ` · shared files ${coverage.shared}`)
+    + (coverage.waitingForGraph ? ` · ${coverage.waitingForGraph} batches waiting for graph` : "")
     + (coverage.skipped > 0 ? `, ${coverage.skipped} skipped` : "")
     + (running.length > 0 ? ` · working on ${running.slice(0, 3).join(", ")}` : "");
 }

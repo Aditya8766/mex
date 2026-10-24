@@ -7,7 +7,10 @@ import type { BatchApplyOutcome, BatchScope, SetupBatchApplier } from "../subsys
 import {
   AGENT_RUN_FOOTPRINT_BYTES,
   FREE_MEMORY_FLOOR_BYTES,
+  GRAPH_BUILD_RESERVE_BYTES,
+  SMALL_GRAPH_BUILD_RESERVE_BYTES,
   SubsystemPhaseStoppedError,
+  graphBuildReserveBytes,
   resolveParallelRuns,
   runSubsystemPopulation,
   shouldRunPerSubsystem,
@@ -16,6 +19,7 @@ import {
 } from "../subsystem-runs.js";
 import { createPlanState, loadPlanState, savePlanState, type SetupPlanState } from "../subsystem-state.js";
 import type { SubsystemPlan } from "../subsystems.js";
+import { populateDuringGraph } from "../concurrent-graph.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -174,14 +178,118 @@ describe("choosing the per-subsystem path", () => {
 });
 
 describe("one session per subsystem", () => {
-  it("runs the shared files first, up to three subsystems at once with serialized applies, then the final pass", async () => {
+  it("starts shared and every subsystem before graph completion, releases session slots, and applies in finish order", async () => {
+    const root = project();
+    const state = createPlanState(plan(5));
+    const h = harness(root);
+    let finish!: () => void;
+    const graphReady = new Promise<void>((resolve) => { finish = resolve; });
+    const { promise } = run(root, state, h, { graphReady, parallelRuns: 2 });
+    while (h.launches.length < 6 || state.subsystems.some((unit) => !unit.runs.length)) await sleep(5);
+    expect(h.applies).toEqual([]);
+    expect(h.maxActive).toBe(2);
+    finish();
+    expect((await promise).covered).toBe(5);
+    expect(h.applies).toEqual(["shared", "a", "b", "c", "d", "e"].map((slug) => `.mex/local/setup-ops/${slug}.json`));
+    expect(h.overlappingApplies).toBe(0);
+  });
+
+  it("keeps completed batches after graph failure and resumes without rerunning those agents", async () => {
+    const root = project(); const state = createPlanState(plan(3)); const h = harness(root);
+    let fail!: (error: Error) => void;
+    const graph = new Promise<void>((_resolve, reject) => { fail = reject; });
+    const result = populateDuringGraph({ build: () => graph, populate: (graphReady, signal) => run(root, state, h, { graphReady, signal }).promise });
+    const observed = result.catch((error: unknown) => error);
+    while (state.subsystems.some((unit) => !unit.runs.length)) await sleep(5);
+    fail(new Error("Graph heap limit; rerun mex setup"));
+    expect(await observed).toMatchObject({ message: "Graph heap limit; rerun mex setup" });
+    expect(h.applies).toEqual([]);
+    const resumed = harness(root);
+    const loaded = loadPlanState(root).state!;
+    expect((await run(root, loaded, resumed, { graphReady: Promise.resolve() }).promise).covered).toBe(3);
+    expect(resumed.launches).toEqual([]);
+  });
+
+  it("reserves graph peak memory even for the first session and starts after the graph frees it", async () => {
+    const root = project(); const state = createPlanState(plan(2)); const h = harness(root);
+    let finish!: () => void;
+    const graphReady = new Promise<void>((resolve) => { finish = resolve; });
+    const free = graphBuildReserveBytes(state.plan.sourceFiles) + FREE_MEMORY_FLOOR_BYTES + AGENT_RUN_FOOTPRINT_BYTES / 2;
+    const { promise } = run(root, state, h, { graphReady, freeMemory: () => free });
+    await sleep(35); expect(h.launches).toEqual([]);
+    finish(); expect((await promise).covered).toBe(2);
+  });
+
+  it("scales the graph reserve with repository size between the small and measured-peak bounds", () => {
+    expect(graphBuildReserveBytes(300)).toBe(SMALL_GRAPH_BUILD_RESERVE_BYTES);
+    expect(graphBuildReserveBytes(4_000)).toBeCloseTo(4_000 * 0.9 * 1024 ** 2);
+    expect(graphBuildReserveBytes(10_500)).toBe(GRAPH_BUILD_RESERVE_BYTES);
+  });
+
+  it("cancels the graph on a stopping session failure and retains the session's actionable error", async () => {
+    const root = project(); const state = createPlanState(plan(2));
+    const h = harness(root, { shared: ["auth"], a: ["hang"], b: ["hang"] });
+    let graphStopped = false;
+    const result = populateDuringGraph({
+      build: (signal) => new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => {
+        graphStopped = true; reject(new Error("Graph cancelled"));
+      }, { once: true })),
+      populate: (graphReady, signal) => run(root, state, h, { graphReady, signal }).promise,
+    });
+    await expect(result).rejects.toMatchObject({ category: "authentication", message: expect.stringContaining("could not authenticate") });
+    expect(graphStopped).toBe(true);
+  });
+
+  it("cancels sessions waiting to apply without waiting for graph completion", async () => {
+    const root = project(); const state = createPlanState(plan(2)); const h = harness(root);
+    const controller = new AbortController();
+    const graphReady = new Promise<void>(() => undefined);
+    const { promise } = run(root, state, h, { graphReady, signal: controller.signal });
+    const stopped = promise.catch((error: unknown) => error);
+    while (!state.subsystems[0]!.runs.length) await sleep(5);
+    controller.abort();
+    expect(await stopped).toMatchObject({ category: "cancelled" });
+    expect(h.applies).toEqual([]);
+  });
+  it("finishes an old plan whose only pending unit is the final pass without launching an agent", async () => {
+    const root = project(true);
+    const state = createPlanState(plan(2));
+    state.shared.state = "done";
+    state.subsystems.forEach((unit) => { unit.state = "done"; });
+    const h = harness(root);
+    await run(root, state, h).promise;
+    expect(h.launches).toEqual([]);
+    expect(loadPlanState(root).state!.final.state).toBe("done");
+  });
+
+  it("upgrades legacy shared batches with a patterns-only session while preserving applied facts", async () => {
+    const root = project(true); const state = createPlanState(plan(1));
+    delete state.navigationVersion;
+    Object.assign(state.shared, { state: "done", applied: true, facts: 8 });
+    state.subsystems[0]!.state = "done";
+    mkdirSync(join(root, ".mex/local/setup-ops"), { recursive: true });
+    writeFileSync(join(root, ".mex/local/setup-ops/shared.json"), "[]");
+    const h = harness(root);
+    const prompts: string[] = [];
+    const launch = async (input: HeadlessPopulationOptions) => {
+      prompts.push(input.prompt);
+      writeFileSync(join(root, ".mex/local/setup-ops/shared.json"), JSON.stringify([{ setup: { patterns: [] } }]));
+      return { tool: "codex" as const, completed: true };
+    };
+    await run(root, state, h, { launch }).promise;
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Do not rewrite shared content or facts");
+    expect(state.shared.facts).toBe(8);
+    expect(state.final.state).toBe("done");
+  });
+  it("runs the shared files first, up to three subsystems at once with serialized applies, then reconciles navigation without another agent", async () => {
     const root = project();
     const state = createPlanState(plan(5));
     const h = harness(root, {}, { delayMs: 40 });
     const { promise, messages, coverage } = run(root, state, h);
     const outcome = await promise;
     expect(h.launches[0]).toEqual({ kind: "shared", slug: "shared" });
-    expect(h.launches.at(-1)).toEqual({ kind: "final", slug: "final" });
+    expect(h.launches.some((entry) => entry.kind === "final")).toBe(false);
     expect(h.launches.filter((entry) => entry.kind === "subsystem")).toHaveLength(5);
     expect(h.maxActive).toBe(3);
     expect(h.overlappingApplies).toBe(0);
@@ -229,7 +337,7 @@ describe("one session per subsystem", () => {
     expect(outcome.summary).toContain("Skipped 1: src/b/ (its batch was refused twice");
     expect(outcome.summary).toContain("Rerun `mex setup` to try it again.");
     expect(messages.some((message) => message.startsWith("Warning: Skipped subsystem src/b/: its batch was refused twice"))).toBe(true);
-    expect(finalPrompts[0]).toContain("MEX retries them on the next setup run:\n- src/b/");
+    expect(finalPrompts).toEqual([]);
     expect(loadPlanState(root).state!.subsystems[1]).toMatchObject({ state: "skipped", reason: expect.stringContaining("refused twice") });
   });
 
@@ -335,7 +443,7 @@ describe("one session per subsystem", () => {
     const h = harness(root);
     const { promise, messages } = run(root, reloaded, h);
     const outcome = await promise;
-    expect(h.launches).toEqual([{ kind: "subsystem", slug: "b" }, { kind: "subsystem", slug: "d" }, { kind: "final", slug: "final" }]);
+    expect(h.launches).toEqual([{ kind: "subsystem", slug: "b" }, { kind: "subsystem", slug: "d" }]);
     expect(messages).toContain("Applied the batch an earlier run left for subsystem src/c/.");
     expect(outcome.covered).toBe(4);
     expect(h.applies).not.toContain(".mex/local/setup-ops/a.json");
@@ -352,7 +460,7 @@ describe("one session per subsystem", () => {
     ]));
     const h = harness(root);
     expect((await run(root, state, h).promise).covered).toBe(1);
-    expect(h.launches.map((entry) => entry.kind)).toEqual(["fix", "final"]);
+    expect(h.launches.map((entry) => entry.kind)).toEqual(["fix"]);
   });
 
   it("runs fewer sessions at once when free memory is low, never fewer than one", async () => {
