@@ -1,4 +1,4 @@
-import { GraphCandidateProcessError } from "../graph/candidate-process.js";
+import { graphHeapRecovery, GraphCandidateProcessError } from "../graph/candidate-process.js";
 import { IndexInUseError, IndexPathError } from "../wiki/index/dbfile.js";
 import { WikiSourceReadError } from "../wiki/index/source-read.js";
 import { WIKI_DIAGNOSTICS, type WikiDiagnostic } from "../wiki/model/diagnostic.js";
@@ -71,7 +71,7 @@ export function classifySetupMaintenanceError(
 
 function graphWorkerRecovery(error: GraphCandidateProcessError): string {
   if (error.diagnostic?.resourceFailure === "heap-limit") {
-    return "The graph worker reached Node's JavaScript heap limit. Retry setup with a larger heap using NODE_OPTIONS=--max-old-space-size=<MB>, sized for your available memory.";
+    return graphHeapRecovery(error.diagnostic);
   }
   switch (error.diagnostic?.reason) {
     case "entrypoint-missing":
