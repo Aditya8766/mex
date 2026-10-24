@@ -771,7 +771,7 @@ describe("no unscoped scaffold writes", () => {
       "src/graph/candidate-process.ts": "removes only the identity-bound parent-owned temporary workspace after the candidate child closes",
       "src/graph/engine-impl.ts": "writes only a private, bounded temporary source spool that is removed before graph publication",
       "src/graph/grounding-evidence.ts": "writes only checkout-local, content-addressed grounded bodies under .mex/local/grounded-bodies",
-      "src/graph/phase-timing.ts": "appends diagnostic phase timings only to the file an operator names in MEX_GRAPH_PHASE_TIMINGS",
+      "src/graph/phase-timing.ts": "appends diagnostic phase timings only to the MEX_GRAPH_PHASE_TIMINGS target: the operator-named file, or the checkout-local .mex/local default for bare flag values",
       "src/graph/maintenance.ts": "publishes and recovers the disposable graph index under its maintenance lease",
       "src/graph/runtime.ts": "edits existing .mex Markdown; bypasses the pipeline (recorded D9 exception)",
       "src/hub/setup/commit.ts": "manages temporary and preserved Git indexes for explicit revision-reviewed setup commits; never edits Wiki content",
