@@ -20,6 +20,7 @@ import { diagnostic, hasBlockingDiagnostic, type WikiDiagnostic } from "../model
 import type { EntityTypeRegistry } from "../model/entity.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
 import { resolveGrounding } from "../grounding/resolve.js";
+import { normalizeReferencePath } from "../grounding/code-reference.js";
 import type { GroundingResolver } from "../index/write.js";
 import { createHash } from "node:crypto";
 import { prepareWikiRebuild, rebuildWikiIndex, type RebuildOptions, type RebuildResult } from "../index/rebuild.js";
@@ -48,6 +49,15 @@ import {
 } from "../migration/migrate.js";
 import { indexPathFor, type ServiceResult, type WikiServiceOptions } from "./read.js";
 import type { WikiMaintenanceContext } from "../index/maintenance.js";
+
+/**
+ * Prove a link's source in the graph's own path form (`./src/a.ts` and `src\a.ts` name
+ * `src/a.ts`). A path that cannot name a repository file is left to the planner's diagnostic.
+ */
+function verifyLinkedSource(graph: { verifySource?: (path: string) => void }, file: string): void {
+  const path = normalizeReferencePath(file);
+  if (path !== null) graph.verifySource?.(path);
+}
 
 /** Everything a write needs beyond where the scaffold is. */
 export interface WikiWriteOptions extends WikiServiceOptions {
@@ -192,7 +202,7 @@ export function wikiApplyOperation(
     const validated = validateOperation(envelope, rootContext());
     if (validated.ok && (validated.value.type === "create-entry" || validated.value.type === "set-grounding")) {
       for (const grounding of validated.value.payload.groundsTo ?? []) {
-        if (grounding.file) options.graph.verifySource(grounding.file);
+        if (grounding.file) verifyLinkedSource(options.graph, grounding.file);
         if ("node" in grounding) options.graph.getNode(grounding.node);
       }
     }
@@ -207,7 +217,7 @@ export function wikiApplyOperation(
           ...(options.registry === undefined ? {} : { registry: options.registry }),
         }).entities) {
           for (const grounding of entity.groundsTo) {
-            if (grounding.file) options.graph.verifySource(grounding.file);
+            if (grounding.file) verifyLinkedSource(options.graph, grounding.file);
             options.graph.getNode(grounding.node);
           }
         }
@@ -485,7 +495,7 @@ export function wikiApplyOperationBatch(
       const operation = operations[index];
       if (operation?.type === "create-entry" || operation?.type === "set-grounding") {
         for (const grounding of operation.payload.groundsTo ?? []) {
-          if (grounding.file) options.graph.verifySource(grounding.file);
+          if (grounding.file) verifyLinkedSource(options.graph, grounding.file);
           if ("node" in grounding) options.graph.getNode(grounding.node);
         }
       }
@@ -497,7 +507,7 @@ export function wikiApplyOperationBatch(
       ...(options.registry === undefined ? {} : { registry: options.registry }),
     }).entities) {
       for (const grounding of entity.groundsTo) {
-        if (grounding.file) options.graph.verifySource(grounding.file);
+        if (grounding.file) verifyLinkedSource(options.graph, grounding.file);
         options.graph.getNode(grounding.node);
       }
     }
