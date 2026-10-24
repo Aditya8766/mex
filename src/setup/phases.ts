@@ -103,6 +103,17 @@ export function resolveSetupMode(mexDir: string, requested?: string): SetupMode 
   return normalizeSetupMode(requested ?? loadConfiguredSetupMode(mexDir));
 }
 
+/**
+ * Code-repository setup needs Git; agent-memory setup does not. One check for
+ * the engine, the dry-run preview and the terminal's pre-picker gate, so a
+ * presentation can stop before asking anything the engine would then refuse.
+ */
+export function requireSetupGitRepository(projectRoot: string, mode: SetupMode): void {
+  if (mode === "code-repo" && !existsSync(resolve(projectRoot, ".git"))) {
+    throw new SetupError("No Git repository found. Run `git init` first, then rerun setup.");
+  }
+}
+
 /** Shared scaffold phase; CLI and browser use identical preservation rules. */
 export function createSetupScaffold(options: {
   projectRoot: string;
