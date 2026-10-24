@@ -15,6 +15,7 @@
 
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
+import { parseWikiMarkdown } from "../markdown/codec.js";
 import { diagnostic, hasBlockingDiagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
@@ -70,7 +71,12 @@ export interface WikiWriteOptions extends WikiServiceOptions {
  */
 function groundingResolverFor(options: WikiWriteOptions): { resolveGrounding?: GroundingResolver } {
   const graph = options.graph ?? null;
-  return graph === null ? {} : { resolveGrounding: (grounding, context) => resolveGrounding(grounding, graph, context) };
+  return graph === null ? {} : {
+    resolveGrounding: Object.assign(
+      (grounding: Parameters<GroundingResolver>[0], context?: Parameters<GroundingResolver>[1]) => resolveGrounding(grounding, graph, context),
+      graph.revision === undefined ? {} : { graphRevision: graph.revision },
+    ),
+  };
 }
 
 function applyOptionsFrom(options: WikiWriteOptions): ApplyOptions {
@@ -168,6 +174,8 @@ export function wikiApplyOperation(
     apply?: boolean;
     plan?: WikiPatchPlan;
     expectedPreviewRevision?: string;
+    /** Explicit maintenance such as reground keeps a full refresh. */
+    targetedGroundings?: boolean;
   },
 ): ServiceResult<ApplyData> {
   // A file-level create cannot be freshly planned after its one metadata map
@@ -177,7 +185,34 @@ export function wikiApplyOperation(
     const replay = completedCreateReplay(envelope, options.scaffoldRoot);
     if (replay !== null) return replay;
   }
+  if (options.graph?.verifySource) {
+    // Prove new links before the planner translates expected edit failures
+    // into diagnostics. A stale source must retain the graph refusal path.
+    const validated = validateOperation(envelope, rootContext());
+    if (validated.ok && (validated.value.type === "create-entry" || validated.value.type === "set-grounding")) {
+      for (const grounding of validated.value.payload.groundsTo ?? []) {
+        if (grounding.file) options.graph.verifySource(grounding.file);
+        options.graph.getNode(grounding.node);
+      }
+    }
+  }
   const planned = wikiPlanOperation(envelope, options);
+  if (planned.data.plan && options.graph?.verifySource) {
+    // Include removed links and other entities sharing a changed file.
+    // The plan owns these contained, revision-bound source bytes.
+    for (const file of planned.data.plan.files) {
+      for (const text of [file.baseText, file.proposedText]) {
+        for (const { entity } of parseWikiMarkdown({ path: file.path, text,
+          ...(options.registry === undefined ? {} : { registry: options.registry }),
+        }).entities) {
+          for (const grounding of entity.groundsTo) {
+            if (grounding.file) options.graph.verifySource(grounding.file);
+            options.graph.getNode(grounding.node);
+          }
+        }
+      }
+    }
+  }
   if (options.apply !== true || !planned.data.planned) {
     return {
       data: { ...planned.data, applied: false, replayed: false, changedFiles: [], createdIds: [] },
@@ -185,7 +220,7 @@ export function wikiApplyOperation(
     };
   }
 
-  const applyOptions: ApplyOptions = applyOptionsFrom(options);
+  const applyOptions: ApplyOptions = { ...applyOptionsFrom(options), targetedGroundings: options.targetedGroundings !== false };
   const result = options.plan !== undefined && options.expectedPreviewRevision !== undefined
     ? applyPlannedOperation(options.plan, {
         ...applyOptions,

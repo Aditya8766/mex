@@ -447,9 +447,10 @@ export async function runApply(io: CommandIo, file: string, flags: CommandFlags)
     ...(write ? { apply: true } : {}),
     graph,
   });
+  const sourceScope = new Set<string>();
   const { value: applied, unavailable } = write
-    ? await writeWithGraph(io.groundingBridge, applyWith)
-    : await readWithGraph(io.groundingBridge, applyWith);
+    ? await writeWithGraph(io.groundingBridge, applyWith, { sourceScope })
+    : await readWithGraph(io.groundingBridge, applyWith, { sourceScope });
   const result = { ...applied, diagnostics: [...applied.diagnostics, ...graphDiagnostics(unavailable)] };
   emit(io, result, flags, (data) => {
     if (data.diff !== null) io.write(data.diff);

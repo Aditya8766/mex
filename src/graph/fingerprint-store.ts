@@ -1,5 +1,6 @@
 import type { GroundedSource, GroundingBaseline, GroundingSubject } from "./grounding.js";
-import { bandHashInts, decodeMinhash, encodeMinhash } from "./fingerprint.js";
+import { assertFingerprint, bandHashInts, decodeMinhash, encodeMinhash } from "./fingerprint.js";
+import { BANDS, K, ROWS } from "./config.js";
 import type { Fingerprint } from "./reconcile.js";
 import type { SQLInputValue } from "node:sqlite";
 
@@ -157,10 +158,24 @@ export class FingerprintStore {
         candidates.add(row.node_id);
       }
     });
-    return [...candidates]
-      .sort()
-      .map((nodeId) => ({ nodeId, fingerprint: this.get(nodeId) }))
-      .filter((entry): entry is { nodeId: string; fingerprint: Fingerprint } => entry.fingerprint !== null);
+    const ordered = [...candidates].sort();
+    const result: Array<{ nodeId: string; fingerprint: Fingerprint }> = [];
+    // Candidates came from current fingerprint rows, so alias fallback is
+    // unnecessary. Bound parameters and decoded working sets independently of
+    // the corpus size, and restore JavaScript's original code-unit ordering.
+    for (let offset = 0; offset < ordered.length; offset += 500) {
+      const ids = ordered.slice(offset, offset + 500);
+      const rows = this.db.prepare(
+        `SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints
+         WHERE node_id IN (${ids.map(() => "?").join(",")})`,
+      ).all(...ids) as FingerprintRow[];
+      const byId = new Map(rows.map(row => [row.node_id, row]));
+      for (const nodeId of ids) {
+        const row = byId.get(nodeId);
+        if (row) result.push({ nodeId, fingerprint: decodeRow(row) });
+      }
+    }
+    return result;
   }
 
   /**
@@ -396,6 +411,9 @@ function decodeRow(row: FingerprintRow): Fingerprint {
   };
   // The compact BLOB decoder can represent every byte sequence; validate the
   // semantic K=64 fingerprint before it reaches reconciliation.
-  bandHashInts(fingerprint);
+  assertFingerprint(fingerprint);
+  if (BANDS * ROWS !== K) {
+    throw new Error(`Invalid LSH configuration: ${BANDS} * ${ROWS} !== ${K}`);
+  }
   return fingerprint;
 }
