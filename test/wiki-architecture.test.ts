@@ -783,6 +783,8 @@ describe("no unscoped scaffold writes", () => {
       "src/setup/anchor.ts": "edits root tool configs only, never .mex/, and only inside its own markers",
       "src/setup/global-install.ts": "removes only the private temporary npm working directory after the owned global installation finishes",
       "src/setup/ignore.ts": "creates or appends only the setup-managed .mex/.gitignore rules",
+      "src/setup/subsystem-runs.ts": "writes the checkout-local plan progress view and marks applied batch files under .mex/local; never Wiki Markdown",
+      "src/setup/subsystem-state.ts": "atomically saves the checkout-local setup plan state under .mex/local and sets a corrupt one aside",
       "src/team/artifacts/filesystem.ts": "atomically publishes bounded team-owned canonical artifacts",
       "src/team/local-state/receipt-signer.ts": "atomically provisions the bounded local-only C preview signing credential",
       "src/team/relay/cli/local-preview.ts": "removes only the exact contained checkout-local Relay receipt after successful apply",
