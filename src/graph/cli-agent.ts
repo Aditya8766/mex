@@ -823,7 +823,6 @@ export function runGraphScope(
       evidenceStrength: selection.evidenceStrength,
       coveredTerms: selection.coveredTerms,
       returnedFiles,
-      sourceBackedNodes: [...finalSourcedIds],
       textFallbackFiles,
       warnings,
     })));
@@ -930,12 +929,11 @@ const SIZE_PROBE = 9_999_999;
 /** Slack over the anticipated summary size (covers node-id/name length variance). */
 const RESERVE_PAD = 16;
 const SUMMARY_LIST_KEYS = [
-  "sourceBackedNodes", "coveredTerms", "returnedFiles", "textFallbackFiles",
+  "coveredTerms", "returnedFiles", "textFallbackFiles",
   "suggestedNextCommands", "warnings",
 ] as const;
 type SummaryListKey = typeof SUMMARY_LIST_KEYS[number];
 const SUMMARY_LIST_LIMITS: Record<SummaryListKey, number> = {
-  sourceBackedNodes: 24,
   coveredTerms: 12,
   returnedFiles: 6,
   textFallbackFiles: 6,
@@ -984,6 +982,17 @@ function beginResponse(
   return { ledger, meta, effectiveMax };
 }
 
+/**
+ * Reserve once held by the summary's retired `sourceBackedNodes` list (#289).
+ * The list is no longer emitted, but Scope's source admission is sensitive to
+ * this reserve: at some budgets a larger source share lets an optional body
+ * displace a later file's compact answer. The reserve keeps its size until
+ * that admission order is fixed on its own.
+ */
+const RETIRED_SUMMARY_RESERVE = {
+  sourceBackedNodes: Array(24).fill("method:0123456789abcdef0123456789abcdef"),
+};
+
 function summarySkeleton(suggestions: string[]): Rec {
   return {
     type: "summary", matchedNodes: SIZE_PROBE, returnedNodes: SIZE_PROBE, returnedEdges: SIZE_PROBE,
@@ -991,10 +1000,11 @@ function summarySkeleton(suggestions: string[]): Rec {
     status: "degraded", evidenceStrength: "moderate",
     coveredTerms: Array(12).fill("identifier-component"),
     returnedFiles: Array(6).fill("path/to/a/representative/source-file.ts"),
-    sourceBackedNodes: Array(24).fill("method:0123456789abcdef0123456789abcdef"),
+    ...RETIRED_SUMMARY_RESERVE,
     textFallbackFiles: Array(6).fill("path/to/a/representative/source-file.ts"),
     warnings: Array(3).fill("Representative graph health warning."),
-    omittedCounts: Object.fromEntries(SUMMARY_LIST_KEYS.map((key) => [key, SIZE_PROBE])),
+    omittedCounts: Object.fromEntries([...Object.keys(RETIRED_SUMMARY_RESERVE), ...SUMMARY_LIST_KEYS]
+      .map((key) => [key, SIZE_PROBE])),
   };
 }
 
@@ -1019,13 +1029,11 @@ function summaryRecord(
     evidenceStrength?: "strong" | "moderate" | "weak" | "none";
     coveredTerms?: string[];
     returnedFiles?: string[];
-    sourceBackedNodes?: string[];
     textFallbackFiles?: string[];
     warnings?: string[];
   },
 ): Rec {
   const capped = capSummaryLists({
-    sourceBackedNodes: fields.sourceBackedNodes ?? [],
     coveredTerms: fields.coveredTerms ?? [],
     returnedFiles: fields.returnedFiles ?? [],
     textFallbackFiles: fields.textFallbackFiles ?? [],
@@ -1049,7 +1057,6 @@ function summaryRecord(
     evidenceStrength: fields.evidenceStrength ?? (fields.returnedNodes > 0 ? "strong" : "none"),
     coveredTerms: capped.values.coveredTerms,
     returnedFiles: capped.values.returnedFiles,
-    sourceBackedNodes: capped.values.sourceBackedNodes,
     textFallbackFiles: capped.values.textFallbackFiles,
     warnings: capped.values.warnings,
     omittedCounts: capped.omittedCounts,

@@ -225,8 +225,10 @@ describe("runGraphScope", () => {
       type: "summary", status: "ok", evidenceStrength: "strong",
       returnedFiles: expect.arrayContaining(["main.ts"]), textFallbackFiles: [], suggestedNextCommands: [],
     });
-    expect(summary.sourceBackedNodes).toEqual(expect.arrayContaining(facts.map((fact) => fact.id)));
+    // Source records already carry their node ids; the summary does not repeat them (#289).
+    expect(summary).not.toHaveProperty("sourceBackedNodes");
     const sourcedIds = sources.flatMap((source) => (source.ranges as SourceRange[]).flatMap((range) => range.nodeIds));
+    expect(sourcedIds).toEqual(expect.arrayContaining(facts.map((fact) => fact.id)));
     expect(summary.returnedNodes).toBe(new Set([...sourcedIds, ...facts.map((fact) => fact.id as string)]).size);
     expect(typeof summary.estimatedOutputTokens).toBe("number");
     expect(typeof summary.truncated).toBe("boolean");
@@ -781,9 +783,6 @@ describe("runGraphScope", () => {
         && (record.steps as GraphEdge[]).some((step) => step.source === parent.id
           && step.target === helper.id))).toBe(true);
       expect(records.at(-1)).toMatchObject({ type: "summary", status: "ok" });
-      expect(records.at(-1)!.sourceBackedNodes).toEqual(expect.arrayContaining([
-        parent.id, helper.id,
-      ]));
       expect(records.at(-1)!.estimatedOutputTokens as number).toBeLessThanOrEqual(3000);
     } finally {
       rmSync(isolated, { recursive: true, force: true });

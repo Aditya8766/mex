@@ -162,11 +162,10 @@ export interface SummaryRecord {
   evidenceStrength: "strong" | "moderate" | "weak" | "none";
   coveredTerms: string[];
   returnedFiles: string[];
-  sourceBackedNodes: string[];
   textFallbackFiles: string[];
   warnings: string[];
   omittedCounts: Partial<Record<
-    "sourceBackedNodes" | "coveredTerms" | "returnedFiles" | "textFallbackFiles" | "suggestedNextCommands" | "warnings",
+    "coveredTerms" | "returnedFiles" | "textFallbackFiles" | "suggestedNextCommands" | "warnings",
     number
   >>;
 }
