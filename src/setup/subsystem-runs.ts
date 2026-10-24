@@ -5,12 +5,12 @@
  * or stalls halfway, and an agent's judgment decides what is finished. Here MEX
  * drives the work from its stored plan instead:
  *
- * 1. one session fills the shared scaffold files;
+ * 1. one session fills the shared scaffold files, alongside the graph build;
  * 2. one fresh, small session per subsystem (up to three at once, as free memory
  *    allows) reads that subsystem's code with file tools, runs no `mex` command,
  *    writes one batch file and exits; MEX applies each batch in-process, one at a
  *    time, and marks the subsystem done;
- * 3. one last session writes patterns, routing rows and edges.
+ * 3. MEX reconciles patterns, routing rows and edges without another session.
  *
  * A refused batch gets one short fix session; if it is refused again, or a
  * session fails, that subsystem is skipped with a warning and the rest go on.
@@ -19,7 +19,7 @@
  * `mex setup` continues. Every step is recorded, so a rerun keeps what is done.
  */
 import { freemem } from "node:os";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, opendirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { AiTool } from "../types.js";
 import type { BackgroundAgentTool } from "../agent-command.js";
@@ -37,6 +37,7 @@ import type { PopulationAgentUsage } from "./population-activity.js";
 import {
   buildBatchFixPrompt,
   buildSharedFilesPrompt,
+  buildSharedPatternsPrompt,
   buildSubsystemPrompt,
   SHARED_CONTEXT_FILES,
   type SubsystemPromptEntry,
@@ -64,6 +65,10 @@ export const MAX_PARALLEL_RUNS = 8;
 export const AGENT_RUN_FOOTPRINT_BYTES = 1.5 * 1024 ** 3;
 /** Never start a second or third session that would leave less free memory than this. */
 export const FREE_MEMORY_FLOOR_BYTES = 2 * 1024 ** 3;
+/** Reserve the graph's measured peak before starting any concurrent agent. */
+export const GRAPH_BUILD_RESERVE_BYTES = 8.5 * 1024 ** 3;
+/** Small repositories avoid the large compiler corpus; still reserve a separate worker footprint. */
+export const SMALL_GRAPH_BUILD_RESERVE_BYTES = 2.5 * 1024 ** 3;
 /** A session younger than this may still be growing; its full footprint stays reserved. */
 const RAMP_UP_MS = 60_000;
 /** This many sessions failing in a row, with no success between, is not the subsystems' fault. */
@@ -108,6 +113,8 @@ export function shouldRunPerSubsystem(input: {
 }
 
 export interface SetupCoverageProgress {
+  readonly shared?: UnitState;
+  readonly waitingForGraph?: number;
   readonly phase: "shared" | "subsystems" | "final" | "complete";
   readonly total: number;
   readonly done: number;
@@ -123,6 +130,8 @@ export interface SubsystemPopulationOptions {
   /** The agent every session of this phase runs (MEX chose it once); otherwise each launch chooses. */
   readonly tool?: BackgroundAgentTool;
   readonly scannerBrief: string | null;
+  /** Sessions may write immediately, but no apply or fix starts before this resolves. */
+  readonly graphReady?: Promise<void>;
   readonly signal?: AbortSignal;
   readonly parallelRuns?: number;
   readonly onMessage?: (message: string) => void;
@@ -163,7 +172,7 @@ class MissingAgentError extends Error {}
 
 const STOPPING_CATEGORIES: ReadonlySet<string> = new Set(["cancelled", "authentication", "usage_limit", "launch", "arguments", "prompt"]);
 
-type UnitKind = "shared" | "subsystem" | "final";
+type UnitKind = "shared" | "subsystem";
 
 interface WorkUnit {
   readonly kind: UnitKind;
@@ -244,6 +253,15 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   let consecutiveFailures = 0;
   let coveragePhase: SetupCoverageProgress["phase"] = "shared";
   const running = new Set<WorkUnit>();
+  const sessions = new Set<WorkUnit>();
+  let wake: () => void = () => undefined;
+  let slotChanged = new Promise<void>((resolve) => { wake = resolve; });
+  const notifySlot = () => { wake(); slotChanged = new Promise<void>((resolve) => { wake = resolve; }); };
+  phase.signal.addEventListener("abort", notifySlot, { once: true });
+  const graphStartFree = freeMemory();
+  const graphReserve = state.plan.sourceFiles <= 500 ? SMALL_GRAPH_BUILD_RESERVE_BYTES : GRAPH_BUILD_RESERVE_BYTES;
+  let graphBuilding = options.graphReady !== undefined;
+  void options.graphReady?.then(() => { graphBuilding = false; notifySlot(); }, () => { graphBuilding = false; phase.abort(); notifySlot(); });
   const startedAt = new Map<WorkUnit, number>();
   let finalNeeded = state.final.state !== "done";
 
@@ -262,6 +280,8 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     const subsystems = state.subsystems.map((unit) => ({ path: unit.path, state: unit.state }));
     try {
       options.onCoverage?.({
+        shared: state.shared.state,
+        waitingForGraph: graphBuilding ? [...running].filter((unit) => !sessions.has(unit) && unit.batchFile !== undefined && existsSync(resolve(projectRoot, unit.batchFile))).length : 0,
         phase: coveragePhase,
         total: subsystems.length,
         done: subsystems.filter((unit) => unit.state === "done").length,
@@ -274,7 +294,23 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   const nestedOf = (unit: SubsystemUnit) => unit.remainder
     ? state.subsystems.filter((other) => other !== unit && other.path.startsWith(`${unit.path}/`)).map((other) => other.path)
     : [];
+  const descriptions = new Map(state.subsystems.map((unit) => {
+    let names: string[] = [];
+    try {
+      const directory = opendirSync(resolve(projectRoot, unit.path));
+      try {
+        for (let count = 0; count < 100; count += 1) {
+          const entry = directory.readSync();
+          if (!entry) break;
+          if (entry.isFile() && !entry.name.startsWith(".")) names.push(entry.name);
+        }
+      } finally { directory.closeSync(); }
+      names = names.sort().slice(0, 5);
+    } catch { /* the folder itself still describes the planned responsibility */ }
+    return [unit.slug, `${folder(unit.path, unit.remainder)} — ${unit.files} source files${names.length ? `; entry files include ${names.join(", ")}` : "; explore its entry points and responsibilities"}`];
+  }));
   const promptEntry = (unit: SubsystemUnit): SubsystemPromptEntry => ({
+    description: descriptions.get(unit.slug),
     path: unit.path,
     ...(unit.remainder ? { remainder: true } : {}),
     budget: unit.budget,
@@ -283,13 +319,21 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     opIdPrefix: opIdPrefix(unit.slug),
   });
 
+  const sharedBatchPath = resolve(projectRoot, unitBatchFile(SHARED_UNIT_SLUG));
+  let legacyPatterns = false;
+  if (state.navigationVersion !== 1 && state.shared.state === "done" && state.final.state !== "done" && existsSync(sharedBatchPath)) {
+    try { legacyPatterns = !readSetupBatch(sharedBatchPath).extended; } catch { /* the usual refusal/fix flow handles a malformed batch */ }
+  }
+  const sharedFactsBeforeUpgrade = state.shared.facts;
+  if (state.shared.state !== "done") state.navigationVersion = 1;
+
   const sharedUnit: WorkUnit = {
     kind: "shared",
     label: "the shared files",
     progress: state.shared,
     batchFile: unitBatchFile(SHARED_UNIT_SLUG),
     scope: { opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG), files: [...SHARED_CONTEXT_FILES] },
-    writePrompt: () => buildSharedFilesPrompt({
+    writePrompt: () => legacyPatterns ? buildSharedPatternsPrompt(unitBatchFile(SHARED_UNIT_SLUG)) : buildSharedFilesPrompt({
       navigationData: true,
       briefJson: options.scannerBrief,
       batchFile: unitBatchFile(SHARED_UNIT_SLUG),
@@ -310,12 +354,11 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     allowed: () => false,
   }));
 
-
   let guard: ScopeGuard | null = null;
   try { guard = new ScopeGuard(projectRoot, { trackSource: options.trackSource !== false }); }
   catch { guard = null; }
   const reportScope = (changed: readonly string[], suspects: readonly WorkUnit[]) => {
-    const unexpected = changed.filter((path) => !(suspects.length === 1 && suspects[0]!.allowed(path)));
+    const unexpected = changed.filter((path) => !suspects.some((unit) => unit.allowed(path)));
     if (unexpected.length === 0) return;
     const who = suspects.length === 0
       ? "while no MEX session was running"
@@ -327,8 +370,21 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   };
 
   let applyChain: Promise<unknown> = Promise.resolve();
+  const waitForGraph = async () => {
+    if (phase.signal.aborted) throw new HeadlessPopulationError("cancelled");
+    if (!options.graphReady) return;
+    let abort: () => void = () => undefined;
+    const stopped = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new HeadlessPopulationError("cancelled"));
+      phase.signal.addEventListener("abort", abort, { once: true });
+    });
+    try { await Promise.race([options.graphReady, stopped]); }
+    finally { phase.signal.removeEventListener("abort", abort); }
+  };
   const applyUnit = (unit: WorkUnit): Promise<BatchApplyOutcome> => {
     const run = applyChain.then(async () => {
+      await waitForGraph();
+      if (phase.signal.aborted) throw new HeadlessPopulationError("cancelled");
       if (guard) reportScope(guard.take(), [...running].filter((other) => other !== unit));
       const started = now();
       let outcome: BatchApplyOutcome;
@@ -364,6 +420,11 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   };
 
   const runAgent = async (unit: WorkUnit, prompt: string, kind: "write" | "fix"): Promise<{ ok: true } | { ok: false; error: unknown }> => {
+    while (kind === "fix" && options.graphReady !== undefined && !canStartAnother() && !phase.signal.aborted) {
+      await Promise.race([slotChanged, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
+    }
+    if (phase.signal.aborted) return { ok: false, error: new HeadlessPopulationError("cancelled") };
+    sessions.add(unit);
     const started = now();
     startedAt.set(unit, started);
     let usage: PopulationAgentUsage | undefined;
@@ -393,12 +454,17 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       if (!result.completed) throw new HeadlessPopulationError("protocol", result.tool);
       lastTool = result.tool;
       record("completed");
+      save();
       return { ok: true };
     } catch (error) {
       const cancelled = phase.signal.aborted;
       record(cancelled ? "stopped" : "failed", cancelled ? "stopped" : failureCategory(error));
       return { ok: false, error: cancelled && !(error instanceof HeadlessPopulationError && error.category === "cancelled")
         ? new HeadlessPopulationError("cancelled") : error };
+    } finally {
+      sessions.delete(unit);
+      notifySlot();
+      coverage();
     }
   };
 
@@ -411,6 +477,8 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     unit.progress.state = "done";
     delete unit.progress.reason;
     if (facts !== undefined) unit.progress.facts = facts;
+    if (unit.kind === "shared" && sharedFactsBeforeUpgrade !== undefined) unit.progress.facts = Math.max(sharedFactsBeforeUpgrade, facts ?? 0);
+    if (unit.kind === "shared" && legacyPatterns) state.navigationVersion = 1;
     if (unit.batchFile !== undefined) unit.progress.applied = true;
     consecutiveFailures = 0;
     if (unit.kind === "subsystem") finalNeeded = true;
@@ -467,7 +535,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       let problems: readonly BatchProblem[] | null = null;
       const batchPath = unit.batchFile === undefined ? null : resolve(projectRoot, unit.batchFile);
       // A batch an earlier run wrote but never applied is applied first; replay by opId makes this safe.
-      if (batchPath !== null && !unit.progress.applied && existsSync(batchPath)) {
+      if (batchPath !== null && !unit.progress.applied && existsSync(batchPath) && !(unit.kind === "shared" && legacyPatterns)) {
         const outcome = await applyUnit(unit);
         if (outcome.kind === "applied" && (unit.kind !== "shared" || isScaffoldPopulated(mexDir))) {
           done(unit, outcome.facts, `Applied the batch an earlier run left for ${unit.label}.`);
@@ -537,28 +605,37 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   };
 
   const canStartAnother = (): boolean => {
-    if (running.size === 0) return true;
-    if (running.size >= limit) return false;
+    if (graphBuilding) {
+      // Bound both current pressure and the graph's remaining growth. Reserve every
+      // active CLI's full peak against the initial free memory, even after ramp-up.
+      return sessions.size < limit
+        && graphStartFree - graphReserve - AGENT_RUN_FOOTPRINT_BYTES * (sessions.size + 1) >= FREE_MEMORY_FLOOR_BYTES
+        && freeMemory() - AGENT_RUN_FOOTPRINT_BYTES * (sessions.size + 1) >= FREE_MEMORY_FLOOR_BYTES;
+    }
+    const slots = options.graphReady === undefined ? running : sessions;
+    if (slots.size === 0) return true;
+    if (slots.size >= limit) return false;
     // A running session younger than the ramp-up window may still be growing: keep its full footprint reserved.
-    const ramping = [...running].filter((unit) => now() - (startedAt.get(unit) ?? 0) < RAMP_UP_MS).length;
+    const ramping = [...slots].filter((unit) => now() - (startedAt.get(unit) ?? 0) < RAMP_UP_MS).length;
     return freeMemory() - AGENT_RUN_FOOTPRINT_BYTES * (1 + ramping) >= FREE_MEMORY_FLOOR_BYTES;
   };
 
   try {
     save();
     // The shared files come first: every subsystem session reads them for context.
-    if (state.shared.state !== "done" || !isScaffoldPopulated(mexDir)) {
+    const needsShared = legacyPatterns || state.shared.state !== "done" || !isScaffoldPopulated(mexDir);
+    if (needsShared && options.graphReady === undefined) {
       coveragePhase = "shared";
       await runUnit(sharedUnit);
     }
     if (stopError === null) {
       coveragePhase = "subsystems";
       coverage();
-      const queue = subsystemUnits.filter((unit) => unit.progress.state !== "done");
+      const queue = [ ...(needsShared && options.graphReady !== undefined ? [sharedUnit] : []), ...subsystemUnits.filter((unit) => unit.progress.state !== "done") ];
       const active = new Map<WorkUnit, Promise<void>>();
       let warnedMemory = false;
-      while (stopError === null && (queue.length > 0 || active.size > 0)) {
-        while (stopError === null && queue.length > 0 && running.size < limit) {
+      while (stopError === null && !phase.signal.aborted && (queue.length > 0 || active.size > 0)) {
+        while (stopError === null && !phase.signal.aborted && queue.length > 0 && (options.graphReady === undefined ? running.size : sessions.size) < limit) {
           if (!canStartAnother()) {
             if (!warnedMemory) {
               warnedMemory = true;
@@ -570,10 +647,12 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
           const settled = runUnit(unit).finally(() => { active.delete(unit); });
           active.set(unit, settled);
         }
-        if (active.size === 0) break;
-        await Promise.race(active.values());
+        if (active.size === 0 && !graphBuilding) break;
+        const changed = slotChanged;
+        await Promise.race([...active.values(), changed]);
       }
       await Promise.allSettled(active.values());
+      if (phase.signal.aborted && stopError === null) stopWith(new HeadlessPopulationError("cancelled"));
     }
     if (stopError === null && finalNeeded) {
       coveragePhase = "final";
@@ -582,7 +661,11 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
         state.final.state = "skipped";
         state.final.reason = "the shared files are not filled yet";
       } else {
-        reconcileSetupNavigation(projectRoot, state);
+        try { reconcileSetupNavigation(projectRoot, state); }
+        catch (error) {
+          state.final.state = "pending";
+          throw new SubsystemPhaseStoppedError(`MEX could not finish setup links and indexes (${error instanceof Error ? error.message : String(error)}). Fix the named batch or scaffold file and rerun \`mex setup\`; completed sessions are kept.`, "navigation");
+        }
         state.final.state = "done";
         delete state.final.reason;
       }

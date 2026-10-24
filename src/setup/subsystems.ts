@@ -10,8 +10,8 @@
  * bounded file listing, and one bounded `git log` call.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, lstatSync } from "node:fs";
+import { resolve, posix } from "node:path";
 import { openGraphDatabase } from "../graph/db/database.js";
 
 export interface FactBudget {
@@ -405,6 +405,8 @@ function walkSourceTree(projectRoot: string): string[] {
 }
 
 export interface GitHistoryOptions {
+  /** Plan while graph maintenance runs, without opening its database. */
+  readonly useGraph?: boolean;
   /** Directory to run Git in (paths come back relative to it); defaults to the project root. */
   readonly gitRoot?: string;
   /** Commit to start from instead of HEAD. */
@@ -461,16 +463,42 @@ export function readGitCommitFiles(projectRoot: string, options: GitHistoryOptio
  */
 export function computeSubsystemPlan(projectRoot: string, options: GitHistoryOptions = {}): SubsystemPlan | null {
   try {
-    const graph = readGraphSubsystemInputs(projectRoot);
+    const graph = options.useGraph === false ? null : readGraphSubsystemInputs(projectRoot);
     const files = graph?.files ?? listFilesWithGit(projectRoot) ?? walkSourceTree(projectRoot);
     const commits = readGitCommitFiles(projectRoot, options);
+    const fileEdges = graph?.fileEdges ?? readTreeImportEdges(projectRoot, files);
     const plan = rankSubsystemCandidates({
-      files, ...(commits === null ? {} : { commits }), ...(graph?.fileEdges === undefined ? {} : { fileEdges: graph.fileEdges }),
+      files, ...(commits === null ? {} : { commits }), ...(fileEdges.length === 0 ? {} : { fileEdges }),
     });
     return plan.candidates.length === 0 ? null : { ...plan, source: graph === null ? "tree" : "graph" };
   } catch {
     return null;
   }
+}
+
+/** Cheap ranking evidence while the graph builds: bounded literal relative imports, no parsing or DB reads. */
+export function readTreeImportEdges(projectRoot: string, files: readonly string[]): Array<readonly [string, string]> {
+  const known = new Set(files);
+  const edges: Array<readonly [string, string]> = [];
+  let bytes = 0;
+  for (const file of [...files].sort()) {
+    if (bytes >= 32 * 1024 * 1024 || edges.length >= 100_000) break;
+    if (!/\.[cm]?[jt]sx?$/u.test(file)) continue;
+    try {
+      const path = resolve(projectRoot, file);
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.size > 256 * 1024 || bytes + stat.size > 32 * 1024 * 1024) continue;
+      const source = readFileSync(path, "utf8"); bytes += stat.size;
+      for (const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["'](\.[^"'\r\n]+)["']/gu)) {
+        const base = posix.normalize(posix.join(posix.dirname(file), match[1]!));
+        const stem = base.replace(/\.[cm]?js$/u, "");
+        const target = [base, ...[".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"].map((ext) => stem + ext)].find((candidate) => known.has(candidate));
+        if (target && target !== file) edges.push([file, target]);
+        if (edges.length >= 100_000) break;
+      }
+    } catch { /* Unreadable sources supply no ranking evidence. */ }
+  }
+  return edges;
 }
 
 /** The plan embedded in the prompt, one line per subsystem, in the order to cover them. */

@@ -10,6 +10,7 @@ import {
   WORKSPACE_CONTAINERS,
   areaOf,
   computeSubsystemPlan,
+  readTreeImportEdges,
   factBudgetForRank,
   isExcludedSourcePath,
   parseGitCommitFiles,
@@ -40,6 +41,15 @@ function commitsTouching(folder: string, times: number): string[][] {
 }
 
 describe("subsystemTarget", () => {
+  it("gets cheap dependency ranking from relative imports without parsing or opening a graph", () => {
+    const root = tempRoot();
+    mkdirSync(join(root, "src/feature"), { recursive: true });
+    writeFileSync(join(root, "src/feature/index.ts"), "import { value } from '../shared.js'; export { value } from '../shared'; import('external');");
+    writeFileSync(join(root, "src/shared.ts"), "export const value = 1;");
+    writeFileSync(join(root, "src/large.ts"), " ".repeat(256 * 1024 + 1));
+    const edges = readTreeImportEdges(root, ["src/feature/index.ts", "src/shared.ts", "src/large.ts", "src/missing.ts"]);
+    expect(edges).toEqual([["src/feature/index.ts", "src/shared.ts"], ["src/feature/index.ts", "src/shared.ts"]]);
+  });
   it.each([
     [0, 3, 4], [120, 3, 4], [299, 3, 4], [300, 5, 8], [3000, 5, 8], [3001, 8, 12], [10_000, 8, 12],
   ])("%i source files -> %i to %i subsystems", (files, min, max) => {

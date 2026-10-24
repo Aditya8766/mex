@@ -7,6 +7,7 @@ import type { BatchApplyOutcome, BatchScope, SetupBatchApplier } from "../subsys
 import {
   AGENT_RUN_FOOTPRINT_BYTES,
   FREE_MEMORY_FLOOR_BYTES,
+  GRAPH_BUILD_RESERVE_BYTES,
   SubsystemPhaseStoppedError,
   resolveParallelRuns,
   runSubsystemPopulation,
@@ -16,6 +17,7 @@ import {
 } from "../subsystem-runs.js";
 import { createPlanState, loadPlanState, savePlanState, type SetupPlanState } from "../subsystem-state.js";
 import type { SubsystemPlan } from "../subsystems.js";
+import { populateDuringGraph } from "../concurrent-graph.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -173,6 +175,73 @@ describe("choosing the per-subsystem path", () => {
 });
 
 describe("one session per subsystem", () => {
+  it("starts shared and every subsystem before graph completion, releases session slots, and applies in finish order", async () => {
+    const root = project();
+    const state = createPlanState(plan(5));
+    const h = harness(root);
+    let finish!: () => void;
+    const graphReady = new Promise<void>((resolve) => { finish = resolve; });
+    const { promise } = run(root, state, h, { graphReady, parallelRuns: 2 });
+    while (h.launches.length < 6 || state.subsystems.some((unit) => !unit.runs.length)) await sleep(5);
+    expect(h.applies).toEqual([]);
+    expect(h.maxActive).toBe(2);
+    finish();
+    expect((await promise).covered).toBe(5);
+    expect(h.applies).toEqual(["shared", "a", "b", "c", "d", "e"].map((slug) => `.mex/local/setup-ops/${slug}.json`));
+    expect(h.overlappingApplies).toBe(0);
+  });
+
+  it("keeps completed batches after graph failure and resumes without rerunning those agents", async () => {
+    const root = project(); const state = createPlanState(plan(3)); const h = harness(root);
+    let fail!: (error: Error) => void;
+    const graph = new Promise<void>((_resolve, reject) => { fail = reject; });
+    const result = populateDuringGraph({ build: () => graph, populate: (graphReady, signal) => run(root, state, h, { graphReady, signal }).promise });
+    const observed = result.catch((error: unknown) => error);
+    while (state.subsystems.some((unit) => !unit.runs.length)) await sleep(5);
+    fail(new Error("Graph heap limit; rerun mex setup"));
+    expect(await observed).toMatchObject({ message: "Graph heap limit; rerun mex setup" });
+    expect(h.applies).toEqual([]);
+    const resumed = harness(root);
+    const loaded = loadPlanState(root).state!;
+    expect((await run(root, loaded, resumed, { graphReady: Promise.resolve() }).promise).covered).toBe(3);
+    expect(resumed.launches).toEqual([]);
+  });
+
+  it("reserves graph peak memory even for the first session and starts after the graph frees it", async () => {
+    const root = project(); const state = createPlanState(plan(2)); const h = harness(root);
+    let finish!: () => void;
+    const graphReady = new Promise<void>((resolve) => { finish = resolve; });
+    const free = GRAPH_BUILD_RESERVE_BYTES + FREE_MEMORY_FLOOR_BYTES + AGENT_RUN_FOOTPRINT_BYTES / 2;
+    const { promise } = run(root, state, h, { graphReady, freeMemory: () => free });
+    await sleep(35); expect(h.launches).toEqual([]);
+    finish(); expect((await promise).covered).toBe(2);
+  });
+
+  it("cancels the graph on a stopping session failure and retains the session's actionable error", async () => {
+    const root = project(); const state = createPlanState(plan(2));
+    const h = harness(root, { shared: ["auth"], a: ["hang"], b: ["hang"] });
+    let graphStopped = false;
+    const result = populateDuringGraph({
+      build: (signal) => new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => {
+        graphStopped = true; reject(new Error("Graph cancelled"));
+      }, { once: true })),
+      populate: (graphReady, signal) => run(root, state, h, { graphReady, signal }).promise,
+    });
+    await expect(result).rejects.toMatchObject({ category: "authentication", message: expect.stringContaining("could not authenticate") });
+    expect(graphStopped).toBe(true);
+  });
+
+  it("cancels sessions waiting to apply without waiting for graph completion", async () => {
+    const root = project(); const state = createPlanState(plan(2)); const h = harness(root);
+    const controller = new AbortController();
+    const graphReady = new Promise<void>(() => undefined);
+    const { promise } = run(root, state, h, { graphReady, signal: controller.signal });
+    const stopped = promise.catch((error: unknown) => error);
+    while (!state.subsystems[0]!.runs.length) await sleep(5);
+    controller.abort();
+    expect(await stopped).toMatchObject({ category: "cancelled" });
+    expect(h.applies).toEqual([]);
+  });
   it("finishes an old plan whose only pending unit is the final pass without launching an agent", async () => {
     const root = project(true);
     const state = createPlanState(plan(2));
@@ -184,8 +253,27 @@ describe("one session per subsystem", () => {
     expect(loadPlanState(root).state!.final.state).toBe("done");
   });
 
-
-  it("runs the shared files first, up to three subsystems at once with serialized applies, then the final pass", async () => {
+  it("upgrades legacy shared batches with a patterns-only session while preserving applied facts", async () => {
+    const root = project(true); const state = createPlanState(plan(1));
+    delete state.navigationVersion;
+    Object.assign(state.shared, { state: "done", applied: true, facts: 8 });
+    state.subsystems[0]!.state = "done";
+    mkdirSync(join(root, ".mex/local/setup-ops"), { recursive: true });
+    writeFileSync(join(root, ".mex/local/setup-ops/shared.json"), "[]");
+    const h = harness(root);
+    const prompts: string[] = [];
+    const launch = async (input: HeadlessPopulationOptions) => {
+      prompts.push(input.prompt);
+      writeFileSync(join(root, ".mex/local/setup-ops/shared.json"), JSON.stringify([{ setup: { patterns: [] } }]));
+      return { tool: "codex" as const, completed: true };
+    };
+    await run(root, state, h, { launch }).promise;
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Do not rewrite shared content or facts");
+    expect(state.shared.facts).toBe(8);
+    expect(state.final.state).toBe("done");
+  });
+  it("runs the shared files first, up to three subsystems at once with serialized applies, then reconciles navigation without another agent", async () => {
     const root = project();
     const state = createPlanState(plan(5));
     const h = harness(root, {}, { delayMs: 40 });

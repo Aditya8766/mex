@@ -167,9 +167,9 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
               projectRoot, mode, tools, signal: abort.signal,
               onProgress: progress => update({
                 activeStep: progress.step,
-                completedSteps: view.activeStep ? [...new Set([...view.completedSteps, view.activeStep])] : view.completedSteps,
+                  completedSteps: view.activeStep && view.activeStep !== progress.step ? [...new Set([...view.completedSteps, view.activeStep])] : view.completedSteps,
                 detail: progress.detail ?? progress.label,
-                phaseStartedAt: Date.now(),
+                  phaseStartedAt: view.activeStep === progress.step ? view.phaseStartedAt : Date.now(),
                 lastActivityAt: Date.now(),
                 progress: undefined,
               }),
@@ -178,7 +178,8 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
                 const activity = setupGraphActivity(progress);
                 update({ detail: activity.detail, progress: activity.progress, lastActivityAt: Date.now() });
               },
-              onAnchorNotes: notes => { anchorNotes = notes; },
+                onPopulationCoverage: coverage => update({ concurrentPopulation: `${coverage.done}/${coverage.total} subsystems done, ${coverage.skipped} skipped`, lastActivityAt: Date.now() }),
+                onAnchorNotes: notes => { anchorNotes = notes; },
               populate: async input => {
                 let tool = selectSetupAgent(input.selectedTools);
                 let first = true;
@@ -324,7 +325,7 @@ function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", t
     if (assets?.conflicted) throw new SetupError("Official MEX agent assets have conflicts. Review `mex skills sync --dry-run` before applying setup.");
   } catch (error) { throw classifySetupAgentAssetsError(error) ?? error; }
   console.log("Would verify or assign the project identity.");
-  if (mode === "code-repo") console.log("Would build the code graph before population.");
+  if (mode === "code-repo") console.log("Would build the code graph; background subsystem sessions can run alongside it, applying after it is ready.");
   console.log(isScaffoldPopulated(resolve(projectRoot, ".mex"))
     ? "Would preserve and verify the populated scaffold."
     : "Would populate the scaffold with a selected agent or the manual prompt.");

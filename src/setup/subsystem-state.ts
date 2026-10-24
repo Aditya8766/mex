@@ -66,6 +66,9 @@ export type SharedUnit = UnitProgress;
 export type FinalUnit = UnitProgress;
 
 export interface SetupPlanState {
+  /** Shared/subsystem sessions author navigation data rather than a final agent. */
+  navigationVersion?: 1;
+  graph?: { startedAt: string; finishedAt?: string; durationMs?: number; outcome: "running" | "completed" | "failed" };
   readonly kind: typeof SETUP_PLAN_STATE_KIND;
   readonly version: typeof SETUP_PLAN_STATE_VERSION;
   readonly createdAt: string;
@@ -322,6 +325,14 @@ export function parsePlanState(text: string): { state: SetupPlanState } | { stat
       shared,
       subsystems,
       final,
+      ...(raw.navigationVersion === 1 ? { navigationVersion: 1 as const } : {}),
+      ...(isRecord(raw.graph) && typeof raw.graph.startedAt === "string"
+        && ["running", "completed", "failed"].includes(String(raw.graph.outcome)) ? { graph: {
+          startedAt: raw.graph.startedAt.slice(0, 40),
+          outcome: raw.graph.outcome as "running" | "completed" | "failed",
+          ...(typeof raw.graph.finishedAt === "string" ? { finishedAt: raw.graph.finishedAt.slice(0, 40) } : {}),
+          ...(isCount(raw.graph.durationMs, 1e10) ? { durationMs: raw.graph.durationMs } : {}),
+        } } : {}),
       ...(queue === undefined ? {} : { queue }),
       ...(typeof raw.finalizedAt === "string" ? { finalizedAt: raw.finalizedAt.slice(0, 40) } : {}),
     },
