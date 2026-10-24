@@ -236,13 +236,19 @@ export function isScaffoldPopulated(mexDir: string): boolean {
 export function detectProjectState(projectRoot: string, mexDir: string): ProjectState {
   const scaffoldPopulated = isScaffoldPopulated(mexDir);
 
-  // Find a source file at any depth, stopping after the first match.
+  // Find a source file at any depth, stopping after the first match. Without
+  // a depth cap, installed dependencies must be ignored explicitly: Python
+  // packages sit under site-packages/dist-packages in any virtual environment,
+  // whatever it is named (#288).
   const patterns = SOURCE_EXTENSIONS.map(
     (ext) => `**/${ext}`
   );
   const sourceFiles = globIterateSync(patterns, {
     cwd: projectRoot,
-    ignore: ["**/node_modules/**", "**/.mex/**", "**/vendor/**", "**/.git/**"],
+    ignore: [
+      "**/node_modules/**", "**/.mex/**", "**/vendor/**", "**/.git/**",
+      "**/site-packages/**", "**/dist-packages/**",
+    ],
     nodir: true,
   });
   const hasSourceFiles = !sourceFiles.next().done;

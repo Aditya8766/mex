@@ -60,6 +60,21 @@ describe("setup state and scaffold ownership", () => {
     },
   );
 
+  // The old depth cap hid installed packages; an empty project with only a
+  // virtual environment must stay fresh without it (#288).
+  it.each([
+    "venv/lib/python3.12/site-packages/requests/api.py",
+    "env/lib/python3.11/site-packages/six.py",
+    "py/lib/python3/dist-packages/yaml/loader.py",
+  ])("treats installed Python packages at %s as dependencies, not project source", (installed) => {
+    const root = fixture();
+    const path = join(root, installed);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, "def get(): pass\n");
+
+    expect(detectProjectState(root, join(root, ".mex"))).toBe("fresh");
+  });
+
   it("recognizes a fully populated scaffold and rejects remaining placeholders", () => {
     const root = fixture();
     const mex = join(root, ".mex");
