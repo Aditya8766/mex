@@ -30,6 +30,8 @@ it("writes conditioned edges, back-links, routes and pattern rows deterministica
   expect(f.read("ROUTER.md")).toContain("| Working in src/a/ | `context/a.md` |");
   expect(f.read("ROUTER.md")).not.toContain("context/b.md");
   expect(f.read("patterns/INDEX.md")).toContain("when tracing requests");
+  // The pattern is reachable from the context file it relies on.
+  expect(fm("context/architecture.md").edges).toContainEqual({ target: "patterns/trace.md", condition: "when doing this task: when tracing requests" });
   reconcileSetupNavigation(f.root, f.state);
   expect(["ROUTER.md", "context/a.md", "context/architecture.md", "patterns/INDEX.md", "patterns/trace.md"].map(f.read)).toEqual(before);
 });

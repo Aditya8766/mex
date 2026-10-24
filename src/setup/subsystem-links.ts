@@ -141,9 +141,20 @@ export function reconcileSetupNavigation(projectRoot: string, state: SetupPlanSt
   const patterns = existsSync(resolve(root, "patterns")) ? readdirSync(resolve(root, "patterns")).filter((file) => /^[a-z0-9][a-z0-9-]*\.md$/u.test(file)).sort() : [];
   const patternRows: string[] = [];
   for (const file of patterns) {
-    addEdges(root, `patterns/${file}`, [{ target: "context/architecture.md", condition: "when orienting this task in the overall architecture" }]);
-    const parsed = frontmatter(readFileSync(safeFile(root, `patterns/${file}`), "utf8"));
-    patternRows.push(`| [\`${file}\`](${file}) | ${cell(String(parsed?.doc.get("description") ?? "Recurring project task"))} |`);
+    const pattern = `patterns/${file}`;
+    addEdges(root, pattern, [{ target: "context/architecture.md", condition: "when orienting this task in the overall architecture" }]);
+    const parsed = frontmatter(readFileSync(safeFile(root, pattern), "utf8"));
+    const description = String(parsed?.doc.get("description") ?? "Recurring project task");
+    patternRows.push(`| [\`${file}\`](${file}) | ${cell(description)} |`);
+    // Every context file a pattern relies on points back to it, so the pattern is reachable from context.
+    const edges = (parsed?.doc.toJS() as { edges?: Array<{ target?: unknown }> } | null)?.edges ?? [];
+    for (const edge of edges) {
+      if (typeof edge?.target !== "string" || !/^context\/[a-z0-9][a-z0-9-]*\.md$/u.test(edge.target) || !existsSync(safeFile(root, edge.target))) continue;
+      // An authored edge to the pattern keeps its own condition.
+      const existing = (frontmatter(readFileSync(safeFile(root, edge.target), "utf8"))?.doc.toJS() as { edges?: Array<{ target?: unknown }> } | null)?.edges ?? [];
+      if (existing.some((entry) => entry?.target === pattern)) continue;
+      addEdges(root, edge.target, [{ target: pattern, condition: `when doing this task: ${cell(description).slice(0, 120)}` }]);
+    }
   }
   rows(root, "ROUTER.md", "routes", ["| Task type | Load |", "|-----------|------|", ...routeRows]);
   rows(root, "patterns/INDEX.md", "patterns", ["| Pattern | Use when |", "|---------|----------|", ...patternRows]);
