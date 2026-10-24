@@ -65,10 +65,17 @@ export const MAX_PARALLEL_RUNS = 8;
 export const AGENT_RUN_FOOTPRINT_BYTES = 1.5 * 1024 ** 3;
 /** Never start a second or third session that would leave less free memory than this. */
 export const FREE_MEMORY_FLOOR_BYTES = 2 * 1024 ** 3;
-/** Reserve the graph's measured peak before starting any concurrent agent. */
+/** The largest graph peak measured (about 8.1 GB on a 10.5k-file monorepo), plus headroom. */
 export const GRAPH_BUILD_RESERVE_BYTES = 8.5 * 1024 ** 3;
-/** Small repositories avoid the large compiler corpus; still reserve a separate worker footprint. */
+/** Every build still runs a separate worker with its own footprint. */
 export const SMALL_GRAPH_BUILD_RESERVE_BYTES = 2.5 * 1024 ** 3;
+/** Measured peaks grew roughly with indexed files (about 0.9 MB each on the largest repository). */
+const GRAPH_RESERVE_BYTES_PER_FILE = 0.9 * 1024 ** 2;
+
+/** Memory to hold back for the graph build before starting concurrent agents, scaled to the repository. */
+export function graphBuildReserveBytes(sourceFiles: number): number {
+  return Math.min(GRAPH_BUILD_RESERVE_BYTES, Math.max(SMALL_GRAPH_BUILD_RESERVE_BYTES, sourceFiles * GRAPH_RESERVE_BYTES_PER_FILE));
+}
 /** A session younger than this may still be growing; its full footprint stays reserved. */
 const RAMP_UP_MS = 60_000;
 /** This many sessions failing in a row, with no success between, is not the subsystems' fault. */
@@ -259,7 +266,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
   const notifySlot = () => { wake(); slotChanged = new Promise<void>((resolve) => { wake = resolve; }); };
   phase.signal.addEventListener("abort", notifySlot, { once: true });
   const graphStartFree = freeMemory();
-  const graphReserve = state.plan.sourceFiles <= 500 ? SMALL_GRAPH_BUILD_RESERVE_BYTES : GRAPH_BUILD_RESERVE_BYTES;
+  const graphReserve = graphBuildReserveBytes(state.plan.sourceFiles);
   let graphBuilding = options.graphReady !== undefined;
   void options.graphReady?.then(() => { graphBuilding = false; notifySlot(); }, () => { graphBuilding = false; phase.abort(); notifySlot(); });
   const startedAt = new Map<WorkUnit, number>();

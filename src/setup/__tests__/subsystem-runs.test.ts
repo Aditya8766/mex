@@ -8,7 +8,9 @@ import {
   AGENT_RUN_FOOTPRINT_BYTES,
   FREE_MEMORY_FLOOR_BYTES,
   GRAPH_BUILD_RESERVE_BYTES,
+  SMALL_GRAPH_BUILD_RESERVE_BYTES,
   SubsystemPhaseStoppedError,
+  graphBuildReserveBytes,
   resolveParallelRuns,
   runSubsystemPopulation,
   shouldRunPerSubsystem,
@@ -211,10 +213,16 @@ describe("one session per subsystem", () => {
     const root = project(); const state = createPlanState(plan(2)); const h = harness(root);
     let finish!: () => void;
     const graphReady = new Promise<void>((resolve) => { finish = resolve; });
-    const free = GRAPH_BUILD_RESERVE_BYTES + FREE_MEMORY_FLOOR_BYTES + AGENT_RUN_FOOTPRINT_BYTES / 2;
+    const free = graphBuildReserveBytes(state.plan.sourceFiles) + FREE_MEMORY_FLOOR_BYTES + AGENT_RUN_FOOTPRINT_BYTES / 2;
     const { promise } = run(root, state, h, { graphReady, freeMemory: () => free });
     await sleep(35); expect(h.launches).toEqual([]);
     finish(); expect((await promise).covered).toBe(2);
+  });
+
+  it("scales the graph reserve with repository size between the small and measured-peak bounds", () => {
+    expect(graphBuildReserveBytes(300)).toBe(SMALL_GRAPH_BUILD_RESERVE_BYTES);
+    expect(graphBuildReserveBytes(4_000)).toBeCloseTo(4_000 * 0.9 * 1024 ** 2);
+    expect(graphBuildReserveBytes(10_500)).toBe(GRAPH_BUILD_RESERVE_BYTES);
   });
 
   it("cancels the graph on a stopping session failure and retains the session's actionable error", async () => {
