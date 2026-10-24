@@ -7,7 +7,7 @@ import type { BatchApplyOutcome, BatchScope, SetupBatchApplier } from "../subsys
 import {
   AGENT_RUN_FOOTPRINT_BYTES,
   FREE_MEMORY_FLOOR_BYTES,
-  GRAPH_BUILD_RESERVE_BYTES,
+  GRAPH_NATIVE_OVERHEAD_BYTES,
   SMALL_GRAPH_BUILD_RESERVE_BYTES,
   SubsystemPhaseStoppedError,
   graphBuildReserveBytes,
@@ -220,10 +220,14 @@ describe("one session per subsystem", () => {
     finish(); expect((await promise).covered).toBe(2);
   });
 
-  it("scales the graph reserve with repository size between the small and measured-peak bounds", () => {
-    expect(graphBuildReserveBytes(300)).toBe(SMALL_GRAPH_BUILD_RESERVE_BYTES);
-    expect(graphBuildReserveBytes(4_000)).toBeCloseTo(4_000 * 0.9 * 1024 ** 2);
-    expect(graphBuildReserveBytes(10_500)).toBe(GRAPH_BUILD_RESERVE_BYTES);
+  it("scales the graph reserve with repository size, bounded by the worker heap", () => {
+    const gb = 1024 ** 3;
+    expect(graphBuildReserveBytes(300, 14 * gb)).toBe(SMALL_GRAPH_BUILD_RESERVE_BYTES);
+    expect(graphBuildReserveBytes(4_000, 14 * gb)).toBeCloseTo(4_000 * 1.2 * 1024 ** 2);
+    // The measured novu peak (10.5 GB, 9.4k files, automatic heap) stays inside the reserve.
+    expect(graphBuildReserveBytes(9_427, 14 * gb)).toBeGreaterThan(10.5 * gb);
+    // An explicit 8 GB heap caps the reserve (8.1 GB was measured with it).
+    expect(graphBuildReserveBytes(10_500, 8 * gb)).toBe(8 * gb + GRAPH_NATIVE_OVERHEAD_BYTES);
   });
 
   it("cancels the graph on a stopping session failure and retains the session's actionable error", async () => {

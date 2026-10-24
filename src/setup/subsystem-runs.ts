@@ -18,7 +18,9 @@
  * missing or broken agent CLI) stop the phase with a message saying a rerun of
  * `mex setup` continues. Every step is recorded, so a rerun keeps what is done.
  */
-import { freemem } from "node:os";
+import { freemem, totalmem } from "node:os";
+import { getHeapStatistics } from "node:v8";
+import { graphWorkerHeap } from "../graph/candidate-process.js";
 import { existsSync, mkdirSync, opendirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { AiTool } from "../types.js";
@@ -65,16 +67,26 @@ export const MAX_PARALLEL_RUNS = 8;
 export const AGENT_RUN_FOOTPRINT_BYTES = 1.5 * 1024 ** 3;
 /** Never start a second or third session that would leave less free memory than this. */
 export const FREE_MEMORY_FLOOR_BYTES = 2 * 1024 ** 3;
-/** The largest graph peak measured (about 8.1 GB on a 10.5k-file monorepo), plus headroom. */
-export const GRAPH_BUILD_RESERVE_BYTES = 8.5 * 1024 ** 3;
 /** Every build still runs a separate worker with its own footprint. */
 export const SMALL_GRAPH_BUILD_RESERVE_BYTES = 2.5 * 1024 ** 3;
-/** Measured peaks grew roughly with indexed files (about 0.9 MB each on the largest repository). */
-const GRAPH_RESERVE_BYTES_PER_FILE = 0.9 * 1024 ** 2;
+/** Measured peaks grew roughly with indexed files (10.5 GB on a 9.4k-file monorepo with the automatic heap). */
+const GRAPH_RESERVE_BYTES_PER_FILE = 1.2 * 1024 ** 2;
+/** Native and compiler memory the worker uses outside its V8 heap. */
+export const GRAPH_NATIVE_OVERHEAD_BYTES = 1024 ** 3;
 
-/** Memory to hold back for the graph build before starting concurrent agents, scaled to the repository. */
-export function graphBuildReserveBytes(sourceFiles: number): number {
-  return Math.min(GRAPH_BUILD_RESERVE_BYTES, Math.max(SMALL_GRAPH_BUILD_RESERVE_BYTES, sourceFiles * GRAPH_RESERVE_BYTES_PER_FILE));
+/** The heap ceiling the graph worker will get on this machine. */
+function graphWorkerHeapBytes(): number {
+  return graphWorkerHeap({ totalBytes: totalmem(), freeBytes: freemem(),
+    defaultHeapMb: Math.ceil(getHeapStatistics().heap_size_limit / 1024 ** 2),
+    nodeOptions: process.env.NODE_OPTIONS, execArgv: process.execArgv }).heapMb * 1024 ** 2;
+}
+
+/**
+ * Memory to hold back for the graph build before starting concurrent agents: scaled to the
+ * repository, and never more than the worker's heap ceiling plus its native memory.
+ */
+export function graphBuildReserveBytes(sourceFiles: number, heapBytes = graphWorkerHeapBytes()): number {
+  return Math.min(heapBytes + GRAPH_NATIVE_OVERHEAD_BYTES, Math.max(SMALL_GRAPH_BUILD_RESERVE_BYTES, sourceFiles * GRAPH_RESERVE_BYTES_PER_FILE));
 }
 /** A session younger than this may still be growing; its full footprint stays reserved. */
 const RAMP_UP_MS = 60_000;
