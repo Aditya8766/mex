@@ -89,6 +89,8 @@ interface ImmutableGraphReadHooks {
 
 export interface LoadFreshGraphReadSessionOptions {
   dbPath?: string;
+  /** @internal Apply verifies selected source bytes as it adopts groundings. */
+  sourceScope?: ReadonlySet<string>;
   loadSession?: boolean;
   /**
    * Also adopt a store whose only unproven input is config content, reported
@@ -372,7 +374,10 @@ export async function loadFreshGraphReadSession(
 ): Promise<InternalFreshGraphReadResult> {
   const dbPath = options.dbPath ?? resolve(projectRoot, ".mex", "graph.db");
   const inspectObservation = options.inspectObservation ?? inspectGraphStatusWithFreshObservation;
-  const audit = options.structuralAudit ? { structuralAudit: options.structuralAudit } : {};
+  const audit = {
+    ...(options.structuralAudit ? { structuralAudit: options.structuralAudit } : {}),
+    ...(options.sourceScope ? { sourceScope: options.sourceScope } : {}),
+  };
   const inspection = await inspectObservation({ projectRoot, dbPath, ...audit });
   await options.afterStatusInspection?.(inspection);
   const { graphStatus } = inspection;
@@ -559,7 +564,7 @@ function createIndexedSourceReader(
 }
 
 /** Read one exact byte buffer through a contained, identity-stable file descriptor. */
-function readStableContainedSource(projectRoot: string, filePath: string): Buffer {
+export function readStableContainedSource(projectRoot: string, filePath: string): Buffer {
   const lexicalRoot = resolve(projectRoot);
   const canonicalRoot = resolveRealPath(lexicalRoot);
   const absolutePath = resolve(lexicalRoot, filePath);

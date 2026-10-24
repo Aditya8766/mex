@@ -234,6 +234,8 @@ export function inspectGraphSidecars(dbPath: string): GraphSidecarProbe {
 
 export interface InspectGraphStatusOptions {
   projectRoot: string;
+  /** @internal Apply owns this growing set; other consumers prove the full corpus. */
+  sourceScope?: ReadonlySet<string>;
   dbPath?: string;
   /** Fixed clock for deterministic callers and tests. */
   now?: Date | (() => Date);
@@ -538,6 +540,7 @@ async function inspectGraphStatusAttempt(
     maxChangedPaths,
     context.options.internal?.liveSourceReadConcurrency ?? LIVE_SOURCE_READ_CONCURRENCY,
     (path) => context.options.internal?.afterSourceRead?.(path, "initial"),
+    context.options.sourceScope,
   );
   diagnostics.push(...live.diagnostics);
   const manifest = inspectCurrentManifest(projectRoot, diagnostics);
@@ -912,6 +915,9 @@ async function inspectGraphStatusAttempt(
     buildPrerequisitesComplete = buildPrerequisitesComplete && semantic.complete;
 
     const files = readFiles(db);
+    if (context.options.sourceScope) {
+      retainUnscopedSources(live, files.map(file => [file.path, file.content_hash]), context.options.sourceScope);
+    }
     const parseHealth = summarizeParseHealth(files, maxChangedPaths);
     if (parseHealth.partial > 0 || parseHealth.failed > 0) {
       const failedPaths = parseHealth.failedPaths.length > 0
@@ -1529,7 +1535,11 @@ async function validateFreshObservation(
     context.maxChangedPaths,
     context.options.internal?.liveSourceReadConcurrency ?? LIVE_SOURCE_READ_CONCURRENCY,
     (path) => context.options.internal?.afterSourceRead?.(path, "validation"),
+    context.options.sourceScope,
   );
+  if (context.options.sourceScope) {
+    retainUnscopedSources(live, before.live.hashes, context.options.sourceScope);
+  }
   const semantic = inspectSemanticInputs(
     context.projectRoot,
     contained.database.projectRootRealPath,
@@ -2147,6 +2157,7 @@ async function inspectLiveSources(
   diagnosticLimit: number,
   concurrency: number,
   afterSourceRead?: (path: string) => void,
+  sourceScope?: ReadonlySet<string>,
 ): Promise<LiveSources> {
   const diagnostics: Diagnostic[] = [];
   const hashes = new Map<string, string>();
@@ -2167,7 +2178,10 @@ async function inspectLiveSources(
   };
   let matches: string[];
   try {
-    matches = discoverGraphReadPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    if (sourceScope && sourceScope.size > GRAPH_CORPUS_LIMITS.maxSourceFiles) {
+      throw new GraphCorpusLimitError("maxSourceFiles");
+    }
+    matches = sourceScope ? [...sourceScope].sort(compareCodePoints) : discoverGraphReadPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
       ...GRAPH_CORPUS_GLOB_OPTIONS,
       cwd: projectRoot,
       ignore: graphCorpusIgnoreGlobs(projectRoot),
@@ -2264,6 +2278,17 @@ async function inspectLiveSources(
     });
   }
   return { hashes, discoveredPaths, complete, diagnostics };
+}
+
+/** Keep indexed identities outside an explicitly scoped proof, without reading their sources. */
+function retainUnscopedSources(
+  live: LiveSources, indexed: Iterable<readonly [string, string]>, scope: ReadonlySet<string>,
+): void {
+  for (const [path, hash] of indexed) {
+    if (scope.has(path)) continue;
+    live.hashes.set(path, hash);
+    live.discoveredPaths.add(path);
+  }
 }
 
 function compareSources(
