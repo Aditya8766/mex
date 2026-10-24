@@ -8,7 +8,8 @@ import { writeWithGraph, readWithGraph } from "../../cli/grounding.js";
 import { locateEntity } from "../../operations/locate.js";
 import { openWikiIndex } from "../../index/open.js";
 import { dumpWikiIndex } from "../../index/dump.js";
-import { wikiApplyOperation, wikiRebuildIndex } from "../write.js";
+import { wikiApplyOperation, wikiApplyOperationBatch, wikiRebuildIndex } from "../write.js";
+import { runApply } from "../../cli/commands.js";
 import type { GroundingGraph } from "../../grounding/adapter.js";
 import { resolveGrounding } from "../../grounding/resolve.js";
 import { createEntityTypeRegistry } from "../../model/entity.js";
@@ -63,6 +64,62 @@ function operation(scaffoldRoot: string, index: number, step: number, choice = s
 }
 
 describe("targeted apply index refresh", () => {
+  it("scopes a CLI batch to the union of new named links, and preserves full stale refusals", async () => {
+    const { root, scaffoldRoot, port } = await fixture();
+    const batch = (step: number, both = false) => (both ? ["left", "right"] : ["left"]).map(name => ({
+      opId: `batch-${step}-${name}`, type: "create-entry",
+      actor: { kind: "human", id: "fixture" }, timestamp: "2026-10-24T00:00:00.000Z",
+      payload: { file: `context/new-${name}.md`, insertAt: { at: "end-of-file" }, type: "fact",
+        title: `${name} claim ${step}`, body: "A claim.", groundsTo: [{ file: `${name}.py`, symbol: name }] },
+    }));
+    const run = async (envelopes: unknown[], apply: boolean) => {
+      const path = join(root, "batch.json"); writeFileSync(path, JSON.stringify(envelopes));
+      const lines: string[] = [];
+      await runApply({ scaffoldRoot, projectRoot: root, groundingBridge: port,
+        write: line => { lines.push(line); }, setExitCode: () => undefined,
+      }, path, { apply, json: true });
+      return JSON.parse(lines.join("\n"));
+    };
+    const path = join(root, "right.py"); const before = statSync(path);
+    writeFileSync(path, "def right():\n    return 9\n"); utimesSync(path, before.atime, before.mtime);
+    expect((await run(batch(1), true)).data.applied).toBe(true);
+    const unchanged = inspect(root).dump;
+    for (const apply of [false, true]) {
+      const request = batch(2, true);
+      const full = await (apply ? writeWithGraph : readWithGraph)(port,
+        graph => wikiApplyOperationBatch(request, { scaffoldRoot, graph, apply }));
+      const scoped = await run(request, apply);
+      expect(scoped.data.applied).toBe(false);
+      expect(scoped.diagnostics).toEqual([...full.value.diagnostics.map(({ path: _path, ...entry }) => entry),
+        expect.objectContaining({ code: "CODE_GRAPH_UNAVAILABLE" })]);
+      expect(inspect(root).dump).toBe(unchanged);
+    }
+  });
+
+  it("refreshes only batch files, proves their siblings and removed links, and matches a full rebuild", async () => {
+    const { root, scaffoldRoot, port } = await fixture();
+    const before = inspect(root).rows;
+    const scope = new Set<string>();
+    await port.withFreshGroundingSnapshot(graph => {
+      const calls: string[] = [];
+      const observed: GroundingGraph = { ...graph, getNode(id) { calls.push(id); return graph.getNode(id); } };
+      const result = wikiApplyOperationBatch([operation(scaffoldRoot, 0, 101)], { scaffoldRoot, graph: observed, apply: true });
+      expect(result.data.applied).toBe(true);
+      expect(new Set(calls).size).toBe(1);
+      const targeted = inspect(root);
+      expect(targeted.rows[1]).toEqual(before[1]);
+      expect([...scope]).toEqual(["left.py"]);
+      wikiRebuildIndex({ scaffoldRoot, graph });
+      expect(inspect(root).dump).toBe(targeted.dump);
+    }, { sourceScope: scope });
+    writeFileSync(join(root, "left.py"), "def left():\n    return 9\n");
+    const entity = locateEntity(ids[0]!, { scaffoldRoot })!.entity;
+    const request = { ...operation(scaffoldRoot, 0, 102), type: "set-grounding", payload: { groundsTo: [] } };
+    const removed = await readWithGraph(port, graph => wikiApplyOperationBatch([request], { scaffoldRoot, graph }), { sourceScope: new Set() });
+    expect(removed.unavailable).toBe("stale");
+    expect(locateEntity(ids[0]!, { scaffoldRoot })!.entity.groundsTo).toEqual(entity.groundsTo);
+  });
+
   it("includes existing links on registered entity types in the source preflight", () => {
     const root = mkdtempSync(join(tmpdir(), "mex-targeted-custom-")); roots.push(root);
     mkdirSync(join(root, "context"));
@@ -96,14 +153,14 @@ describe("targeted apply index refresh", () => {
     }, { sourceScope: new Set() });
   });
 
-  it("proves links on sibling entities in the changed Wiki file before writing", async () => {
+  it.each([false, true])("proves sibling links before writing (batch: %s)", async batch => {
     const { root, scaffoldRoot, port } = await fixture();
     const grounding = locateEntity(ids[1]!, { scaffoldRoot })!.entity.groundsTo[0]!;
     appendFileSync(join(scaffoldRoot, "context/left.md"), `\n<!-- mex:entity\nid: mx_01KS6FPN00RT04JXY9QEG0JN19\ntype: fact\nstatus: promoted\nrevision: 1\ngrounds_to:\n  - node: ${grounding.node}\n    fingerprint: ${grounding.fingerprint}\n    bodyHash: ${grounding.bodyHash}\n    file: right.py\n-->\n## Sibling\n\nA linked sibling claim.\n`);
     await port.withFreshGroundingSnapshot(graph => wikiRebuildIndex({ scaffoldRoot, graph }));
     writeFileSync(join(root, "right.py"), "def right():\n    return 9\n");
     const scope = new Set<string>();
-    const result = await writeWithGraph(port, graph => wikiApplyOperation(operation(scaffoldRoot, 0, 1),
+    const result = await writeWithGraph(port, graph => (batch ? wikiApplyOperationBatch : wikiApplyOperation)(batch ? [operation(scaffoldRoot, 0, 1)] : operation(scaffoldRoot, 0, 1),
       { scaffoldRoot, graph, apply: true }), { sourceScope: scope });
     expect(result.unavailable).toBe("stale");
     expect(scope.has("right.py")).toBe(true);
@@ -160,7 +217,9 @@ describe("targeted apply index refresh", () => {
         await port.withFreshGroundingSnapshot(graph => wikiRebuildIndex({ scaffoldRoot, graph }));
       }
       const request = operation(scaffoldRoot, index, step, random());
-      const result = await writeWithGraph(port, graph => wikiApplyOperation(request, { scaffoldRoot, graph, apply: true }), { sourceScope: new Set() });
+      const result = await writeWithGraph(port, graph => step % 2 === 0
+        ? wikiApplyOperationBatch([request], { scaffoldRoot, graph, apply: true })
+        : wikiApplyOperation(request, { scaffoldRoot, graph, apply: true }), { sourceScope: new Set() });
       expect(result.value.data.applied, JSON.stringify(result.value.diagnostics)).toBe(true);
       if (!dirty) {
         const targeted = inspect(root);

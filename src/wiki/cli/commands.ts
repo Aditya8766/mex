@@ -487,9 +487,10 @@ async function runApplyBatch(io: CommandIo, envelopes: readonly unknown[], flags
     }, flags, () => undefined);
     return;
   }
+  const sourceScope = new Set<string>();
   const { value: applied, unavailable } = write
-    ? await writeWithGraph(io.groundingBridge, applyWith)
-    : await readWithGraph(io.groundingBridge, applyWith);
+    ? await writeWithGraph(io.groundingBridge, applyWith, { sourceScope })
+    : await readWithGraph(io.groundingBridge, applyWith, { sourceScope });
   const result = { ...applied, diagnostics: [...guarded, ...applied.diagnostics, ...graphDiagnostics(unavailable)] };
   emit(io, result, flags, (data) => {
     if (data.diff) io.write(data.diff);

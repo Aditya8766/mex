@@ -24,6 +24,7 @@ import type { GroundingResolver } from "../index/write.js";
 import { createHash } from "node:crypto";
 import { prepareWikiRebuild, rebuildWikiIndex, type RebuildOptions, type RebuildResult } from "../index/rebuild.js";
 import { refreshWikiIndex } from "../index/refresh.js";
+import { readContainedSource } from "../index/source-read.js";
 import { payloadHashOf, planOperation, type PlanOptions, type WikiPatchPlan } from "../operations/plan.js";
 import { applyPlannedOperationBatch, planOperationBatchReport } from "../operations/batch.js";
 import { acquireWikiMaintenanceLease } from "../index/dbfile.js";
@@ -192,7 +193,7 @@ export function wikiApplyOperation(
     if (validated.ok && (validated.value.type === "create-entry" || validated.value.type === "set-grounding")) {
       for (const grounding of validated.value.payload.groundsTo ?? []) {
         if (grounding.file) options.graph.verifySource(grounding.file);
-        options.graph.getNode(grounding.node);
+        if ("node" in grounding) options.graph.getNode(grounding.node);
       }
     }
   }
@@ -367,7 +368,7 @@ function recordedIds(ids: readonly string[]): () => EntityId {
  */
 export function wikiApplyOperationBatch(
   envelopes: unknown,
-  options: WikiWriteOptions & { apply?: boolean },
+  options: WikiWriteOptions & { apply?: boolean; targetedGroundings?: boolean },
 ): ServiceResult<ApplyBatchData> {
   const data: ApplyBatchData = {
     batch: true, planned: false, applied: false, replayed: false, operations: [],
@@ -476,14 +477,47 @@ export function wikiApplyOperationBatch(
 
   // -- 3. plan, and apply under one lease ---------------------------------
   const write = options.apply === true && !refusedEarly;
+  const applyOptions: ApplyOptions = { ...applyOptionsFrom(options), targetedGroundings: options.targetedGroundings !== false };
+  // New links must keep the same stale-graph refusal as single apply, before
+  // planning translates an expected edit failure into a diagnostic.
+  if (options.graph?.verifySource) {
+    for (const index of pending) {
+      const operation = operations[index];
+      if (operation?.type === "create-entry" || operation?.type === "set-grounding") {
+        for (const grounding of operation.payload.groundsTo ?? []) {
+          if (grounding.file) options.graph.verifySource(grounding.file);
+          if ("node" in grounding) options.graph.getNode(grounding.node);
+        }
+      }
+    }
+  }
+  const verifyText = (path: string, text: string | null): void => {
+    if (!options.graph?.verifySource || text === null) return;
+    for (const { entity } of parseWikiMarkdown({ path, text,
+      ...(options.registry === undefined ? {} : { registry: options.registry }),
+    }).entities) {
+      for (const grounding of entity.groundsTo) {
+        if (grounding.file) options.graph.verifySource(grounding.file);
+        options.graph.getNode(grounding.node);
+      }
+    }
+  };
   const lease = write ? acquireWikiMaintenanceLease(indexPathFor(options), "operation", scaffoldRoot) : null;
   try {
     const resume = interrupted as { index: number; createdIds: readonly string[] } | null;
     let toPlan = pending;
     if (resume !== null && write) {
+      // Recovery may publish an already-written file without a new plan.
+      // Prove its siblings before resuming and refreshing that file's rows.
+      if (options.graph?.verifySource) {
+        for (const file of recordFor(log, operations[resume.index]!.opId).intent!.files) {
+          const path = resolve(scaffoldRoot, file);
+          if (existsSync(path)) verifyText(file, readContainedSource(scaffoldRoot, path));
+        }
+      }
       // Finished through the single-operation path, which reuses the recorded
       // ids and recognises a write that landed before the process died.
-      const resumed = applyOperation(envelopes[resume.index], { ...applyOptionsFrom(options), maintenanceLease: lease! });
+      const resumed = applyOperation(envelopes[resume.index], { ...applyOptions, maintenanceLease: lease! });
       if (!resumed.ok) {
         refuse(resume.index, resumed.diagnostics);
         return finish();
@@ -510,6 +544,12 @@ export function wikiApplyOperationBatch(
       }
       if (refusedEarly) return finish();
       const plans = planned.plan.operations;
+      for (const plan of plans) {
+        for (const file of plan.files) {
+          verifyText(file.path, file.baseText);
+          verifyText(file.path, file.proposedText);
+        }
+      }
       plans.forEach((plan, position) => {
         const index = toPlan[position]!;
         outcomes[index]!.files = plan.files.map((file) => file.path);
@@ -521,7 +561,7 @@ export function wikiApplyOperationBatch(
       if (!write) return finish();
 
       const applied = applyPlannedOperationBatch(planned.plan, {
-        ...applyOptionsFrom(options),
+        ...applyOptions,
         expectedPreviewRevision: planned.plan.previewRevision,
         maintenanceLease: lease!,
       });
