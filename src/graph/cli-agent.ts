@@ -23,7 +23,7 @@ import { serializeFingerprint } from "./fingerprint.js";
 import {
   BudgetLedger, DEFAULT_OPTIONS, estimateTokens, resolveOptions, resolveScopeOptions, SCHEMA_VERSION, type AgentOptions,
 } from "./agent-protocol.js";
-import { identifierComponents, isLowValueGraphPath, planGraphQuery } from "./retrieval/query.js";
+import { identifierComponents, isLowValueGraphPath, isTestGraphPath, planGraphQuery } from "./retrieval/query.js";
 import {
   loadFreshGraphReadSession,
   openImmutableGraphReadSessionSync,
@@ -115,8 +115,21 @@ export function runImpact(
 
     // Definitions and directed dependencies share one returned-node cap.
     const rootsSorted = roots.sort(byId);
+    const impacted = new Map<string, { node: GraphNode; depth: number; root: string }>();
+    for (const entry of transitiveCallNeighbors(session.graph, rootsSorted, opts.depth, direction)) impacted.set(entry.node.id, entry);
+    // Nearest first; within a depth, production code before tests, fixtures
+    // and other low-value paths, as `graph query` already orders call results.
+    const ordered = [...impacted.values()].sort((a, b) => a.depth - b.depth
+      || Number(isLowValueGraphPath(a.node.filePath)) - Number(isLowValueGraphPath(b.node.filePath))
+      || a.node.id.localeCompare(b.node.id));
+    const rootsById = new Map(rootsSorted.map((node) => [node.id, node]));
+    const { kept: shown, omitted: omittedTestNodes } = withoutTestResults(
+      session, ordered, (entry) => entry.node, (entry) => rootsById.get(entry.root), opts.includeTests,
+    );
+    const testsCommand = omittedTestNodes > 0 ? [includeTestsCommand("mex impact", target)] : [];
+
     const ctx = beginResponse("impact", opts, undefined,
-      rootsSorted.length > 0 ? [`mex graph get ${rootsSorted[0]!.id} --detail source`] : [],
+      [...(rootsSorted.length > 0 ? [`mex graph get ${rootsSorted[0]!.id} --detail source`] : []), ...testsCommand],
       direction === "callers" ? {} : { direction });
     const ledger = ctx.ledger;
     const meta = ctx.meta;
@@ -146,10 +159,6 @@ export function runImpact(
       for (const root of rootsSorted) if (!admitDefinition(root)) break;
     }
 
-    const impacted = new Map<string, { node: GraphNode; depth: number; root: string }>();
-    for (const entry of transitiveCallNeighbors(session.graph, rootsSorted, opts.depth, direction)) impacted.set(entry.node.id, entry);
-    const ordered = [...impacted.values()].sort((a, b) => a.depth - b.depth || a.node.id.localeCompare(b.node.id));
-
     // Grounding is keyed by node, so an excluded node must not reappear
     // through it. Nodes omitted only by the returned-node cap still count.
     const affectedIds = [...new Set([...roots.map((node) => node.id), ...impacted.keys()])]
@@ -170,7 +179,7 @@ export function runImpact(
       if (ledger.tryAdd(record)) groundingRecords.push(record); else truncated = true;
     }
 
-    for (const entry of ordered) {
+    for (const entry of shown) {
       if (emittedNodes.length >= opts.maxNodes) { truncated = true; break; }
       const fact = factFor(session, entry.node.id, opts.detail, opts.fingerprint);
       if (!fact) continue;
@@ -211,7 +220,11 @@ export function runImpact(
       returnedNodes: emittedNodes.length,
       returnedEdges: 0,
       truncated,
-      suggestedNextCommands: emittedNodes.length > 0 ? [`mex graph get ${emittedNodes[0]!.id} --detail source`] : [],
+      omittedTestNodes,
+      suggestedNextCommands: [
+        ...(emittedNodes.length > 0 ? [`mex graph get ${emittedNodes[0]!.id} --detail source`] : []),
+        ...testsCommand,
+      ],
     })));
   });
 }
@@ -258,15 +271,22 @@ export function runGraphQuery(
       }
     }
 
-    const anticipated = pairs.length > 0 && opts.detail !== "source"
-      ? [`mex graph get ${pairs[0]!.node.id} --detail source`] : [];
+    const targetsById = new Map(nodes.map((node) => [node.id, node]));
+    const { kept: shownPairs, omitted: omittedTestNodes } = relation === "where-defined"
+      ? { kept: pairs, omitted: 0 }
+      : withoutTestResults(session, pairs, (pair) => pair.node, (pair) => targetsById.get(pair.targetId), opts.includeTests);
+    const testsCommand = omittedTestNodes > 0 ? [includeTestsCommand(`mex graph query ${relation}`, target)] : [];
+    const anticipated = [
+      ...(shownPairs.length > 0 && opts.detail !== "source" ? [`mex graph get ${shownPairs[0]!.node.id} --detail source`] : []),
+      ...testsCommand,
+    ];
     const ctx = beginResponse(`graph query ${relation}`, opts, undefined, anticipated);
     const ledger = ctx.ledger;
     const meta = ctx.meta;
 
     const entries: Array<{ record: Rec; node: GraphNode }> = [];
     let truncated = false;
-    for (const pair of pairs) {
+    for (const pair of shownPairs) {
       if (entries.length >= opts.maxNodes) { truncated = true; break; }
       const fact = factFor(session, pair.node.id, opts.detail, opts.fingerprint);
       if (!fact) continue;
@@ -292,7 +312,11 @@ export function runGraphQuery(
       returnedNodes: entries.length,
       returnedEdges: 0,
       truncated,
-      suggestedNextCommands: entries.length > 0 && opts.detail !== "source" ? [`mex graph get ${entries[0]!.node.id} --detail source`] : [],
+      omittedTestNodes,
+      suggestedNextCommands: [
+        ...(entries.length > 0 && opts.detail !== "source" ? [`mex graph get ${entries[0]!.node.id} --detail source`] : []),
+        ...testsCommand,
+      ],
     })));
   });
 }
@@ -1025,6 +1049,8 @@ function summaryRecord(
     returnedEdges: number;
     truncated: boolean;
     suggestedNextCommands: string[];
+    /** Call results in test files left out because other results exist. */
+    omittedTestNodes?: number;
     status?: "ok" | "partial" | "degraded" | "no-match";
     evidenceStrength?: "strong" | "moderate" | "weak" | "none";
     coveredTerms?: string[];
@@ -1047,6 +1073,7 @@ function summaryRecord(
     matchedNodes: fields.matchedNodes,
     returnedNodes: fields.returnedNodes,
     returnedEdges: fields.returnedEdges,
+    ...(fields.omittedTestNodes ? { omittedTestNodes: fields.omittedTestNodes } : {}),
     maxOutputTokens: ctx.effectiveMax,
     truncated: fields.truncated || omitted || ctx.ledger.droppedAny || ctx.ledger.overBudget,
     suggestedNextCommands: capped.values.suggestedNextCommands,
@@ -2520,6 +2547,34 @@ function callbackEnclosingSymbol(session: AgentGraphSession, node: GraphNode): R
     parentId = parent.containerId;
   }
   return {};
+}
+
+/**
+ * Leave out call results in test files while any other result can be shown.
+ * Test callbacks otherwise crowd real callers out of the node cap (#289). A
+ * target that is itself in a test file keeps its test results, and results
+ * that are only tests are all shown, so neither case becomes an empty answer.
+ */
+function withoutTestResults<T>(
+  session: AgentGraphSession,
+  entries: T[],
+  nodeOf: (entry: T) => GraphNode,
+  targetOf: (entry: T) => GraphNode | undefined,
+  includeTests: boolean,
+): { kept: T[]; omitted: number } {
+  if (includeTests) return { kept: entries, omitted: 0 };
+  const omittable = (entry: T) => isTestGraphPath(nodeOf(entry).filePath)
+    && !isTestGraphPath(targetOf(entry)?.filePath ?? "");
+  const kept = entries.filter((entry) => !omittable(entry));
+  // Drifted results are never emitted, so they cannot stand in for the tests.
+  if (!kept.some((entry) => !isDriftedFile(session, nodeOf(entry).filePath))) return { kept: entries, omitted: 0 };
+  return { kept, omitted: entries.length - kept.length };
+}
+
+/** The command an agent reruns to see the omitted test results. */
+function includeTestsCommand(command: string, target: string): string {
+  const argument = /^[\w./:@#-]+$/.test(target) ? target : JSON.stringify(target);
+  return `${command} ${argument} --include-tests`;
 }
 
 function relatedCallNodes(graph: GraphEngine, queried: GraphNode, relation: Exclude<QueryRelation, "where-defined">): GraphNode[] {

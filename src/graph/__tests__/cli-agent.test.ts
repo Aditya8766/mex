@@ -1822,6 +1822,90 @@ describe("runImpact", () => {
   });
 });
 
+describe("test-file call results (#289)", () => {
+  let project: string;
+  let projectEngine: GraphEngine;
+  let projectDeps: AgentCommandDeps;
+  let projectDb: ReturnType<typeof openSqlite>;
+
+  beforeAll(async () => {
+    project = mkdtempSync(join(tmpdir(), "mex-test-callers-"));
+    mkdirSync(join(project, "src"));
+    writeFileSync(join(project, "src", "lib.ts"), [
+      "export function compose(value: number): number { return value * 2; }",
+      "export function onlyTested(value: number): number { return value + 1; }",
+      "",
+    ].join("\n"));
+    writeFileSync(join(project, "src", "app.ts"), [
+      "import { compose } from \"./lib\";",
+      "export function run(): number { return compose(1); }",
+      "",
+    ].join("\n"));
+    writeFileSync(join(project, "src", "lib.test.ts"), [
+      "import { compose, onlyTested } from \"./lib\";",
+      "declare function it(name: string, body: () => void): void;",
+      "function testHelper(): number { return compose(0); }",
+      ...Array.from({ length: 5 }, (_, index) => `it("case ${index}", () => { compose(${index}); testHelper(); });`),
+      "it(\"only\", () => { onlyTested(1); });",
+      "",
+    ].join("\n"));
+    projectEngine = createGraphEngine({ rootDir: project });
+    await projectEngine.build(project);
+    projectDb = openSqlite(join(project, ".mex", "graph.db"));
+    projectDeps = { open: () => ({ graph: projectEngine, db: projectDb, close: () => {} }), write: (line) => lines.push(line) };
+  });
+
+  afterAll(() => {
+    projectDb.close();
+    projectEngine.close();
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  const names = (records: Record<string, unknown>[], type: string) => records
+    .filter((record) => record.type === type).map((record) => String(record.name));
+
+  it("who-calls leaves test callers out while a real caller exists, and says how many", () => {
+    const records = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps));
+    expect(names(records, "result")).toEqual(["run"]);
+    const summary = records.at(-1)!;
+    expect(summary).toMatchObject({ type: "summary", returnedNodes: 1, omittedTestNodes: 6 });
+    expect(summary.matchedNodes).toBe(7);
+    expect(summary.suggestedNextCommands).toContain("mex graph query who-calls compose --include-tests");
+  });
+
+  it("--include-tests returns test callers after the real caller", () => {
+    const records = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps, { includeTests: true }));
+    const results = names(records, "result");
+    expect(results[0]).toBe("run");
+    expect(results).toHaveLength(7);
+    expect(records.at(-1)).not.toHaveProperty("omittedTestNodes");
+  });
+
+  it("keeps test callers when only tests call the target", () => {
+    const records = capture(() => runGraphQuery("who-calls", "onlyTested", project, projectDeps));
+    expect(names(records, "result")).toHaveLength(1);
+    expect(records.at(-1)).not.toHaveProperty("omittedTestNodes");
+  });
+
+  it("keeps test callers of a target that is itself in a test file", () => {
+    const records = capture(() => runGraphQuery("who-calls", "testHelper", project, projectDeps));
+    expect(names(records, "result")).toHaveLength(5);
+    expect(records.at(-1)).not.toHaveProperty("omittedTestNodes");
+  });
+
+  it("impact ranks real callers first and leaves test callers out with a count", () => {
+    const records = capture(() => runImpact("compose", project, projectDeps));
+    expect(names(records, "caller")).toEqual(["run"]);
+    expect(records.at(-1)).toMatchObject({ type: "summary", omittedTestNodes: 6 });
+    expect(records.at(-1)!.suggestedNextCommands).toContain("mex impact compose --include-tests");
+
+    const all = capture(() => runImpact("compose", project, projectDeps, { includeTests: true }));
+    const callers = names(all, "caller");
+    expect(callers[0]).toBe("run");
+    expect(callers).toHaveLength(7);
+  });
+});
+
 describe("budget accounting honesty", () => {
   it("emits confidence-gated directed flow records and accounts every returned step", () => {
     const full = capture(() => runGraphScope("run", root, deps, { detail: "standard" }));
