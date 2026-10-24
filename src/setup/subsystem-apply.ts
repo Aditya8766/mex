@@ -3,16 +3,9 @@
  *
  * MEX applies each batch exactly as `mex wiki apply <file> --apply --json` would
  * (same command function: parsing, the Inbox Spec boundary, one atomic batch,
- * replay per opId), with two differences that make it cheap:
- *
- * - one full freshness proof for the population phase instead of a repository
- *   walk per apply (see `setup-graph-freshness.ts`): later applies only re-check
- *   that the proven graph database and HEAD are still in place. The database is
- *   opened for each apply and closed right after, so nothing is held between
- *   applies. Agents of this phase write only under `.mex/`, and finalize
- *   verifies every reference against a refreshed graph afterwards, so nothing
- *   here can make an unverified claim stick;
- * - applies are serialized: two batches never apply at once.
+ * replay per opId). Each apply proves the batch's linked sources, configuration
+ * and graph identity, and also binds Git HEAD for setup. The database is closed
+ * after each apply. Applies are serialized: two batches never apply at once.
  *
  * Before applying, MEX checks the batch stays in its lane: create-entry
  * operations only, every opId under the unit's prefix (so one unit can never
@@ -42,7 +35,7 @@ export interface BatchScope {
 
 export interface SetupBatchApplier {
   apply(batchFile: string, scope: BatchScope): Promise<BatchApplyOutcome>;
-  /** End of the phase. `changed` is true when the graph or HEAD changed mid-phase and freshness was proved again. */
+  /** End of the phase. `changed` is true when the graph or HEAD changed mid-phase. */
   close(): Promise<{ readonly changed: boolean }>;
 }
 
@@ -99,9 +92,8 @@ function factCount(envelopes: readonly unknown[], statuses: readonly { index: nu
 }
 
 /**
- * Create the applier for one population phase. The graph is proved fresh on
- * the first apply that needs it and re-proved only when its identity changes;
- * each apply opens and closes its own read of the database.
+ * Create the applier for one population phase. Every batch gets a fresh scoped
+ * proof; each apply opens and closes its own read of the database.
  */
 export function createSetupBatchApplier(projectRoot: string, options: {
   readonly freshness?: import("./setup-graph-freshness.js").SetupGraphFreshness;
@@ -116,8 +108,7 @@ export function createSetupBatchApplier(projectRoot: string, options: {
     const { createSetupGraphFreshness } = await import("./setup-graph-freshness.js");
     freshness ??= createSetupGraphFreshness(root);
     const { createRepositoryGraphPort } = await import("../graph/application-adapter.js");
-    // The fresh-session loader is the port's own dependency seam; only how freshness is proved changes.
-    port = createRepositoryGraphPort(root, { __internal: { loadFresh: freshness.loadFresh } });
+    port = createRepositoryGraphPort(root, { loadFreshSession: freshness.loadFresh });
     return port;
   };
 
@@ -181,8 +172,7 @@ export function createSetupBatchApplier(projectRoot: string, options: {
     },
     async close() {
       await queue.catch(() => undefined);
-      // Nothing is held between applies; report whether freshness had to be proved again.
-      return { changed: (freshness?.fullProofs ?? 0) > 1 };
+      return { changed: freshness?.changed ?? false };
     },
   };
 }

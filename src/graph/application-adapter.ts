@@ -235,6 +235,8 @@ interface AdapterDependencies {
 
 export interface RepositoryGraphPortOptions {
   dbPath?: string;
+  /** Session policy for consumers that also bind freshness to a workflow's HEAD. Must preserve source/configuration and final-boundary proofs. */
+  loadFreshSession?: typeof loadFreshGraphReadSession;
   /** Hub construction runs separately; ordinary readers and CLI keep their defaults. */
   candidateExecution?: "process";
   /** @internal Deterministic dependency seams for adapter conformance tests. */
@@ -260,7 +262,7 @@ export class RepositoryGraphPort implements GraphPort {
     this.#candidateExecution = options.candidateExecution;
     this.#deps = {
       inspectStatus: options.__internal?.inspectStatus ?? inspectGraphStatus,
-      loadFresh: options.__internal?.loadFresh ?? loadFreshGraphReadSession,
+      loadFresh: options.loadFreshSession ?? options.__internal?.loadFresh ?? loadFreshGraphReadSession,
       refresh: options.__internal?.refresh ?? (async (...args) => (await import("./maintenance.js")).refreshGraph(...args)),
       rebuild: options.__internal?.rebuild ?? (async (...args) => (await import("./maintenance.js")).rebuildGraph(...args)),
     };
