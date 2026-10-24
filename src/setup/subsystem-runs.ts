@@ -109,6 +109,7 @@ export function shouldRunPerSubsystem(input: {
 
 export interface SetupCoverageProgress {
   readonly phase: "shared" | "subsystems" | "final" | "complete";
+  readonly finalState?: UnitState;
   readonly total: number;
   readonly done: number;
   readonly skipped: number;
@@ -263,6 +264,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     try {
       options.onCoverage?.({
         phase: coveragePhase,
+        finalState: state.final.state,
         total: subsystems.length,
         done: subsystems.filter((unit) => unit.state === "done").length,
         skipped: subsystems.filter((unit) => unit.state === "skipped").length,
@@ -395,7 +397,8 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       return { ok: true };
     } catch (error) {
       const cancelled = phase.signal.aborted;
-      record(cancelled ? "stopped" : "failed", cancelled ? "stopped" : failureCategory(error));
+      if (error instanceof HeadlessPopulationError) tool = error.tool ?? tool;
+      record(cancelled || (error instanceof HeadlessPopulationError && error.category === "usage_limit") ? "stopped" : "failed", cancelled ? "stopped" : failureCategory(error));
       return { ok: false, error: cancelled && !(error instanceof HeadlessPopulationError && error.category === "cancelled")
         ? new HeadlessPopulationError("cancelled") : error };
     }
@@ -437,7 +440,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       }
     }
     consecutiveFailures += 1;
-    if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
+    if (unit.kind !== "final" && consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
       unit.progress.state = "pending";
       stopWith(new SubsystemPhaseStoppedError(
         `${CONSECUTIVE_FAILURE_LIMIT} agent sessions in a row failed (${error instanceof Error ? error.message : String(error)}), so this is not one subsystem's problem.`
@@ -477,7 +480,11 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       }
       if (problems === null) {
         if (batchPath !== null) archiveAppliedBatch(unit);
-        const written = await runAgent(unit, unit.writePrompt(), "write");
+        let written = await runAgent(unit, unit.writePrompt(), "write");
+        if (!written.ok && unit.kind === "final" && !stopsPhase(written.error) && !phase.signal.aborted) {
+          message("The final session failed; retrying patterns, routing rows and edges once.");
+          written = await runAgent(unit, unit.writePrompt(), "write");
+        }
         if (guard) reportScope(guard.take(), running.size === 1 ? [unit] : [...running]);
         if (!written.ok) {
           await sessionFailed(unit, written.error, "write");
@@ -622,6 +629,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     total,
     facts,
     skipped,
-    summary: `Subsystems covered: ${covered} of ${total}, ${facts} facts written.${skippedText}`,
+    summary: `Subsystems covered: ${covered} of ${total}, ${facts} facts written.${skippedText}`
+      + (state.final.state !== "done" ? " Patterns and links were not written. Rerunning `mex setup` writes them." : ""),
   };
 }

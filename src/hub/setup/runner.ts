@@ -435,6 +435,7 @@ export class HubSetupRunner {
     const paused = status.stage === "needs_population" || status.stage === "needs_commit";
     const message = status.stage === "needs_commit"
       ? "Graph and Wiki are ready. Review and commit the canonical MEX files, then check again to open the Hub."
+        + (result.coverageNotice ? ` ${result.coverageNotice}` : "")
         + (result.groundingNotice ? ` ${result.groundingNotice}` : "")
       : status.stage === "complete"
         ? "Agent memory is ready. Your selected AI tools can use this workspace."

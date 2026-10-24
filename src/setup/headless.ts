@@ -16,6 +16,8 @@ import type { GraphMaintenanceProgress } from "../team/contracts/graph.js";
 import { describeGroundingDrift } from "../graph/grounding-failures.js";
 import { BACKGROUND_AGENT_CLIS, COMMAND_CAPABLE_AGENTS, isBackgroundAgentTool, type BackgroundAgentTool } from "../agent-command.js";
 import {
+  HeadlessPopulationError,
+  readSingleUsagePause,
   describeSetupAgentChoice,
   findAvailableSetupAgent,
   launchHeadlessSetupPopulation,
@@ -29,6 +31,7 @@ import type { SetupBatchApplier } from "./subsystem-apply.js";
 import { createPlanState, hasUnfinishedPlanState, loadPlanState, savePlanState, type SetupPlanState } from "./subsystem-state.js";
 import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup, syncSetupNotice } from "./unfinished.js";
 import {
+  SubsystemPhaseStoppedError,
   perSubsystemSwitch,
   runSubsystemPopulation,
   shouldRunPerSubsystem,
@@ -256,7 +259,9 @@ export async function runHeadlessSetup(
     throw new SetupError("No Git repository found. Run `git init` first, then rerun setup.");
   }
 
-  const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir);
+  const singlePaused = readSingleUsagePause(projectRoot);
+  const resumeSingle = singlePaused?.queue?.mode === "single" && singlePaused.shared.reason === "usage_limit";
+  const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir) && !resumeSingle;
   const state = detectProjectState(projectRoot, mexDir);
   report("detect", describeDetectedState(mode, state));
 
@@ -366,7 +371,7 @@ export async function runHeadlessSetup(
   let perSubsystemState: SetupPlanState | null = null;
   let perSubsystemTool: BackgroundAgentTool | undefined;
   let plan: SubsystemPlan | null | undefined;
-  if (mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
+  if (!resumeSingle && mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
     const env = options.perSubsystem?.env ?? process.env;
     const resuming = perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
     if (!scaffoldPopulatedAtStart || resuming) {
@@ -418,6 +423,7 @@ export async function runHeadlessSetup(
   let populationCompleted = false;
   let coverageNotice: string | undefined;
 
+  try {
   if (perSubsystemState !== null) {
     throwIfSetupAborted(options.signal);
     const outcome = await runSubsystemPopulation({
@@ -475,8 +481,31 @@ export async function runHeadlessSetup(
     populationCompleted = launched.completed;
     throwIfSetupAborted(options.signal);
     if (launched.completed) {
+      if (resumeSingle && singlePaused) {
+        singlePaused.shared.state = "done";
+        delete singlePaused.shared.reason;
+        singlePaused.final.state = "done";
+        savePlanState(projectRoot, singlePaused);
+      }
       populationFinished = isScaffoldPopulated(mexDir);
     }
+  }
+
+  } catch (error) {
+    if ((error instanceof HeadlessPopulationError || error instanceof SubsystemPhaseStoppedError) && error.category === "usage_limit") {
+      if (perSubsystemState === null) {
+        const paused = singlePaused ?? createPlanState({ source: "graph", ranking: "activity", sourceFiles: 0, target: { min: 0, max: 0 }, candidates: [] });
+        paused.queue = { mode: "single" };
+        delete paused.finalizedAt;
+        paused.shared.state = "pending";
+        paused.shared.reason = "usage_limit";
+        savePlanState(projectRoot, paused);
+      }
+      return { mode, stage: "needs_population", populated: false, ready: false, selectedTools, prompt,
+        populationTool: error instanceof HeadlessPopulationError ? error.tool ?? null : perSubsystemTool ?? null,
+        populationCompleted: false, commitCommands: [], anchorNotes, message: error.message };
+    }
+    throw error;
   }
 
   if (!populationFinished && options.confirmPopulation === true) {
@@ -582,6 +611,7 @@ function resolveSetupStage(input: {
 
 /** One line for the progress view: subsystems done, skipped and in progress. */
 export function describeCoverage(coverage: SetupCoverageProgress): string {
+  if (coverage.phase === "complete" && coverage.finalState === "skipped") return `${coverage.done}/${coverage.total} subsystems done; patterns and links were not written. Rerun \`mex setup\` to write them.`;
   if (coverage.phase === "shared") return `Filling the shared files before ${coverage.total} subsystem sessions`;
   if (coverage.phase === "final") {
     return `${coverage.done}/${coverage.total} subsystems done${coverage.skipped > 0 ? `, ${coverage.skipped} skipped` : ""}; writing patterns, routing rows and edges`;

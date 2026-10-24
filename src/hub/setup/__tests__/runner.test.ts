@@ -547,3 +547,21 @@ describe("setup run lifecycle", () => {
     await runner.shutdown();
   });
 });
+
+it("shows usage-limit results as paused with reset and recovery intact", async () => {
+  const message = "Claude Code reached its usage limit. Resets 5:30pm (Asia/Kolkata). Rerun `mex setup` after the limit resets; finished work is kept. Population stopped with 8 of 12 subsystems done.";
+  mocks.execute.mockResolvedValue({ ...result, ready: false, populated: false, stage: "needs_population", message });
+  const runner = new HubSetupRunner({ projectRoot: "/test" });
+  runner.start({ mode: "code-repo", tools: ["claude"] });
+  await vi.waitFor(() => expect(runner.snapshot().status).toBe("paused"));
+  expect(runner.snapshot()).toMatchObject({ ready: false, message, error: null });
+});
+it("keeps the incomplete final-pass warning at commit review", async () => {
+  const coverageNotice = "Patterns and links were not written. Rerunning `mex setup` writes them.";
+  mocks.execute.mockResolvedValue({ ...result, coverageNotice });
+  mocks.status.mockResolvedValue({ ...status, stage: "needs_commit", populated: true });
+  const runner = new HubSetupRunner({ projectRoot: "/test" });
+  runner.start({ mode: "code-repo", tools: ["claude"] });
+  await vi.waitFor(() => expect(runner.snapshot().status).toBe("paused"));
+  expect(runner.snapshot().message).toContain(coverageNotice);
+});

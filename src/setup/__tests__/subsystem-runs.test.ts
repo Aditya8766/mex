@@ -43,7 +43,7 @@ function plan(count: number): SubsystemPlan {
   };
 }
 
-type Action = "ok" | "bad" | "fix" | "nofix" | "crash" | "crash-after-batch" | "timeout" | "auth" | "usage" | "hang" | "no-batch" | "touch-router" | "tool-missing";
+type Action = "ok" | "bad" | "fix" | "nofix" | "crash" | "crash-after-batch" | "usage-after-batch" | "timeout" | "auth" | "usage" | "hang" | "no-batch" | "touch-router" | "tool-missing";
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
@@ -98,6 +98,7 @@ function harness(root: string, script: Record<string, Action[]> = {}, options: {
         ];
         write(batch!, ops);
         if (action === "touch-router") writeFileSync(join(root, ".mex", "ROUTER.md"), "# Edited by a subsystem session\n");
+        if (action === "usage-after-batch") throw new HeadlessPopulationError("usage_limit", "claude");
         if (action === "crash-after-batch") throw new HeadlessPopulationError("failed", "claude");
       } else if (kind === "fix" && action === "fix") {
         const ops = JSON.parse(readFileSync(join(root, batch!), "utf8")) as Array<{ bad?: boolean }>;
@@ -416,4 +417,49 @@ describe("the progress line", () => {
     expect(describeCoverage({ phase: "subsystems", total: 3, done: 1, skipped: 1, subsystems })).toBe("1/3 subsystems done, 1 skipped · working on src/c/");
     expect(describeCoverage({ phase: "final", total: 3, done: 1, skipped: 1, subsystems })).toBe("1/3 subsystems done, 1 skipped; writing patterns, routing rows and edges");
   });
+});
+
+
+describe("usage-limit resume at every unit", () => {
+  it.each(["shared", "b", "final"])("pauses %s without skipping and finishes on rerun", async (slug) => {
+    const root = project();
+    const state = createPlanState(plan(3));
+    const first = harness(root, { [slug]: ["usage"] });
+    await expect(run(root, state, first, { parallelRuns: 1 }).promise).rejects.toMatchObject({ category: "usage_limit" });
+    const stored = loadPlanState(root).state!;
+    const units = [stored.shared, ...stored.subsystems, stored.final];
+    expect(units.some((unit) => unit.state === "skipped")).toBe(false);
+    expect(units.some((unit) => unit.runs.some((entry) => entry.failure === "usage_limit"))).toBe(true);
+    const done = first.launches.map((entry) => entry.slug).filter((entry) => entry !== slug);
+    const second = harness(root);
+    await expect(run(root, stored, second, { parallelRuns: 1 }).promise).resolves.toMatchObject({ covered: 3, skipped: [] });
+    for (const entry of done) expect(second.launches.map((launch) => launch.slug)).not.toContain(entry);
+    expect(stored.final.state).toBe("done");
+  });
+  it.each([1, 2])("retries final generic failures once (%i failures)", async (failures) => {
+    const root = project(true);
+    const state = createPlanState(plan(1));
+    state.shared.state = "done";
+    state.subsystems[0]!.state = "done";
+    const h = harness(root, { final: Array.from({ length: failures }, () => "crash" as const) });
+    const outcome = await run(root, state, h).promise;
+    expect(h.launches.filter((entry) => entry.kind === "final")).toHaveLength(2);
+    if (failures === 2) expect(outcome.summary).toContain("Patterns and links were not written. Rerunning `mex setup` writes them.");
+    else expect(state.final.state).toBe("done");
+  });
+});
+
+it("defers a limited session's partial batch exactly as cancellation does, then replays on resume", async () => {
+  const root = project(true);
+  const state = createPlanState(plan(1));
+  state.shared.state = "done";
+  const first = harness(root, { a: ["usage-after-batch"] });
+  await expect(run(root, state, first).promise).rejects.toMatchObject({ category: "usage_limit" });
+  expect(first.applies).toEqual([]);
+  expect(state.subsystems[0]!.state).toBe("pending");
+  expect(existsSync(join(root, ".mex/local/setup-ops/a.json"))).toBe(true);
+  const second = harness(root);
+  await run(root, loadPlanState(root).state!, second).promise;
+  expect(second.applies).toContain(".mex/local/setup-ops/a.json");
+  expect(second.launches.map((entry) => entry.slug)).not.toContain("a");
 });

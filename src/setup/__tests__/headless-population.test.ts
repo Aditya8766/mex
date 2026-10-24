@@ -453,6 +453,29 @@ describe("headless population process", () => {
   });
 });
 
+describe("usage limits across process streams", () => {
+  it.each(["assistant", "stderr"])("pauses on %s when the session did not finish cleanly", async (stream) => {
+    const event = { type: "assistant", error: "rate_limit", message: { content: [{ type: "text", text: "You've hit your limit ? resets 5:30pm (Asia/Kolkata)" }] } };
+    const body = stream === "assistant"
+      ? `emitSuccess(); process.stdout.write(${JSON.stringify(JSON.stringify(event))});`
+      : `process.stderr.write('x'.repeat(20000)); process.stderr.write("You've hit your limit ? resets 5:30pm (Asia/Kolkata)"); process.exitCode = 1;`;
+    const fixture = agentFixture(body);
+    await expect(launchHeadlessSetupPopulation({ ...fixture.options, selectedTools: ["claude"] })).rejects.toMatchObject({
+      category: "usage_limit", resetTime: "5:30pm (Asia/Kolkata)", message: expect.stringContaining("finished work is kept"),
+    });
+  });
+
+  it("treats a limit notice on stderr as advisory when the session finished cleanly", async () => {
+    const fixture = agentFixture(`emitSuccess(); process.stderr.write("You've hit your limit ? resets 5:30pm (Asia/Kolkata)");`);
+    await expect(launchHeadlessSetupPopulation({ ...fixture.options, selectedTools: ["claude"] })).resolves.toMatchObject({ completed: true });
+  });
+});
+
+it("does not classify stderr about a rate limit middleware failure as account quota", async () => {
+  const fixture = agentFixture(`process.stderr.write('Failed reading rate limit middleware: file not found'); process.exitCode = 2;`);
+  await expect(launchHeadlessSetupPopulation(fixture.options)).rejects.toMatchObject({ category: "failed" });
+});
+
 function agentFixture(body: string) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "mex-headless-population-")));
   roots.push(root);

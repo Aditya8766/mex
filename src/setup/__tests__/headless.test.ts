@@ -243,6 +243,20 @@ describe("headless setup run", () => {
   });
 });
 
+it("pauses single-session setup after partial writes and reruns the session over filled files", async () => {
+  const root = fixture();
+  const first = await runHeadlessSetup({ projectRoot: root, mode: "agent-memory", tools: [], populate: async () => {
+    writePopulatedScaffold(join(root, ".mex"));
+    throw new population.HeadlessPopulationError("usage_limit", "claude", "5:30pm (Asia/Kolkata)");
+  } });
+  expect(first).toMatchObject({ ready: false, stage: "needs_population" });
+  expect(first.message).toContain("5:30pm (Asia/Kolkata)");
+  expect(inspectSetupStatus(root).stage).toBe("needs_population");
+  const launch = vi.fn(async () => ({ tool: "claude" as const, completed: true }));
+  expect(await runHeadlessSetup({ projectRoot: root, tools: [], populate: launch })).toMatchObject({ ready: true });
+  expect(launch).toHaveBeenCalledOnce();
+});
+
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "mex-headless-setup-"));
   roots.push(root);

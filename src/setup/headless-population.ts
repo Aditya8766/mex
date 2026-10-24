@@ -16,11 +16,23 @@ import { AI_TOOLS, type AiTool } from "../types.js";
 import {
   createPopulationActivityDecoder,
   USAGE_LIMIT_PATTERN,
+  usageLimitResetTime,
   type PopulationActivitySignal,
   type PopulationAgentUsage,
 } from "./population-activity.js";
 import { createPopulationTranscriptDecoder, type PopulationTranscriptSignal } from "./population-transcript.js";
 import { createPopulationSession, SetupPopulationError } from "./population.js";
+
+import { parsePlanState, SETUP_PLAN_STATE_FILE, type SetupPlanState } from "./subsystem-state.js";
+
+/** Probe the single-session pause without repairing an unrelated/corrupt plan. */
+export function readSingleUsagePause(projectRoot: string): SetupPlanState | null {
+  try {
+    const state = parsePlanState(readFileSync(resolve(projectRoot, SETUP_PLAN_STATE_FILE), "utf8")).state;
+    return state?.queue?.mode === "single" && state.queue.finalized !== true && state.finalizedAt === undefined
+      && state.shared.reason === "usage_limit" ? state : null;
+  } catch { return null; }
+}
 
 export type { BackgroundAgentTool } from "../agent-command.js";
 
@@ -71,13 +83,13 @@ export type PopulationFailure = "launch" | "arguments" | "authentication" | "usa
 
 /** Fixed messages only: child output can contain prompts, paths, and secrets. */
 export class HeadlessPopulationError extends SetupPopulationError {
-  constructor(readonly category: PopulationFailure, tool?: BackgroundAgentTool) {
+  constructor(readonly category: PopulationFailure, readonly tool?: BackgroundAgentTool, readonly resetTime?: string) {
     const name = tool ? AI_TOOLS[tool].name : "The selected AI tool";
     const messages: Record<PopulationFailure, string> = {
       launch: `${name} could not start. Check its installation and try again.`,
       arguments: `${name} rejected the background command. Update the AI CLI and MEX, then try again.`,
       authentication: `${name} could not authenticate. Sign in to its CLI and try again.`,
-      usage_limit: `${name} reached its usage limit. Wait until the limit resets, then try again.`,
+      usage_limit: `${name} reached its usage limit.${resetTime ? ` Resets ${resetTime}.` : ""} Rerun \`mex setup\` after the limit resets; finished work is kept.`,
       failed: `${name} exited before population completed. Check its CLI configuration and try again.`,
       protocol: `${name} stopped without confirming completion. Review the files and resume setup.`,
       cancelled: "AI population was cancelled. You can resume setup when ready.",
@@ -323,7 +335,16 @@ function runHeadlessAgent(
         transcript?.write(chunk);
       }
     });
-    child.stderr?.on("data", stderr.append);
+    let stderrLimit = false;
+    let stderrReset: string | undefined;
+    let stderrTail = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr.append(chunk);
+      const text = stderrTail + chunk.toString("utf8");
+      stderrLimit ||= USAGE_LIMIT_PATTERN.test(text);
+      if (stderrLimit) stderrReset = usageLimitResetTime(text) ?? stderrReset;
+      stderrTail = text.slice(-512);
+    });
     child.once("spawn", () => emitActivity({ kind: "starting", state: "running" }));
     const stop = (reason: HeadlessPopulationError) => {
       if (closing || failure) return;
@@ -360,7 +381,10 @@ function runHeadlessAgent(
       }
       if (options.signal?.aborted) reject(new HeadlessPopulationError("cancelled", tool));
       else if (failure) reject(failure);
-      else if (code !== 0 || signal || decoder.failed) {
+      // A limit notice in a session that still finished cleanly is advisory.
+      else if ((decoder.usageLimited || stderrLimit) && (code !== 0 || signal || decoder.failed || !decoder.completed)) {
+        reject(new HeadlessPopulationError("usage_limit", tool, decoder.resetTime ?? stderrReset));
+      } else if (code !== 0 || signal || decoder.failed) {
         reject(new HeadlessPopulationError(
           decoder.usageLimited || USAGE_LIMIT_PATTERN.test(stderr.text()) ? "usage_limit" : classifyFailure(stderr.text(), stdout.text()),
           tool,
