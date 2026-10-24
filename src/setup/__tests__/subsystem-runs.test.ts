@@ -173,6 +173,18 @@ describe("choosing the per-subsystem path", () => {
 });
 
 describe("one session per subsystem", () => {
+  it("finishes an old plan whose only pending unit is the final pass without launching an agent", async () => {
+    const root = project(true);
+    const state = createPlanState(plan(2));
+    state.shared.state = "done";
+    state.subsystems.forEach((unit) => { unit.state = "done"; });
+    const h = harness(root);
+    await run(root, state, h).promise;
+    expect(h.launches).toEqual([]);
+    expect(loadPlanState(root).state!.final.state).toBe("done");
+  });
+
+
   it("runs the shared files first, up to three subsystems at once with serialized applies, then the final pass", async () => {
     const root = project();
     const state = createPlanState(plan(5));
@@ -180,7 +192,7 @@ describe("one session per subsystem", () => {
     const { promise, messages, coverage } = run(root, state, h);
     const outcome = await promise;
     expect(h.launches[0]).toEqual({ kind: "shared", slug: "shared" });
-    expect(h.launches.at(-1)).toEqual({ kind: "final", slug: "final" });
+    expect(h.launches.some((entry) => entry.kind === "final")).toBe(false);
     expect(h.launches.filter((entry) => entry.kind === "subsystem")).toHaveLength(5);
     expect(h.maxActive).toBe(3);
     expect(h.overlappingApplies).toBe(0);
@@ -228,7 +240,7 @@ describe("one session per subsystem", () => {
     expect(outcome.summary).toContain("Skipped 1: src/b/ (its batch was refused twice");
     expect(outcome.summary).toContain("Rerun `mex setup` to try it again.");
     expect(messages.some((message) => message.startsWith("Warning: Skipped subsystem src/b/: its batch was refused twice"))).toBe(true);
-    expect(finalPrompts[0]).toContain("MEX retries them on the next setup run:\n- src/b/");
+    expect(finalPrompts).toEqual([]);
     expect(loadPlanState(root).state!.subsystems[1]).toMatchObject({ state: "skipped", reason: expect.stringContaining("refused twice") });
   });
 
@@ -334,7 +346,7 @@ describe("one session per subsystem", () => {
     const h = harness(root);
     const { promise, messages } = run(root, reloaded, h);
     const outcome = await promise;
-    expect(h.launches).toEqual([{ kind: "subsystem", slug: "b" }, { kind: "subsystem", slug: "d" }, { kind: "final", slug: "final" }]);
+    expect(h.launches).toEqual([{ kind: "subsystem", slug: "b" }, { kind: "subsystem", slug: "d" }]);
     expect(messages).toContain("Applied the batch an earlier run left for subsystem src/c/.");
     expect(outcome.covered).toBe(4);
     expect(h.applies).not.toContain(".mex/local/setup-ops/a.json");
@@ -351,7 +363,7 @@ describe("one session per subsystem", () => {
     ]));
     const h = harness(root);
     expect((await run(root, state, h).promise).covered).toBe(1);
-    expect(h.launches.map((entry) => entry.kind)).toEqual(["fix", "final"]);
+    expect(h.launches.map((entry) => entry.kind)).toEqual(["fix"]);
   });
 
   it("runs fewer sessions at once when free memory is low, never fewer than one", async () => {

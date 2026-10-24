@@ -36,7 +36,6 @@ import type { HeadlessPopulationLaunchResult } from "./headless-population.js";
 import type { PopulationAgentUsage } from "./population-activity.js";
 import {
   buildBatchFixPrompt,
-  buildFinalPassPrompt,
   buildSharedFilesPrompt,
   buildSubsystemPrompt,
   SHARED_CONTEXT_FILES,
@@ -44,6 +43,7 @@ import {
 } from "./prompts.js";
 import { createSetupBatchApplier, type BatchApplyOutcome, type BatchProblem, type BatchScope, type SetupBatchApplier } from "./subsystem-apply.js";
 import { ScopeGuard } from "./subsystem-scope.js";
+import { readSetupBatch, reconcileSetupNavigation } from "./subsystem-links.js";
 import {
   SHARED_UNIT_SLUG,
   savePlanState,
@@ -290,6 +290,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     batchFile: unitBatchFile(SHARED_UNIT_SLUG),
     scope: { opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG), files: [...SHARED_CONTEXT_FILES] },
     writePrompt: () => buildSharedFilesPrompt({
+      navigationData: true,
       briefJson: options.scannerBrief,
       batchFile: unitBatchFile(SHARED_UNIT_SLUG),
       opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG),
@@ -305,19 +306,10 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     batchFile: unitBatchFile(unit.slug),
     scope: { opIdPrefix: opIdPrefix(unit.slug), files: [subsystemWikiFile(unit.slug)] },
     transcriptTag: unit.slug,
-    writePrompt: () => buildSubsystemPrompt({ subsystem: promptEntry(unit), nested: nestedOf(unit) }),
+    writePrompt: () => buildSubsystemPrompt({ navigationData: true, subsystem: promptEntry(unit), nested: nestedOf(unit), planned: state.subsystems.map(promptEntry) }),
     allowed: () => false,
   }));
-  const finalUnit: WorkUnit = {
-    kind: "final",
-    label: "patterns, routing rows and edges",
-    progress: state.final,
-    writePrompt: () => buildFinalPassPrompt({
-      written: state.subsystems.filter((unit) => unit.state === "done").map(promptEntry),
-      skipped: state.subsystems.filter((unit) => unit.state !== "done"),
-    }),
-    allowed: (path) => path === ".mex/ROUTER.md" || /^\.mex\/context\/[^/]+\.md$/u.test(path) || path.startsWith(".mex/patterns/"),
-  };
+
 
   let guard: ScopeGuard | null = null;
   try { guard = new ScopeGuard(projectRoot, { trackSource: options.trackSource !== false }); }
@@ -341,7 +333,16 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       const started = now();
       let outcome: BatchApplyOutcome;
       try {
-        outcome = await applier.apply(unit.batchFile!, unit.scope!);
+        let batchFile = unit.batchFile!;
+        const path = resolve(projectRoot, batchFile);
+        if (existsSync(path)) {
+          const batch = readSetupBatch(path);
+          if (batch.extended) {
+            batchFile = batchFile.replace(/\.json$/u, ".operations.json");
+            writeFileSync(resolve(projectRoot, batchFile), JSON.stringify(batch.operations));
+          }
+        }
+        outcome = await applier.apply(batchFile, unit.scope!);
       } catch (error) {
         // An apply that throws (a lock held elsewhere, a disk error) is reported like a refusal.
         outcome = { kind: "refused", problems: [{ code: "SETUP_APPLY_FAILED", message: error instanceof Error ? error.message : String(error) }] };
@@ -581,7 +582,9 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
         state.final.state = "skipped";
         state.final.reason = "the shared files are not filled yet";
       } else {
-        await runUnit(finalUnit);
+        reconcileSetupNavigation(projectRoot, state);
+        state.final.state = "done";
+        delete state.final.reason;
       }
     }
     coveragePhase = stopError === null ? "complete" : coveragePhase;

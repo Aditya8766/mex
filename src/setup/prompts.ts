@@ -469,13 +469,15 @@ unknown, write [TO DETERMINE] and say what needs to be inspected.`;
 // ── Per-subsystem population (larger repositories) ──
 //
 // MEX runs a short sequence of separate agent sessions instead of one long one:
-// the shared files first, then one fresh session per planned subsystem, then a
-// last session for patterns, routing rows and edges. The shared and subsystem
+// the shared files and one fresh session per planned subsystem, alongside the
+// graph build. MEX reconciles navigation without a final session. These
 // sessions run no `mex` commands: each writes one batch file and MEX applies it
 // in-process.
 
 /** A subsystem as a per-subsystem prompt names it. */
 export interface SubsystemPromptEntry {
+  /** Bounded source-layout description, available without the graph or shared files. */
+  readonly description?: string;
   readonly path: string;
   readonly remainder?: boolean;
   readonly budget: { readonly min: number; readonly max: number };
@@ -514,6 +516,36 @@ ${ALIAS_GUIDANCE}
 ${MEX_LINKS_FACTS}`;
 }
 
+function setupNavigationSection(shared: boolean): string {
+  return `NAVIGATION AND PATTERNS (data in your batch, never edit indexes)
+On the first operation envelope, alongside opId/type/payload, add an optional
+"setup" object: {"links":[{"target":"context/architecture.md",
+"condition":"when tracing this area's role in the request flow"}],
+"patterns":[{"file":"patterns/<descriptive-task-name>.md","content":"<complete Markdown>"}]}.
+Links point to planned subsystem files, shared context files or patterns, with
+short, specific conditions. Link only meaningful relationships; MEX drops
+missing targets, adds back-links, and writes ROUTER and patterns/INDEX serially.
+${shared ? "Return 2–3 cross-cutting patterns, such as adding a feature and debugging a request flow." : "Return 0–1 pattern, only for a genuinely recurring task in this area."}
+Read .mex/patterns/README.md and existing patterns. Follow its complete format:
+frontmatter name, description, triggers, edges, last_updated; sections Context,
+Steps, Gotchas, Verify, Debug and Update Scaffold. Preserve existing patterns;
+do not duplicate them. MEX admits at most 5 project patterns total, shared first.
+Patterns are complete Markdown strings in setup.patterns; do not write them directly.
+Never run graph commands: the graph may still be building.`;
+}
+
+/** Upgrade a completed legacy shared unit that predates distributed pattern authoring. */
+export function buildSharedPatternsPrompt(batchFile: string): string {
+  return `You are adding the missing cross-cutting patterns to a setup started by an older MEX version.
+Read .mex/AGENTS.md, .mex/context/architecture.md, .mex/context/conventions.md,
+.mex/patterns/README.md and existing patterns, then inspect source only as needed.
+Run no \`mex\` commands. Do not rewrite shared content or facts; they are already applied.
+Write only ${batchFile}, as a JSON array with one metadata-only object:
+[{"setup":{"patterns":[{"file":"patterns/<task>.md","content":"<complete Markdown>"}]}}].
+${setupNavigationSection(true)}
+Stop after writing the batch. MEX applies this data and reconciles navigation itself.`;
+}
+
 const SHARED_PASS_1 = `
 Populate each incomplete .mex/context/ slot by replacing annotation comments,
 sentinel placeholders, or empty sections with real content from this codebase.
@@ -546,6 +578,7 @@ Update .mex/AGENTS.md:
  * written to a batch file that MEX applies.
  */
 export function buildSharedFilesPrompt(input: {
+  readonly navigationData?: boolean;
   readonly briefJson: string | null;
   readonly batchFile: string;
   readonly opIdPrefix: string;
@@ -583,21 +616,25 @@ ${WHAT_DESERVES_A_FACT}
 ${batchFactsSection(input.batchFile, SHARED_CONTEXT_FILES[0], input.opIdPrefix,
     `Each "file" is one of the five shared files. Every opId starts with "${input.opIdPrefix}".`)}
 
-SUBSYSTEMS — MEX covers these in separate sessions after this one, each in its
+SUBSYSTEMS — MEX covers these in separate sessions alongside this one, each in its
 own file. Do not write those files or facts about them here:
 ${input.subsystems.map((entry, index) => `${String(index + 1).padStart(2)}. ${folderLabel(entry.path, entry.remainder)} -> .mex/${entry.wikiFile}`).join("\n")}
 ${POPULATION_MERGE_RULES}
 ${sources}
 
 PASS 1 — Populate the shared files:
-${SHARED_PASS_1}`;
+${SHARED_PASS_1}
+
+${input.navigationData ? setupNavigationSection(true) : ""}`;
 }
 
 /** One fresh session for one subsystem: read its code, write its batch, run no commands. */
 export function buildSubsystemPrompt(input: {
+  readonly navigationData?: boolean;
   readonly subsystem: SubsystemPromptEntry;
   /** Planned subsystems inside this one's folder, which other sessions cover. */
   readonly nested: readonly string[];
+  readonly planned?: readonly Pick<SubsystemPromptEntry, "path" | "wikiFile" | "remainder" | "description">[];
 }): string {
   const { subsystem } = input;
   const nested = input.nested.length === 0 ? "" : `
@@ -620,6 +657,11 @@ SUBSYSTEM
 
 Read first, for context: .mex/AGENTS.md, .mex/context/architecture.md and
 .mex/context/conventions.md.
+These files may still be scaffolds while the shared session runs. Use source
+files and manifests as evidence; do not wait for other sessions.
+
+PLANNED SUBSYSTEM FILES (folder responsibility; inspect code for exact boundaries):
+${(input.planned ?? [subsystem]).map((entry) => `- ${entry.wikiFile}: ${entry.description ?? `code in ${folderLabel(entry.path, entry.remainder)}`}`).join("\n")}
 
 THIS SESSION
 - Run no \`mex\` commands. MEX checks and applies your batch file after you exit.
@@ -647,7 +689,9 @@ No padding: if a subsystem has fewer real behaviors worth a fact than its
 budget minimum, write fewer. Quality of facts matters more than count.
 
 ${batchFactsSection(subsystem.batchFile, subsystem.wikiFile, subsystem.opIdPrefix,
-    `Every opId starts with "${subsystem.opIdPrefix}".`)}`;
+    `Every opId starts with "${subsystem.opIdPrefix}".`)}
+
+${input.navigationData ? setupNavigationSection(false) : ""}`;
 }
 
 /** At most this many refusal diagnostics go into one fix prompt. */
@@ -691,7 +735,7 @@ const FINAL_SELF_CHECK = `SELF-CHECK before you stop: run \`mex wiki validate\` 
 joined to it) and fix every error your work caused, such as broken frontmatter
 or a file that does not parse. No other check is needed.`;
 
-/** The last session: patterns, routing rows for the subsystem files, and edges, after every subsystem ran. */
+/** Legacy manual queue instructions. Background setup reconciles navigation without this session. */
 export function buildFinalPassPrompt(input: {
   readonly written: readonly Pick<SubsystemPromptEntry, "path" | "remainder" | "wikiFile">[];
   readonly skipped: readonly Pick<SubsystemPromptEntry, "path" | "remainder">[];
