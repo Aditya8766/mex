@@ -226,6 +226,8 @@ describe("runGraphScope", () => {
       returnedFiles: expect.arrayContaining(["main.ts"]), textFallbackFiles: [], suggestedNextCommands: [],
     });
     expect(summary.sourceBackedNodes).toEqual(expect.arrayContaining(facts.map((fact) => fact.id)));
+    const sourcedIds = sources.flatMap((source) => (source.ranges as SourceRange[]).flatMap((range) => range.nodeIds));
+    expect(summary.returnedNodes).toBe(new Set([...sourcedIds, ...facts.map((fact) => fact.id as string)]).size);
     expect(typeof summary.estimatedOutputTokens).toBe("number");
     expect(typeof summary.truncated).toBe("boolean");
     expect(records.findIndex((r) => r.type === "source")).toBeLessThan(records.findIndex((r) => r.type === "fact"));
@@ -237,6 +239,35 @@ describe("runGraphScope", () => {
     expect(source.length).toBeGreaterThan(0);
     const joined = JSON.stringify(source);
     expect(joined).toContain("helper");
+  });
+
+  it("counts nodes returned only as source in returnedNodes (#289)", async () => {
+    const isolated = mkdtempSync(join(tmpdir(), "mex-scope-returned-"));
+    // Mid-sized matching declarations: their source spends the budget before
+    // every source-backed declaration can also get a fact record.
+    const body = Array.from({ length: 24 }, (_, line) => `  total += path.length * ${line + 1};`).join("\n");
+    writeFileSync(join(isolated, "routes.ts"), Array.from({ length: 12 }, (_, index) => (
+      `export function routeHandler${index}(path: string): number {\n  let total = 0;\n${body}\n  return total;\n}\n`
+    )).join("\n"));
+    const isolatedEngine = createGraphEngine({ rootDir: isolated });
+    await isolatedEngine.build(isolated);
+    const db = openSqlite(join(isolated, ".mex", "graph.db"));
+    const isolatedDeps: AgentCommandDeps = {
+      open: () => ({ graph: isolatedEngine, db, close: () => {} }), write: (line) => lines.push(line),
+    };
+    try {
+      const records = capture(() => runGraphScope("route handler", isolated, isolatedDeps, {}));
+      const sourcedIds = records.filter((r) => r.type === "source")
+        .flatMap((source) => (source.ranges as SourceRange[]).flatMap((range) => range.nodeIds));
+      const factIds = records.filter((r) => r.type === "fact").map((fact) => fact.id as string);
+      const returned = new Set([...sourcedIds, ...factIds]);
+      expect(returned.size).toBeGreaterThan(factIds.length);
+      expect(records.at(-1)).toMatchObject({ type: "summary", returnedNodes: returned.size });
+    } finally {
+      db.close();
+      isolatedEngine.close();
+      rmSync(isolated, { recursive: true, force: true });
+    }
   });
 
   it("renders source from a CRLF checkout without carriage returns (#289)", async () => {

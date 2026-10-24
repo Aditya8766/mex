@@ -814,7 +814,8 @@ export function runGraphScope(
     ]);
     write(JSON.stringify(summaryRecord(ctx, {
       matchedNodes: selection.matchedCount,
-      returnedNodes: facts.length,
+      // A node shown only as source is returned as surely as one with a fact.
+      returnedNodes: new Set([...finalSourcedIds, ...facts.map((fact) => fact.node.id)]).size,
       returnedEdges,
       truncated,
       suggestedNextCommands: suggestions,
