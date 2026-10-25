@@ -46,7 +46,7 @@ import {
 import { MinHashReconciler } from "./reconcile-engine.js";
 import type { Resolution } from "./reconcile.js";
 import { GRAPH_SNAPSHOT_METADATA_KEY } from "./snapshot.js";
-import { inspectGraphStatus } from "./status.js";
+import { createScopedSourcePredicate, inspectGraphStatus } from "./status.js";
 import { prepareCodeHashing } from "./code-hash.js";
 import { createGroundingEvidence, type CommittedBody, type GroundingChangeEvidence } from "./grounding-evidence.js";
 import { LANGUAGES, NODE_KINDS, type GraphNode } from "./types.js";
@@ -582,6 +582,7 @@ export class RepositoryGraphPort implements GraphPort {
         ? `The code graph has incomplete parses${gaps.length ? ` in ${gaps.slice(0, 8).join(", ").slice(0, 1_024)}${gaps.length > 8 ? ", …" : ""}` : ""}. This target cannot be verified. Fix those files or explicitly exclude intentional fixtures, then run \`mex graph\`.`
         : undefined;
       const verifiedSources = new Set<string>();
+      const isScopedSource = sourceScope ? createScopedSourcePredicate(this.#projectRoot) : undefined;
       let sourceRefusal: MexPortError | undefined;
       const verifySource = (path: string): void => {
         if (!sourceScope) return;
@@ -591,6 +592,8 @@ export class RepositoryGraphPort implements GraphPort {
         try {
           const indexed = context.session.db.prepare("SELECT content_hash FROM files WHERE path = ?").get(path) as
             { content_hash: string } | undefined;
+          // An absent row outside the corpus is a missing grounding, not source drift.
+          if (!indexed && !isScopedSource!(path)) return;
           if (!indexed || sha256(readStableContainedSource(this.#projectRoot, path).toString("utf8")) !== indexed.content_hash) {
             throw new Error("Source changed");
           }

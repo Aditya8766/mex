@@ -1,4 +1,5 @@
 import { discoverGraphReadPaths } from "./read-discovery.js";
+import { Glob, Ignore } from "glob";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
@@ -2181,7 +2182,7 @@ async function inspectLiveSources(
     if (sourceScope && sourceScope.size > GRAPH_CORPUS_LIMITS.maxSourceFiles) {
       throw new GraphCorpusLimitError("maxSourceFiles");
     }
-    matches = sourceScope ? [...sourceScope].sort(compareCodePoints) : discoverGraphReadPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    matches = sourceScope ? [...sourceScope].filter(createScopedSourcePredicate(projectRoot)).sort(compareCodePoints) : discoverGraphReadPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
       ...GRAPH_CORPUS_GLOB_OPTIONS,
       cwd: projectRoot,
       ignore: graphCorpusIgnoreGlobs(projectRoot),
@@ -2278,6 +2279,22 @@ async function inspectLiveSources(
     });
   }
   return { hashes, discoveredPaths, complete, diagnostics };
+}
+
+/** Match named sources with the walk's corpus rules, without walking the corpus. */
+export function createScopedSourcePredicate(projectRoot: string): (path: string) => boolean {
+  const options = new Glob(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    ...GRAPH_CORPUS_GLOB_OPTIONS,
+    cwd: projectRoot,
+  });
+  const ignored = new Ignore(graphCorpusIgnoreGlobs(projectRoot), options);
+  // Use glob's own matcher and platform case rules for both inclusion and exclusion.
+  const supported = new Ignore([GRAPH_SUPPORTED_SOURCE_GLOB], options);
+  return (path) => {
+    if (!isSupportedSourceFile(path) || path.split("/").some(part => part.startsWith("."))) return false;
+    const entry = options.scurry.cwd.resolve(path);
+    return supported.ignored(entry) && !ignored.ignored(entry);
+  };
 }
 
 /** Keep indexed identities outside an explicitly scoped proof, without reading their sources. */
