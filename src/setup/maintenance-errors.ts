@@ -20,7 +20,7 @@ const RECOVERY_BY_CODE: Readonly<Record<string, string>> = {
   GRAPH_INDEX_NOT_REPAIRABLE: "The code graph cannot be repaired safely. Run `mex graph rebuild`, then retry setup.",
   GRAPH_MAINTENANCE_LOCKED: "Another graph operation is active. Wait for it to finish, then retry setup.",
   GRAPH_MAINTENANCE_GATE_STALE: "An interrupted graph operation left .mex/graph.db.lock.gate behind. Verify no MEX process is running before removing that gate, then retry setup.",
-  GRAPH_MAINTENANCE_CANCELLED: "Graph maintenance was interrupted. Retry setup when ready.",
+  GRAPH_MAINTENANCE_CANCELLED: "Setup itself cancelled the graph build; the worker did not fail. Retry setup when ready.",
   GRAPH_MAINTENANCE_PATH_UNSAFE: "A graph database or maintenance path is unsafe. Check .mex for redirected or conflicting paths, correct them, then retry setup.",
   GRAPH_MAINTENANCE_RACE: "The graph or project files changed during maintenance. Wait for other writers to finish, then retry setup.",
   GRAPH_CANDIDATE_INVALID: "The rebuilt graph failed validation. Run `mex graph rebuild` to inspect its diagnostics, resolve the reported problems, then retry setup.",
@@ -53,6 +53,13 @@ export function classifySetupMaintenanceError(
           : error.category === "cancelled"
             ? RECOVERY_BY_CODE.GRAPH_MAINTENANCE_CANCELLED
             : graphWorkerRecovery(error);
+    const diagnostic = error.diagnostic;
+    const details = [error.category, diagnostic?.reason,
+      diagnostic?.exitCode == null ? undefined : `exit code ${diagnostic.exitCode}`,
+      diagnostic?.signal ? `signal ${diagnostic.signal}` : undefined].filter(Boolean);
+    recovery = `Graph worker (${details.join("; ")}). ${error.category === "cancelled"
+      ? "Setup itself cancelled the graph build; the worker did not fail. Retry setup to continue."
+      : recovery}`;
   } else if (error instanceof IndexInUseError) {
     recovery = "The Wiki index is busy or changed during publication. Close other processes using it, then retry setup.";
   } else if (error instanceof IndexPathError || error instanceof WikiSourceReadError) {
@@ -98,7 +105,9 @@ function graphWorkerRecovery(error: GraphCandidateProcessError): string {
       return `${status} Check the worker diagnostics, then retry setup.`;
     }
     default:
-      return "The graph worker could not complete the build. Check the worker diagnostics or run `mex graph rebuild`, then retry setup.";
+      return error.diagnostic
+        ? "The graph worker reported a build error. Check the worker diagnostics or run `mex graph rebuild`, then retry setup."
+        : "The graph worker returned no further diagnostic. Run `mex graph rebuild` to inspect a fresh build, then retry setup.";
   }
 }
 

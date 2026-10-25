@@ -79,9 +79,9 @@ export class GraphCandidateProcessError extends Error {
     readonly category: "cancelled" | "compatibility" | "staging" | "failed" | "unsafe",
     readonly diagnostic?: GraphCandidateProcessDiagnostic,
   ) {
-    super(diagnostic ? diagnosticMessage(diagnostic) : category === "cancelled"
-      ? "Graph candidate construction was cancelled."
-      : "The isolated graph candidate could not be completed safely.");
+    super(`Graph worker category: ${category}. ${diagnostic ? diagnosticMessage(diagnostic) : category === "cancelled"
+      ? "Setup itself cancelled graph candidate construction; the worker did not fail."
+      : "The isolated graph candidate could not be completed safely (no worker diagnostic was returned)."}`);
   }
 }
 
@@ -230,7 +230,8 @@ function superviseCandidate(options: GraphCandidateProcessOptions, request: Grap
         lastProgress = message.progress;
         try {
           options.onProgress?.(message.progress);
-        } catch {
+        } catch (error) {
+          stderr.append(Buffer.from(`Graph progress observer failed: ${boundedDiagnosticText(error instanceof Error ? error.message : String(error))}\n`));
           stop(fail("observer"));
         }
       } else if (message.type === "complete") {
