@@ -1,6 +1,13 @@
 import type { SetupStatus } from "@mex/hub-contracts/setup";
 import { inspectSetupStatus } from "../../setup/headless.js";
 import { setupCommitCheckpointCommands } from "../../setup/index.js";
+import { describeUnfinishedSetup } from "../../setup/unfinished.js";
+
+/** The unfinished-setup line for the Hub, when setup stopped part-way. */
+function unfinishedStatus(projectRoot: string): Pick<SetupStatus, "unfinished"> {
+  const unfinished = describeUnfinishedSetup(projectRoot);
+  return unfinished === null ? {} : { unfinished: { done: unfinished.done, total: unfinished.total, message: unfinished.line.slice(0, 512) } };
+}
 import { createRepositoryTeamWorkflowPort } from "../../team/workflow/repository-team-workflow-port.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -45,6 +52,7 @@ export async function projectSetupStatus(projectRoot: string): Promise<SetupStat
     commitCommands: status.mode === "code-repo" && status.ready
       ? setupCommitCheckpointCommands(status.configuredTools)
       : [],
+    ...unfinishedStatus(projectRoot),
   };
 }
 
@@ -67,5 +75,6 @@ export function initialSetupStatus(projectRoot: string): SetupStatus {
     commitCommands: status.mode === "code-repo" && status.ready
       ? setupCommitCheckpointCommands(status.configuredTools)
       : [],
+    ...unfinishedStatus(projectRoot),
   };
 }

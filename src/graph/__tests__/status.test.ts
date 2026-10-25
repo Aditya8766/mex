@@ -45,6 +45,32 @@ import {
 const NOW = new Date("2026-08-22T12:00:00.000Z");
 const roots: string[] = [];
 
+describe("scoped source freshness", () => {
+  it("applies default and configured corpus exclusions and supported extensions", async () => {
+    const root = temporaryRoot();
+    source(root, ".mex/config.json", JSON.stringify({ graph: { ignore: ["scripts/**"] } }));
+    source(root, "src/a.ts", "export function a() { return 1; }\n");
+    const excluded = ["build/task.ts", "scripts/task.ts", "notes.txt", ".hidden/task.ts"];
+    for (const path of excluded) source(root, path, "export function ignored() {}\n");
+    await build(root);
+    const scoped = await inspectGraphStatus({ projectRoot: root, sourceScope: new Set([...excluded, "src/a.ts"]) });
+    expect(scoped.status).toBe("fresh");
+    expect(scoped.changes.total).toBe(0);
+    expect((await inspect(root)).status).toBe(scoped.status);
+  });
+
+  it.each(["new", "changed"])("still detects a %s eligible scoped file", async kind => {
+    const root = temporaryRoot();
+    source(root, "src/a.ts", "export function a() { return 1; }\n");
+    await build(root);
+    const path = kind === "new" ? "src/new-file.ts" : "src/a.ts";
+    source(root, path, "export function changed() { return 2; }\n");
+    const scoped = await inspectGraphStatus({ projectRoot: root, sourceScope: new Set([path]) });
+    expect(scoped.status).toBe("stale");
+    expect((await inspect(root)).status).toBe(scoped.status);
+  });
+});
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });

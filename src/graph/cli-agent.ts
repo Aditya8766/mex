@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { globSync } from "glob";
-import { graphManifest, graphManifestDiffersOnlyByConfig } from "./engine-impl.js";
+import { discoverGraphReadPaths } from "./read-discovery.js";
+import { GRAPH_CORPUS_LIMITS } from "./corpus-policy.js";
+import { graphManifest, graphManifestDiffersOnlyByConfig } from "./manifest.js";
 import type { GraphEngine, GraphNeighbor, IndexedFileInfo } from "./engine.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
-import { isSupportedSourceFile, SUPPORTED_SOURCE_GLOB } from "./extraction/index.js";
+import { isSupportedSourceFile, SUPPORTED_SOURCE_GLOB } from "./extraction/grammars.js";
 import {
   coverageFields, coverageReportable, hasGraphCoverageCache, readGraphCoverageObservation,
   type GraphCoverageObservation,
@@ -2792,7 +2793,7 @@ function groundingOmissionRecords(scaffold: CommittedGroundingObservation): Rec[
 
 function liveUnindexedFiles(indexedFiles: IndexedFileInfo[], rootDir: string): string[] {
   const indexed = new Set(indexedFiles.map((file) => file.path));
-  return globSync(SUPPORTED_SOURCE_GLOB, {
+  return discoverGraphReadPaths(SUPPORTED_SOURCE_GLOB, {
     cwd: rootDir,
     ignore: [
       "**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.mex/**",
@@ -2801,7 +2802,8 @@ function liveUnindexedFiles(indexedFiles: IndexedFileInfo[], rootDir: string): s
     nodir: true,
     absolute: false,
     dot: false,
-  }).map((file) => file.replaceAll("\\", "/"))
+    follow: false,
+  }, GRAPH_CORPUS_LIMITS.maxSourceFiles).map((file) => file.replaceAll("\\", "/"))
     .filter((file) => isSupportedSourceFile(file) && !indexed.has(file))
     .sort();
 }

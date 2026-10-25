@@ -100,7 +100,8 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
       { expect: "> Finish later", input: "\r" },
     ]);
     expect(result.exitCode, result.output).toBe(2);
-    expect(result.output).toContain("Setup paused at population");
+    expect(result.output).toContain("MEX setup 0/1, not finished.");
+    expect(result.output).toContain("mex setup next --start");
     expect(existsSync(f.record)).toBe(false);
   });
 
@@ -229,7 +230,8 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
     const result = await terminal(f, ["--yes"]);
     expect(result.exitCode, result.output).toBe(2);
     expect(result.output).toContain("Setup paused");
-    expect(result.output).toContain("Population prompt:");
+    expect(result.output).toContain("Population prompt (paste it into your agent):");
+    expect(result.output).toContain("run `mex setup next --start` first, then do exactly what it prints.");
     expect(result.output).not.toContain("Choose your AI tools");
     expect(result.raw).not.toContain("\u001b[?1049h");
     expect(existsSync(join(f.project, ".mex/config.json"))).toBe(true);
@@ -251,7 +253,10 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
     expect(result.output).toMatch(/\d+\s*\/\s*20\s+files parsed/);
     expect(result.output).not.toContain("Setup needs attention");
     expect(existsSync(join(f.project, ".mex/graph.db"))).toBe(true);
-    expect(existsSync(join(f.project, ".mex/wiki.db"))).toBe(false);
+    // The manual queue prepares a readable Wiki before any population tasks.
+    expect(existsSync(join(f.project, ".mex/wiki.db"))).toBe(true);
+    expect(result.output).toContain("not finished.");
+    expect(result.output).toContain("mex setup next --start");
     expect(existsSync(f.record)).toBe(false);
     expect(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.project, stdio: "ignore" })).toThrow();
   });
@@ -266,7 +271,8 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
     expect(result.output).toContain("Resolving code references");
     expect(result.output).toContain("Validating the rebuilt graph");
     expect(result.output).toContain("Saving the verified graph");
-    expect(result.output).toContain("Population prompt:");
+    expect(result.output).toContain("Population prompt (paste it into your agent):");
+    expect(result.output).toContain("run `mex setup next --start` first, then do exactly what it prints.");
     expect(result.output).not.toContain("Choose your AI tools");
     expect(existsSync(join(f.project, ".mex/graph.db"))).toBe(true);
     expect(existsSync(f.record)).toBe(false);
