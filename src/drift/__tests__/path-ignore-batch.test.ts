@@ -34,7 +34,9 @@ describe("batched ignore checks", () => {
       section: "Paths", negated: false,
     }));
     const issues = checkPaths(claims, root, join(root, ".mex"));
-    expect(issues.map((issue) => issue.claim?.value)).toEqual([outside, "about/index.html"]);
+    expect(issues.map((issue) => issue.claim?.value)).toEqual([
+      ...(outside === "/index.html" ? [] : [outside]), "about/index.html",
+    ]);
   });
 
   it("still checks relative paths with parent segments contained in the root", () => {

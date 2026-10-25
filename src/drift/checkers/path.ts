@@ -63,9 +63,10 @@ export function checkPaths(
     }
     if (alias === null && packages.has(claim.value.split("/")[0])) continue;
     if (alias === null && isUnrootedReference(claim.value, projectRoot, scaffoldRoot)) continue;
-    if (alias === null && pathExists(claim.value, projectRoot, scaffoldRoot)) continue;
+    const lookup = claim.value.startsWith("/") ? claim.value.slice(1) : claim.value;
+    if (alias === null && pathExists(lookup, projectRoot, scaffoldRoot)) continue;
     if (alias === null && repository.files) {
-      const suffix = claim.value.replace(/^\.\//, "").replace(/\/$/, "");
+      const suffix = lookup.replace(/^\.\//, "").replace(/\/$/, "");
       if (!suffixMatches.has(suffix)) suffixMatches.set(suffix, files.filter((file) => {
         const module = file.replace(SOURCE_EXTENSION, "");
         const candidates = [file];
@@ -90,7 +91,10 @@ export function checkPaths(
     // Bare filenames that aren't found even after recursive search are genuinely missing.
     const isPattern = claim.source.includes("patterns/");
     const isPlaceholder = PLACEHOLDER_WORDS.test(claim.value);
-    const severity = isPattern || isPlaceholder ? "warning" : "error";
+    // A capitalized bare name may be a prose name with an extension-shaped suffix.
+    // Keep it visible as a warning; lowercase filenames and directory paths remain errors.
+    const isProseName = /^[A-Z][^/\\]*\.[A-Za-z0-9]+$/u.test(claim.value);
+    const severity = isPattern || isPlaceholder || isProseName ? "warning" : "error";
 
     issues.push({
       code: "MISSING_PATH",
@@ -156,7 +160,12 @@ function isUnrootedReference(
   projectRoot: string,
   scaffoldRoot: string
 ): boolean {
-  if (value.startsWith("/")) return false;
+  if (value.startsWith("/") && !value.startsWith("//")) {
+    const first = value.slice(1).split("/")[0];
+    return !!first && first !== "." && first !== ".."
+      && !existsSync(resolve(projectRoot, first))
+      && !existsSync(resolve(scaffoldRoot, first));
+  }
 
   const trimmed = value.replace(/\/+$/, "");
   const isDirectoryRef = trimmed !== value;
