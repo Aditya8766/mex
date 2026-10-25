@@ -687,7 +687,14 @@ describe("release benchmark contract", () => {
     const calibration = JSON.parse(readFileSync(new URL("./setup-asset-budget.json", import.meta.url), "utf8"));
     expect(calibration.schemaVersion).toBe(1);
     expect(calibration.formula).toBe("ceil(built bytes * 1.05)");
-    expect(calibration.limits).toEqual({ jsBytes: 74701, cssBytes: 23681, fontBytes: 0 });
+    expect(calibration.limits).toEqual({ jsBytes: 80646, cssBytes: 25146, fontBytes: 0 });
+    const record = JSON.parse(readFileSync(new URL("../../docs/design/setup-progress-asset-calibration.json", import.meta.url), "utf8"));
+    expect(record.previousLimits).toEqual({ jsBytes: 74701, cssBytes: 23681, fontBytes: 0 });
+    expect(record.measured).toEqual(calibration.measured);
+    expect(record.limits).toEqual(calibration.limits);
+    expect(record.files).toEqual(calibration.files);
+    expect(createHash("sha256").update(readFileSync(new URL("./budgets.json", import.meta.url))).digest("hex"))
+      .toBe(record.unchangedOperationalBudgetsSha256);
     for (const [field, extension] of [["jsBytes", ".js"], ["cssBytes", ".css"], ["fontBytes", ".woff2"]]) {
       expect(calibration.files.filter(({ file }) => file.endsWith(extension)).reduce((total, { bytes }) => total + bytes, 0))
         .toBe(calibration.measured[field]);
