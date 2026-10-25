@@ -75,6 +75,8 @@ export interface AgentCommandDeps {
 
 type RawOptions = Partial<Record<keyof AgentOptions, unknown>>;
 type Rec = Record<string, unknown>;
+/** A node `graph scope` may return a fact for: a ranked candidate, or an unranked flow endpoint. */
+type FactEntry = Pick<ScopedCandidate, "id" | "score" | "reasons">;
 type ImpactDirection = "callers" | "callees" | "both";
 
 /** Agent-facing blast radius. Output is newline-delimited JSON (JSONL). */
@@ -613,14 +615,26 @@ export function runGraphScope(
     // after every source spill. Each source admission also holds room for the
     // facts of its nodes, so returned source keeps its fingerprints.
     const fingerprintFactTokens = new Map<string, number>();
+    // A flow endpoint can come back as source without being a ranked
+    // candidate. With `--fingerprint` it gets an unranked fact too, or its
+    // returned source would have no fingerprint.
+    const unrankedSourceFacts: FactEntry[] = [];
     if (opts.fingerprint && opts.detail === "source") {
-      for (const candidate of selection.candidates) {
-        const node = nodeById.get(candidate.id);
-        const fact = node && !stale.has(node.filePath) ? factFor(session, candidate.id, opts.detail, true) : null;
+      const ranked = new Set(selection.candidates.map((candidate) => candidate.id));
+      const flowEndpoints = plannedFlowRecords.flatMap(({ record }) => (
+        record.steps as Array<{ source: string; target: string }>
+      ).flatMap((step) => [step.source, step.target]))
+        .filter((id) => !ranked.has(id))
+        .map((id): FactEntry => ({ id, score: 0, reasons: [] }));
+      for (const entry of [...selection.candidates, ...flowEndpoints]) {
+        if (fingerprintFactTokens.has(entry.id)) continue;
+        const node = nodeById.get(entry.id);
+        const fact = node && !stale.has(node.filePath) ? factFor(session, entry.id, opts.detail, true) : null;
         if (fact) {
-          fingerprintFactTokens.set(candidate.id, estimateTokens(
-            scopeFactRecord(fact, candidate.score, candidate.reasons, opts),
+          fingerprintFactTokens.set(entry.id, estimateTokens(
+            scopeFactRecord(fact, entry.score, entry.reasons, opts),
           ));
+          if (!ranked.has(entry.id)) unrankedSourceFacts.push(entry);
         }
       }
     }
@@ -716,6 +730,24 @@ export function runGraphScope(
       if (spill.trimmed || spill.deferred.length > 0) truncated = true;
     }
 
+    const factRecordFor = (entry: FactEntry): { record: Rec; node: GraphNode } | null => {
+      const fact = factFor(session, entry.id, opts.detail, opts.fingerprint);
+      const node = nodeById.get(entry.id);
+      if (!fact || !node || stale.has(node.filePath)) return null;
+      return { record: scopeFactRecord(fact, entry.score, entry.reasons, opts), node };
+    };
+    // Outside source detail nothing holds room for facts, and flows would fill
+    // a small budget first. With `--fingerprint`, facts go ahead of flows but
+    // leave them their bounded share; the facts are still emitted after them.
+    const earlyFacts = new Map<string, { record: Rec; node: GraphNode }>();
+    if (opts.fingerprint && opts.detail !== "source") {
+      for (const candidate of selection.candidates) {
+        const fact = factRecordFor(candidate);
+        if (fact && estimateTokens(fact.record) <= roomAboveFactReserve() - flowTokenReserve
+          && ledger.tryAdd(fact.record)) earlyFacts.set(candidate.id, fact);
+      }
+    }
+
     const flowRecords: Rec[] = [];
     let returnedEdges = 0;
     for (const { record, stepCount } of plannedFlowRecords) {
@@ -744,20 +776,35 @@ export function runGraphScope(
       (record.steps as Array<{ source: string; target: string }>).flatMap((step) => [step.source, step.target])));
     const facts: Array<{ record: Rec; node: GraphNode }> = [];
     // The reserve is for source-backed nodes, so their facts go before flow-only ones.
-    const factCandidates = fingerprintFactTokens.size > 0
+    const factCandidates: FactEntry[] = fingerprintFactTokens.size > 0
       ? [
         ...selection.candidates.filter((candidate) => sourcedIds.has(candidate.id)),
+        ...unrankedSourceFacts.filter((entry) => sourcedIds.has(entry.id)),
         ...selection.candidates.filter((candidate) => !sourcedIds.has(candidate.id)),
       ]
       : selection.candidates;
+    // Facts `--fingerprint` asked for that the budget could not hold.
+    let omittedFingerprintFacts = 0;
     for (const candidate of factCandidates) {
       if (opts.detail === "source" && !sourcedIds.has(candidate.id) && !flowIds.has(candidate.id)) continue;
-      const fact = factFor(session, candidate.id, opts.detail, opts.fingerprint);
-      const node = nodeById.get(candidate.id);
-      if (!fact || !node || stale.has(node.filePath)) continue;
-      const record = scopeFactRecord(fact, candidate.score, candidate.reasons, opts);
-      if (ledger.tryAdd(record)) facts.push({ record, node }); else truncated = true;
+      const early = earlyFacts.get(candidate.id);
+      if (early) {
+        facts.push(early);
+        continue;
+      }
+      const fact = factRecordFor(candidate);
+      if (!fact) continue;
+      if (ledger.tryAdd(fact.record)) facts.push(fact);
+      else {
+        truncated = true;
+        if (opts.fingerprint) omittedFingerprintFacts += 1;
+      }
     }
+    // A returned source node whose fact did not fit has lost its fingerprint.
+    const unfingerprintedSourceNodes = opts.fingerprint
+      ? [...sourcedIds].filter((id) => fingerprintFactTokens.has(id)
+        && !facts.some((fact) => fact.node.id === id)).length
+      : 0;
 
     const finalSourcedIds = new Set(sourceRecords.flatMap((record) =>
       (record.ranges as SourceRange[]).flatMap((range) => range.nodeIds)));
@@ -821,6 +868,9 @@ export function runGraphScope(
       ...(highPriorityEvidenceOmitted
         ? [`High-priority evidence omitted: ${omittedHighPrioritySourceFiles.length} source file(s), ${omittedHighPriorityFlowSteps} flow step(s).`]
         : []),
+      ...(omittedFingerprintFacts > 0
+        ? [`Fingerprints omitted: ${omittedFingerprintFacts} fact(s) did not fit the output budget; raise --max-output-tokens or narrow the task.`]
+        : []),
       ...(isConfigDrifted(session)
         ? ["Graph build configuration changed after this index was built; flows and other resolved relationships may be out of date."]
         : []),
@@ -828,9 +878,15 @@ export function runGraphScope(
         ? ["Some indexed files did not parse completely; this answer may be missing symbols they define."]
         : []),
     ];
+    // `--fingerprint` exists to return fingerprints. An answer without any, or
+    // with returned source that lost its fingerprint, is not complete; nor is
+    // it a no-match when the facts matched but did not fit.
+    const fingerprintsMissing = unfingerprintedSourceNodes > 0
+      || (omittedFingerprintFacts > 0 && !facts.some((fact) => fact.record.fingerprint !== undefined));
     const status = returnedFiles.length === 0 && facts.length === 0 && flowRecords.length === 0
+      && !fingerprintsMissing
       ? "no-match"
-      : highPriorityEvidenceOmitted ? "partial"
+      : highPriorityEvidenceOmitted || fingerprintsMissing ? "partial"
         : materiallyReliesOnTextOnly ? "degraded"
           : "ok";
     const suggestions = status === "partial" && facts.length > 0
