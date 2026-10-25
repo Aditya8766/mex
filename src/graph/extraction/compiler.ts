@@ -266,6 +266,8 @@ export interface CompilerIncrementalInput {
   modified: ReadonlySet<string>;
   /** Direct importers of each previously captured path. */
   importers: ReadonlyMap<string, readonly string[]>;
+  /** Most compiler files one refresh may capture again before a full extraction is cheaper. */
+  maxAffected?: number;
   /** `projectStates` of the previous extraction. */
   projectStates: Readonly<Record<string, string>>;
 }
@@ -637,6 +639,11 @@ export function buildTypeScriptExtraction(
           if (!previous || previous.projectId === project.id) affected.add(path);
           for (const importer of incremental.importers.get(path) ?? []) if (!seen.has(importer)) queue.push(importer);
         }
+      }
+      if (incremental.maxAffected !== undefined && affected.size > incremental.maxAffected) {
+        throw new CompilerIncrementalFallback(
+          `the changed set reaches ${affected.size} of ${candidates.length} compiler files`,
+        );
       }
       for (const absoluteFile of owned) {
         const filePath = relativePath(root, absoluteFile);

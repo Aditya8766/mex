@@ -57,6 +57,31 @@ function failDuringBuckets(db: SqliteDatabase): void {
 }
 
 describe("fingerprint transaction ownership", () => {
+  it("loads shared candidates in bounded chunks without point reads and preserves code-unit order", () => {
+    const ids = Array.from({ length: 503 }, (_, index) => `node:${index}`);
+    ids.push("node:Z", "node:a", "node:ä");
+    const { db, store } = fixture(ids);
+    store.upsertMany(ids.map(nodeId => ({ nodeId, fingerprint: value(1) })));
+    const get = vi.spyOn(store, "get");
+    const prepare = vi.spyOn(db, "prepare");
+    expect(store.lookup(value(1))).toEqual(ids.sort().map(nodeId => ({ nodeId, fingerprint: value(1) })));
+    expect(get).not.toHaveBeenCalled();
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes("WHERE node_id IN"))).toHaveLength(2);
+    expect(store.lookup(value(50_000))).toEqual([]);
+  });
+
+  it.each([
+    ["minhash", JSON.stringify([1])],
+    ["minhash", JSON.stringify(Array(64).fill(-1))],
+    ["neighbors", '[42]'],
+    ["token_count", -1],
+  ])("refuses structurally invalid stored %s on both read paths", (column, invalid) => {
+    const { db, store } = fixture();
+    db.prepare(`UPDATE node_fingerprints SET ${column} = ? WHERE node_id = 'a'`).run(invalid);
+    expect(() => store.get("a")).toThrow("Invalid fingerprint");
+    expect(() => store.lookup(value(1))).toThrow("Invalid fingerprint");
+  });
+
   it("avoids the growing nested savepoint only when the publisher explicitly owns rollback", () => {
     const { db, graph, store } = fixture();
     const exec = vi.spyOn(db, "exec");

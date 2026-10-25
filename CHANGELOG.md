@@ -4,8 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Setup can launch background Cursor, GitHub Copilot and OpenCode CLI sessions alongside Claude Code and Codex. The selected agent needs to be installed and signed in.
+- `mex setup next` gives agents MEX cannot launch a one-paste setup flow: ask the agent to run `mex setup next --start` first, then follow its instructions until setup is complete. A new chat recovers complete batches without redoing them. Each call hands out several task files when work can run in parallel, applies ready batches, and continues the saved plan. Task prompts name source folders the code graph skips so agents can read them without trying to ground facts to unindexed code.
+- `mex wiki apply` accepts a JSON array of up to 200 operations as one atomic batch, reports problems by operation, and skips already applied operations on a rerun. Code links can name a file and symbol or line; MEX resolves the declaration and records its fingerprint and body hash. New entries link to their enclosing section or file automatically, and new knowledge files receive their own metadata.
+
+### Changed
+
+- Setup splits larger repositories into per-subsystem tasks, with the shared context task running alongside them. Up to `MEX_SETUP_PARALLEL_RUNS` background agents or one-paste tasks run at once (default 3, configurable from 1 to 8). Finished tasks are kept on rerun; MEX writes the final routing and pattern links without another agent session.
+- Background subsystem population can start while the code graph builds; MEX waits for the graph before applying facts. The terminal and Hub show subsystem progress and skipped areas.
+- `mex wiki apply` checks freshness for linked sources and refreshes grounding verdicts for affected entities, avoiding a full source scan and grounding refresh for each batch.
+
 ### Fixed
 
+- Setup pauses when an agent reaches its usage limit, reports the reset time when available, and keeps finished work. Rerun `mex setup` after the limit resets to continue.
+- A scoped Wiki apply reports code links excluded from the graph as missing, so they can be corrected instead of repeatedly failing as a stale graph.
+- `mex graph refresh` falls back to full extraction when the affected compiler closure exceeds its incremental budget, releasing the previous extraction cache first.
+- `mex check` resolves paths, dependencies and scripts across repository workspaces, including aliases, extensionless modules, script templates and workspace command prefixes.
+- `mex check` no longer treats compound suffixes such as `.d.ts` and `.test.ts`, contextual member names, or exact quoted paths in tracked production source as missing files. Compact script alternatives are checked individually. An outside-repository path no longer breaks the batched ignore check and causes ignored local state to be reported as missing.
 - An interrupted `mex graph refresh`, `repair` or `rebuild` (Ctrl+C, a CI timeout, a crash) no longer leaves a full-size `graph.db.candidate-*` copy of the store in `.mex/` for good. Each maintenance run, once it holds the exclusive maintenance lease, removes candidate files (and their SQLite sidecars) that a previous run left behind; no concurrent run can own them at that point, and a run refused because another holds the lease removes nothing. Candidate-named symlinks are not followed. `graph.db.recovery-*` and `graph.db.rollback-*` files are not removed, since maintenance deliberately retains recovery copies of a replaced corrupt or incompatible store and after a failed rollback. `mex graph status` stays read-only and now reports `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) while a leftover candidate is present and no live maintenance run holds the lock, and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) while retained recovery files are present; the store's own status is unchanged (#205).
 - Locked orphan candidates no longer abort graph maintenance: files held open on Windows are left for the next run while other candidates are removed (#205).
 - Bare `mex graph` reuses a fresh index without writing, refreshes a compatible changed index, and rebuilds a missing, incompatible or unusable index. Use `--force` or `mex graph rebuild` for an unconditional full build. Setup uses the same routing on resume and finalize reruns, including background graph construction (#208).

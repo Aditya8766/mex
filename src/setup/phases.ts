@@ -180,12 +180,18 @@ export async function buildSetupPopulationPrompt(
   mode: SetupMode,
   state: ProjectState,
   scannerBrief: string | null,
+  projectRoot?: string,
+  /** A plan already computed or stored; computed here from `projectRoot` when absent. */
+  knownPlan?: import("./subsystems.js").SubsystemPlan | null,
 ): Promise<string> {
   const { buildAgentMemoryPrompt, buildFreshPrompt, buildExistingWithBriefPrompt, buildExistingNoBriefPrompt }
     = await import("./prompts.js");
   if (mode === "agent-memory") return buildAgentMemoryPrompt();
   if (state === "fresh") return buildFreshPrompt();
-  return scannerBrief ? buildExistingWithBriefPrompt(scannerBrief) : buildExistingNoBriefPrompt();
+  // The coverage target comes from the graph just built (or the source tree), never from source parsing.
+  const plan = knownPlan !== undefined ? knownPlan
+    : projectRoot === undefined ? null : (await import("./subsystems.js")).computeSubsystemPlan(projectRoot);
+  return scannerBrief ? buildExistingWithBriefPrompt(scannerBrief, plan) : buildExistingNoBriefPrompt(plan);
 }
 
 export function throwIfSetupAborted(signal: AbortSignal | undefined): void {

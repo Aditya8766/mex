@@ -2,6 +2,7 @@ import { basename, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { AI_TOOLS, type AiTool } from "../types.js";
+import { BACKGROUND_AGENT_CLIS, isBackgroundAgentTool } from "../agent-command.js";
 import { loadConfiguredAiTools } from "../config.js";
 import { isCliAvailable } from "../cli-tools.js";
 import {
@@ -16,6 +17,7 @@ import { selectSetupAgent } from "./population.js";
 import { formatSetupGraphActivity, setupGraphActivity } from "./graph-progress.js";
 import type { TerminalSetupAction, TerminalSetupView } from "./terminal-ui.js";
 import { appendTerminalSetupEvent } from "./terminal-events.js";
+import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup } from "./unfinished.js";
 import { waitForTerminalReturn } from "./terminal-return.js";
 
 const CONTINUE = "Run `mex setup` to continue. Existing authored files are preserved.";
@@ -48,6 +50,8 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   try {
     if (!interactive) {
       console.log(`MEX setup · ${basename(projectRoot)} · ${mode}`);
+      const unfinished = describeUnfinishedSetup(projectRoot);
+      if (unfinished) console.log(unfinished.line);
       let lastGraphPhase = "";
       let lastGraphLogAt = 0;
       const result = await runHeadlessSetup({
@@ -66,8 +70,9 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
       });
       for (const note of result.anchorNotes) console.log(`Action needed: ${note}`);
       if (!result.ready) {
-        console.log(`\nSetup paused: scaffold population is still required.\n${CONTINUE}`);
-        if (result.prompt) console.log(`\nPopulation prompt:\n\n${result.prompt}`);
+        const handoff = result.prompt === SETUP_HANDOFF_PROMPT;
+        console.log(`\nSetup paused: scaffold population is still required.\n${handoff ? result.message : CONTINUE}`);
+        if (result.prompt) console.log(`\nPopulation prompt${handoff ? " (paste it into your agent)" : ""}:\n\n${result.prompt}`);
         return { outcome: "paused", exitCode: 2, message: "Scaffold population is still required." };
       }
       console.log(result.message);
@@ -76,13 +81,14 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
     }
 
     const { createTerminalSetupUI } = await import("./terminal-ui.js");
+    const unfinishedAtStart = describeUnfinishedSetup(projectRoot);
     let view: TerminalSetupView = {
       projectName: basename(projectRoot), mode, screen: "configure", startedAt: Date.now(),
-      completedSteps: [], detail: "Highlight a tool and press Enter to select it and begin. Space optionally selects additional tools.",
+      completedSteps: [], detail: `${unfinishedAtStart ? `${unfinishedAtStart.line} ` : ""}Highlight a tool and press Enter to select it and begin. Space optionally selects additional tools.`,
       initialTool: selectedTools[0] ?? (options.tools?.length === 0 ? "continue" : undefined),
       tools: (Object.keys(AI_TOOLS) as AiTool[]).map(id => ({
         id, name: AI_TOOLS[id].name, selected: selectedTools.includes(id),
-        cliAvailable: AI_TOOLS[id].cli !== null && isCliAvailable(AI_TOOLS[id].cli!),
+        cliAvailable: isBackgroundAgentTool(id) && isCliAvailable(BACKGROUND_AGENT_CLIS[id]),
       })),
     };
     let pending: ((action: TerminalSetupAction) => void) | undefined;
@@ -161,9 +167,9 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
               projectRoot, mode, tools, signal: abort.signal,
               onProgress: progress => update({
                 activeStep: progress.step,
-                completedSteps: view.activeStep ? [...new Set([...view.completedSteps, view.activeStep])] : view.completedSteps,
+                  completedSteps: view.activeStep && view.activeStep !== progress.step ? [...new Set([...view.completedSteps, view.activeStep])] : view.completedSteps,
                 detail: progress.detail ?? progress.label,
-                phaseStartedAt: Date.now(),
+                  phaseStartedAt: view.activeStep === progress.step ? view.phaseStartedAt : Date.now(),
                 lastActivityAt: Date.now(),
                 progress: undefined,
               }),
@@ -172,13 +178,14 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
                 const activity = setupGraphActivity(progress);
                 update({ detail: activity.detail, progress: activity.progress, lastActivityAt: Date.now() });
               },
-              onAnchorNotes: notes => { anchorNotes = notes; },
+                onPopulationCoverage: coverage => update({ concurrentPopulation: `${coverage.done}/${coverage.total} subsystems done, ${coverage.skipped} skipped`, lastActivityAt: Date.now() }),
+                onAnchorNotes: notes => { anchorNotes = notes; },
               populate: async input => {
                 let tool = selectSetupAgent(input.selectedTools);
                 let first = true;
                 let detail = tool
                   ? `Opening ${AI_TOOLS[tool].name} with your setup instructions. Exit the agent session to return to MEX.`
-                  : "No selected Claude Code or Codex CLI is available. Use the manual prompt, then check again.";
+                  : "No agent CLI MEX can launch is available. Choose the prompt and paste it into your agent: it runs `mex setup next --start` first, then follows the printed commands.";
                 while (!abort.signal.aborted) {
                   tool = selectSetupAgent(input.selectedTools);
                   update({ screen: "population", detail, populationAgent: tool ? AI_TOOLS[tool].name : null });
@@ -212,7 +219,8 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
                   } else if (action.type === "prompt") {
                     await ui.suspend();
                     try {
-                      console.log(`\nCopy this prompt into your AI tool:\n\n${input.prompt}\n`);
+                      // One short prompt drives `mex setup next`, one task at a time, until setup is complete.
+                      console.log(`\nCopy this prompt into your AI tool:\n\n${SETUP_HANDOFF_PROMPT}\n`);
                       if (await pressEnterToReturn(abort.signal) === "cancel" && !abort.signal.aborted) cancel();
                     }
                     finally {
@@ -232,7 +240,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
             });
             if (!result.ready) {
               outcome = { outcome: populationFailure ? "failed" : "paused", exitCode: populationFailure ? 1 : 2,
-                message: `${populationFailure ? `Setup failed: ${populationFailure}` : "Setup paused at population."} ${CONTINUE}` };
+                message: `${populationFailure ? `Setup failed: ${populationFailure}` : `Setup paused at population. ${result.message}`} ${describeUnfinishedSetup(projectRoot)?.line ?? CONTINUE}` };
               continue;
             }
             validated = result;
@@ -256,7 +264,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
           const { projectSetupStatus } = await import("../hub/setup/readiness.js");
           const finished = await projectSetupStatus(projectRoot);
           const message = finished.mode === "agent-memory" || finished.ready
-            ? `Setup complete.${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Hub stopped. Run \`mex hub\` to open Hub again.`
+            ? `Setup complete.${validated.coverageNotice ? ` ${validated.coverageNotice}` : ""}${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Hub stopped. Run \`mex hub\` to open Hub again.`
             : `${validated.message} Hub stopped. Run \`mex setup --browser\` to reopen the completion page.`;
           outcome = { outcome: "complete", exitCode: 0, message };
         } catch (error) {
@@ -317,7 +325,7 @@ function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", t
     if (assets?.conflicted) throw new SetupError("Official MEX agent assets have conflicts. Review `mex skills sync --dry-run` before applying setup.");
   } catch (error) { throw classifySetupAgentAssetsError(error) ?? error; }
   console.log("Would verify or assign the project identity.");
-  if (mode === "code-repo") console.log("Would build the code graph before population.");
+  if (mode === "code-repo") console.log("Would build the code graph; background subsystem sessions can run alongside it, applying after it is ready.");
   console.log(isScaffoldPopulated(resolve(projectRoot, ".mex"))
     ? "Would preserve and verify the populated scaffold."
     : "Would populate the scaffold with a selected agent or the manual prompt.");
