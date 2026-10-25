@@ -240,7 +240,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
             });
             if (!result.ready) {
               outcome = { outcome: populationFailure ? "failed" : "paused", exitCode: populationFailure ? 1 : 2,
-                message: `${populationFailure ? `Setup failed: ${populationFailure}` : result.message} ${describeUnfinishedSetup(projectRoot)?.line ?? CONTINUE}` };
+                message: `${populationFailure ? `Setup failed: ${populationFailure}` : `Setup paused at population. ${result.message}`} ${describeUnfinishedSetup(projectRoot)?.line ?? CONTINUE}` };
               continue;
             }
             validated = result;

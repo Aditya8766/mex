@@ -139,7 +139,7 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
     expect(nativeOutput).toContain("hello native agent");
     expect(nativeOutput).not.toContain("PROJECT MEMORY / SETUP");
     expect(nativeOutput).not.toContain("\u001b[?1049h");
-    expect(result.output).toContain("mex setup next --start");
+    expect(result.output).toContain("Run `mex setup` to continue");
     expect(JSON.parse(readFileSync(join(f.project, ".mex/config.json"), "utf8")).aiTools).toEqual(["codex"]);
     expectPromptCleaned(f);
   });
@@ -153,9 +153,9 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
       { expect: "> Finish later", input: "\r" },
     ]);
     expect(result.exitCode, result.output).toBe(2);
-    expect(result.output).toContain("MEX setup 0/1, not finished.");
-    expect(result.output).toContain("mex setup next --start");
+    expect(result.output).toContain("Setup paused at population");
     expect(result.output).toContain("Show setup prompt");
+    expect(result.output).toContain("Run `mex setup` to continue");
     expectPromptCleaned(f);
   });
 
