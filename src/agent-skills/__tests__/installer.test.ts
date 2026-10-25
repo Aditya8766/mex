@@ -204,6 +204,60 @@ describe("managed agent asset installation", () => {
     expect(read(fixture.project, ".claude/skills/mex-inbox/SKILL.md")).toBe("user customization\n");
   });
 
+  // Git checks text files out with CRLF under core.autocrlf=true, the Windows
+  // default, so a committed managed skill cloned on Windows differs from its
+  // recorded hashes in line endings only. That is the content MEX installed.
+  it("treats a CRLF checkout of an unmodified managed copy as unchanged", () => {
+    const fixture = createFixture();
+    sync(fixture, ["claude"]);
+    toCrlf(join(fixture.project, ".claude/skills/mex-inbox"));
+    const before = snapshotTree(join(fixture.project, ".claude/skills/mex-inbox"));
+
+    const report = sync(fixture, ["claude"]);
+
+    expect(report.conflicted).toBe(false);
+    expect(actionFor(report, "mex-inbox").action).toBe("noop");
+    expect(report.warnings.filter((warning) => warning.code === "managed-skill-modified")).toEqual([]);
+    // Nothing is rewritten just to change line endings back.
+    expect(snapshotTree(join(fixture.project, ".claude/skills/mex-inbox"))).toEqual(before);
+  });
+
+  it("updates a CRLF checkout of an unmodified managed copy when the package changes", () => {
+    const fixture = createFixture();
+    sync(fixture, ["claude"]);
+    toCrlf(join(fixture.project, ".claude/skills/mex-inbox"));
+    write(fixture.source, "mex-inbox/SKILL.md", "upstream v2\n");
+
+    const report = syncAgentAssets({
+      projectRoot: fixture.project,
+      packagedSkillsRoot: fixture.source,
+      packageVersion: "2.0.0",
+      clients: ["claude"],
+      checkIgnored: false,
+    });
+
+    expect(report.conflicted).toBe(false);
+    expect(actionFor(report, "mex-inbox").action).toBe("update");
+    expect(read(fixture.project, ".claude/skills/mex-inbox/SKILL.md")).toBe("upstream v2\n");
+  });
+
+  it("still preserves a real edit in a CRLF checkout", () => {
+    const fixture = createFixture();
+    sync(fixture, ["claude"]);
+    toCrlf(join(fixture.project, ".claude/skills/mex-inbox"));
+    const skill = join(fixture.project, ".claude/skills/mex-inbox/SKILL.md");
+    writeFileSync(skill, readFileSync(skill, "utf8") + "user note\r\n");
+
+    const report = sync(fixture, ["claude"]);
+
+    expect(actionFor(report, "mex-inbox").action).toBe("conflict");
+    expect(report.warnings).toContainEqual(expect.objectContaining({
+      code: "managed-skill-modified",
+      path: ".claude/skills/mex-inbox",
+    }));
+    expect(readFileSync(skill, "utf8").endsWith("user note\r\n")).toBe(true);
+  });
+
   it("treats an added empty directory as a managed-copy modification", () => {
     const fixture = createFixture();
     sync(fixture, ["claude"]);
@@ -1036,4 +1090,13 @@ function gitIgnored(projectRoot: string, path: string): boolean {
     ["check-ignore", "--no-index", "-q", "--", path],
     { cwd: projectRoot, stdio: "ignore" },
   ).status === 0;
+}
+
+/** Rewrite every file under the directory as a CRLF Git checkout would. */
+function toCrlf(directory: string): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) toCrlf(path);
+    else writeFileSync(path, readFileSync(path, "utf8").replace(/\r?\n/gu, "\r\n"));
+  }
 }

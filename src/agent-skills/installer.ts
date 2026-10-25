@@ -521,6 +521,7 @@ function planSkill(
   }
 
   const metadataBytes = readRegularFileNoFollow(metadataPath);
+  const metadataLineFeeds = withLineFeeds(metadataBytes);
   const metadata = parseMetadata(metadataBytes, skill);
   if (!metadata) {
     return skillConflict(
@@ -532,7 +533,7 @@ function planSkill(
       `Restore the ownership file from the installed package or move ${relativePath} aside; MEX will not guess ownership.`,
     );
   }
-  if (!bytesEqual(metadataBytes, serializeMetadata(metadata))) {
+  if (!bytesEqual(metadataLineFeeds, serializeMetadata(metadata))) {
     return skillConflict(
       client,
       skill,
@@ -571,7 +572,7 @@ function planSkill(
     );
   }
 
-  const metadataExact = bytesEqual(metadataBytes, desired.metadataBytes);
+  const metadataExact = bytesEqual(metadataLineFeeds, desired.metadataBytes);
   const desiredFilesExact = recordsEqual(metadata.files, desired.metadata.files);
   if (metadataExact && desiredFilesExact) {
     return {
@@ -1171,6 +1172,14 @@ function assertExpectedInstruction(
 
 interface DirectorySnapshot {
   readonly files: Readonly<Record<string, string>>;
+  /**
+   * The hash of each file's bytes with CRLF line endings turned back into LF,
+   * for the files that have any. Git checks text files out with CRLF under
+   * core.autocrlf=true, the Windows default, so a committed managed skill
+   * cloned on Windows differs from its recorded hashes in line endings only.
+   * That is not a modification: the content is the content MEX installed.
+   */
+  readonly lineFeedFiles: Readonly<Record<string, string>>;
   readonly directories: readonly string[];
   readonly fingerprint: string;
 }
@@ -1186,12 +1195,15 @@ class UnsafeTreeError extends Error {
 function snapshotDirectory(root: string): DirectorySnapshot {
   const rootStat = lstatSync(root);
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new UnsafeTreeError(".");
-  const entries: Array<{ path: string; hash: string }> = [];
+  const entries: Array<{ path: string; hash: string; lineFeedHash: string | null }> = [];
   const directories: string[] = [];
   snapshotDirectoryInto(root, "", entries, directories);
   entries.sort((left, right) => comparePortableText(left.path, right.path));
   directories.sort();
   const files = Object.fromEntries(entries.map((entry) => [entry.path, entry.hash]));
+  const lineFeedFiles = Object.fromEntries(entries
+    .filter((entry) => entry.lineFeedHash !== null)
+    .map((entry) => [entry.path, entry.lineFeedHash as string]));
   const fingerprintHash = createHash("sha256");
   for (const directory of directories) {
     fingerprintHash.update("directory:");
@@ -1206,13 +1218,13 @@ function snapshotDirectory(root: string): DirectorySnapshot {
     fingerprintHash.update(entry.hash);
     fingerprintHash.update("\n");
   }
-  return { files, directories, fingerprint: fingerprintHash.digest("hex") };
+  return { files, lineFeedFiles, directories, fingerprint: fingerprintHash.digest("hex") };
 }
 
 function snapshotDirectoryInto(
   root: string,
   relativeDirectory: string,
-  entries: Array<{ path: string; hash: string }>,
+  entries: Array<{ path: string; hash: string; lineFeedHash: string | null }>,
   directories: string[],
 ): void {
   const directory = relativeDirectory ? absoluteFromPortable(root, relativeDirectory) : root;
@@ -1226,7 +1238,13 @@ function snapshotDirectoryInto(
       directories.push(relativePath);
       snapshotDirectoryInto(root, relativePath, entries, directories);
     } else if (entryStat.isFile()) {
-      entries.push({ path: relativePath, hash: sha256(readRegularFileNoFollow(absolutePath)) });
+      const bytes = readRegularFileNoFollow(absolutePath);
+      const lineFeeds = withLineFeeds(bytes);
+      entries.push({
+        path: relativePath,
+        hash: sha256(bytes),
+        lineFeedHash: lineFeeds === bytes ? null : sha256(lineFeeds),
+      });
     } else {
       throw new UnsafeTreeError(relativePath);
     }
@@ -1291,8 +1309,28 @@ function matchesRecordedFiles(
 ): boolean {
   const actual = { ...actualTree.files };
   delete actual[MEX_MANAGED_SKILL_METADATA];
-  return recordsEqual(actual, recorded) &&
+  const actualKeys = Object.keys(actual).sort();
+  const recordedKeys = Object.keys(recorded).sort();
+  return actualKeys.length === recordedKeys.length &&
+    actualKeys.every((key, index) => key === recordedKeys[index] &&
+      (actual[key] === recorded[key] || actualTree.lineFeedFiles[key] === recorded[key])) &&
     arraysEqual(actualTree.directories, directoriesFromFiles(Object.keys(recorded)));
+}
+
+/**
+ * The bytes with every CRLF turned into LF, or the same array when there is
+ * none. Only ever compared against hashes MEX recorded from LF package files,
+ * so a file that matches after this differs from what MEX installed in its
+ * line endings alone (see {@link DirectorySnapshot.lineFeedFiles}).
+ */
+function withLineFeeds(bytes: Uint8Array): Uint8Array {
+  if (!Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes("\r\n")) return bytes;
+  const out: number[] = [];
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] === 0x0d && bytes[index + 1] === 0x0a) continue;
+    out.push(bytes[index]!);
+  }
+  return Uint8Array.from(out);
 }
 
 function recordsEqual(
