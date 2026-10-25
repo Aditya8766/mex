@@ -12,6 +12,11 @@ const MAX_BATCH_BYTES = 8 * 1024 * 1024;
 
 /** The optional setup property belongs to the transport, not the Wiki operation schema. */
 export function readSetupBatch(path: string): { operations: unknown[]; navigation: Navigation; extended: boolean } {
+  try { return parseSetupBatch(path); }
+  catch (error) { throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+function parseSetupBatch(path: string): { operations: unknown[]; navigation: Navigation; extended: boolean } {
   if (statSync(path).size > MAX_BATCH_BYTES) throw new Error("Setup batch exceeds 8 MB; split or shorten the batch and rerun mex setup.");
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   const operations = Array.isArray(raw) ? raw : [raw];
@@ -21,7 +26,7 @@ export function readSetupBatch(path: string): { operations: unknown[]; navigatio
     if (!entry || typeof entry !== "object" || !("setup" in entry)) return entry;
     extended = true;
     const { setup, ...operation } = entry as Record<string, unknown>;
-    if (!setup || typeof setup !== "object") throw new Error("setup must contain links and patterns arrays");
+    if (!setup || typeof setup !== "object" || Array.isArray(setup)) throw new Error("setup must contain links and patterns arrays");
     const data = setup as Record<string, unknown>;
     if (data.links !== undefined) {
       if (!Array.isArray(data.links) || data.links.length > 32) throw new Error("setup.links must hold at most 32 links");
@@ -48,11 +53,22 @@ export function readSetupBatch(path: string): { operations: unknown[]; navigatio
   return { operations: clean.filter((entry) => entry !== undefined), navigation, extended };
 }
 
-function frontmatter(text: string) {
+/** Split transport metadata before the shared Wiki applier validates operations. */
+export function setupOperationsFile(projectRoot: string, batchFile: string): string {
+  const path = resolve(projectRoot, batchFile);
+  if (!existsSync(path)) return batchFile;
+  const batch = readSetupBatch(path);
+  if (!batch.extended) return batchFile;
+  const operationsFile = batchFile.replace(/\.json$/u, ".operations.json");
+  writeFileSync(resolve(projectRoot, operationsFile), JSON.stringify(batch.operations));
+  return operationsFile;
+}
+
+function frontmatter(text: string, file?: string) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(text);
   if (!match) return null;
   const doc = parseDocument(match[1]);
-  if (doc.errors.length || !doc.contents || !doc.toJS() || Array.isArray(doc.toJS()) || typeof doc.toJS() !== "object") throw new Error("Invalid setup frontmatter");
+  if (doc.errors.length || !doc.contents || !doc.toJS() || Array.isArray(doc.toJS()) || typeof doc.toJS() !== "object") throw new Error(`Invalid setup frontmatter${file ? ` in .mex/${file}` : ""}`);
   return { doc, body: text.slice(match[0].length) };
 }
 
@@ -71,7 +87,7 @@ function addEdges(root: string, file: string, links: readonly Link[]) {
   const path = safeFile(root, file);
   if (!existsSync(path)) return;
   const text = readFileSync(path, "utf8");
-  const parsed = frontmatter(text);
+  const parsed = frontmatter(text, file);
   if (!parsed) return;
   const prior: unknown = parsed.doc.toJS().edges;
   const edges = new Map<string, Link>();

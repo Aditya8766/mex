@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { isCliAvailable } from "../cli-tools.js";
+import { cleanupStaleSetupPrompts } from "../agent-prompt.js";
 import {
   ensureScaffoldIdentity,
   loadConfiguredAiTools,
@@ -243,6 +244,7 @@ export async function runHeadlessSetup(
   options: HeadlessSetupOptions,
 ): Promise<HeadlessSetupResult> {
   const projectRoot = resolve(options.projectRoot);
+  cleanupStaleSetupPrompts(projectRoot);
   const mexDir = resolve(projectRoot, ".mex");
   const mode = resolveSetupMode(mexDir, options.mode);
   const templatesDir = setupTemplatesDirectory();

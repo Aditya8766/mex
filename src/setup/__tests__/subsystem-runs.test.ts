@@ -564,3 +564,21 @@ it("defers a limited session's partial batch exactly as cancellation does, then 
   expect(second.applies).toContain(".mex/local/setup-ops/a.json");
   expect(second.launches.map((entry) => entry.slug)).not.toContain("a");
 });
+
+it("starts subsystems before the shared task finishes without a graph barrier", async () => {
+  const root = project(); const state = createPlanState(plan(3)); const h = harness(root);
+  let release!: () => void;
+  const shared = new Promise<void>((resolve) => { release = resolve; });
+  const prompts: string[] = [];
+  const launch = async (input: HeadlessPopulationOptions) => {
+    prompts.push(input.prompt);
+    if (input.prompt.includes("this first one fills the shared files")) await shared;
+    return h.launch(input);
+  };
+  const { promise } = run(root, state, h, { launch, parallelRuns: 3 });
+  while (prompts.length < 3) await sleep(5);
+  expect(state.shared.state).toBe("running");
+  expect(prompts.slice(1).every((prompt) => prompt.includes("Do not rely on or edit"))).toBe(true);
+  release();
+  expect((await promise).covered).toBe(3);
+});

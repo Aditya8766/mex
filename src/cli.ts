@@ -188,6 +188,11 @@ async function runSetupCommand(options: {
   browser?: boolean; dryRun?: boolean; mode?: string; port?: number; open: boolean; tool?: string[]; yes?: boolean;
 }): Promise<void> {
   try {
+    if (!options.dryRun) {
+      const { cleanupStaleSetupPrompts } = await import("./agent-prompt.js");
+      const { findSetupProjectRoot } = await import("./setup/entry.js");
+      cleanupStaleSetupPrompts(findSetupProjectRoot());
+    }
     if (options.browser) {
       await runBrowserCommand({ ...options, setup: true });
       return;
@@ -361,7 +366,7 @@ const setupCommand = program
       + "\n--no-open prints the Hub link instead of opening it in a browser. In the terminal\n"
       + "mode this is the link to the finishing Hub page; in the browser mode it is the setup link.\n"
       + "\nNo agent CLI MEX can launch? Paste one prompt into your agent instead: it runs\n"
-      + "`mex setup next` and does what it prints, until setup is complete.\n",
+      + "`mex setup next --start` first, then does what it prints, until setup is complete.\n",
   )
   .action(async (_opts, command: Command) => {
     await runSetupCommand(command.optsWithGlobals());
@@ -369,19 +374,24 @@ const setupCommand = program
 
 setupCommand
   .command("next")
+  .option("--start", "Start a new chat: settle earlier tasks, including batches without receipts")
+  .option("--retry <task>", "Hand an abandoned running task out again (use its printed task id)")
   .description("Continue setup one step at a time from your agent's chat: apply the last step, print the next")
   .addHelpText(
     "after",
     "\nFor agents MEX cannot launch itself. Each call applies what the previous step wrote\n"
       + "(or gives that step's fix task), records progress, and prints the next task as a file\n"
       + "under .mex/local/setup-next/ with the exact next command. The last call finalizes Graph\n"
-      + "and Wiki. Safe to run again at any time: it continues where setup stopped.\n",
+      + "and Wiki. Start each new chat with `mex setup next --start`; earlier tasks must be stopped.\n"
+      + "Then follow the printed commands (`mex setup next` without --start).\n",
   )
-  .action(async () => {
+  .action(async (options: { retry?: string; start?: boolean }) => {
     try {
       const { findSetupProjectRoot } = await import("./setup/entry.js");
       const { runSetupNext } = await import("./setup/next.js");
       const result = await runSetupNext({
+        ...(options.retry === undefined ? {} : { retry: options.retry }),
+        ...(options.start === undefined ? {} : { start: options.start }),
         projectRoot: findSetupProjectRoot(),
         onProgress: (line) => console.error(line),
       });

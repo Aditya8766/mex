@@ -110,3 +110,12 @@ describe("per-subsystem prompts", () => {
     expect(prompt).not.toContain("mex setup");
   });
 });
+
+it("uses code for context while shared is pending and preserves the existing context instructions when done", () => {
+  const pending = buildSubsystemPrompt({ subsystem: ROUTER, nested: [], sharedDone: false });
+  expect(pending).toContain("Do not rely on or edit .mex/AGENTS.md");
+  expect(pending).toContain("Read source files and manifests directly for context");
+  expect(pending).not.toContain("Read first, for context");
+  expect(buildSubsystemPrompt({ subsystem: ROUTER, nested: [], sharedDone: true }))
+    .toBe(buildSubsystemPrompt({ subsystem: ROUTER, nested: [] }));
+});

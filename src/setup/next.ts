@@ -1,16 +1,16 @@
 /**
  * `mex setup next`: the one-paste setup for agents MEX cannot launch itself.
  *
- * The user pastes one short prompt into their agent: run `mex setup next` and
+ * The user pastes one short prompt into their agent: run `mex setup next --start` first and
  * do what it prints, until it says setup is complete. Each call:
  *
- * 1. settles the unit the previous call handed out: MEX applies the batch file
- *    the unit wrote, in-process, through the same path as background setup
+ * 1. settles the ready units the previous call handed out: MEX applies the batch file
+ *    each unit wrote, in-process, through the same path as background setup
  *    (`wiki apply --apply`, one atomic batch, replay per opId), or hands back
  *    that unit's fix task with the refusal diagnostics and candidates;
  * 2. records the progress in the stored setup plan;
- * 3. hands out the next unit as a task file (the shared files, one subsystem,
- *    the final pass, or for small repositories the whole population), with the
+ * 3. hands out pending units as task files (the shared files, one subsystem,
+ *    or for small repositories the whole population), with the
  *    exact next command; after the last unit it finalizes Graph and Wiki and
  *    prints the completion summary.
  *
@@ -18,9 +18,10 @@
  * replay by opId, an unchanged refused batch is not counted as a second try,
  * and a crashed or abandoned chat continues where the stored plan says.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { cleanupStaleSetupPrompts } from "../agent-prompt.js";
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadConfiguredAiTools } from "../config.js";
@@ -33,13 +34,9 @@ import {
   POPULATION_FINISH,
   SHARED_CONTEXT_FILES,
   buildBatchFixPrompt,
-  buildFinalPassPrompt,
-  buildSharedFilesPrompt,
-  buildSubsystemPrompt,
-  type SubsystemPromptEntry,
 } from "./prompts.js";
 import { createSetupBatchApplier, type BatchApplyOutcome, type BatchProblem, type BatchScope, type SetupBatchApplier } from "./subsystem-apply.js";
-import { renderPlanProgress, SETUP_PLAN_VIEW_FILE, shouldRunPerSubsystem } from "./subsystem-runs.js";
+import { buildSetupUnitPrompt, resolveParallelRuns, renderPlanProgress, SETUP_PLAN_VIEW_FILE, shouldRunPerSubsystem } from "./subsystem-runs.js";
 import {
   SHARED_UNIT_SLUG,
   createPlanState,
@@ -51,6 +48,7 @@ import {
   type SetupPlanState,
   type SubsystemUnit,
 } from "./subsystem-state.js";
+import { readSetupBatch, reconcileSetupNavigation, setupOperationsFile } from "./subsystem-links.js";
 import { computeSubsystemPlan, type SubsystemPlan } from "./subsystems.js";
 import { SETUP_NEXT_COMMAND, countSetupUnits, syncSetupNotice, unfinishedSetupLine } from "./unfinished.js";
 
@@ -67,8 +65,14 @@ export interface SetupNextOptions {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
   readonly env?: NodeJS.ProcessEnv;
+  /** Re-dispatch an abandoned task, using its printed task id. */
+  readonly retry?: string;
+  /** A new chat owns the queue; no task from the previous chat is still running. */
+  readonly start?: boolean;
   /** Progress lines while MEX works (preparing, applying, finalizing); the result carries the instructions. */
   readonly onProgress?: (line: string) => void;
+  /** Optional phase measurements; observation never changes setup output. */
+  readonly onTiming?: (phase: string, durationMs: number) => void;
   /** Test seams. */
   readonly applier?: () => SetupBatchApplier;
   readonly refreshGraph?: () => Promise<void>;
@@ -84,11 +88,14 @@ export interface SetupNextResult {
   readonly progress: { readonly done: number; readonly total: number } | null;
   /** The task file handed out, relative to the project root. */
   readonly taskFile?: string;
+  readonly taskFiles?: readonly string[];
 }
+
+type AwaitingTask = NonNullable<NonNullable<SetupPlanState["queue"]>["awaiting"]>[number];
 
 interface Unit {
   readonly id: QueueUnitId;
-  readonly kind: "shared" | "subsystem" | "final" | "single";
+  readonly kind: "shared" | "subsystem" | "single";
   readonly label: string;
   readonly progress: { state: string; reason?: string; facts?: number; applied?: boolean; runs: unknown[] };
   readonly batchFile?: string;
@@ -107,6 +114,7 @@ function folder(path: string, remainder?: boolean): string {
 /** Run one step of the one-paste setup. Never throws for an expected problem: the output says what to do. */
 export async function runSetupNext(options: SetupNextOptions): Promise<SetupNextResult> {
   const root = resolve(options.projectRoot);
+  cleanupStaleSetupPrompts(root);
   const mexDir = resolve(root, ".mex");
   const progress = (line: string) => { try { options.onProgress?.(line); } catch { /* observation only */ } };
   let mode: SetupMode;
@@ -161,80 +169,180 @@ async function step(
     return { status: "complete", exitCode: 0, progress: countSetupUnits(state), output: "MEX setup is already complete. There is nothing left to do." };
   }
 
+  if (queue.mode === "units") {
+    // Old queues may already have handed out the former final agent task.
+    queue.awaiting = queue.awaiting?.filter((entry) => entry.unit !== "final");
+    removeTaskFile(root, "final");
+    const sharedBatch = resolve(root, unitBatchFile(SHARED_UNIT_SLUG));
+    let legacyPatterns = false;
+    if (state.navigationVersion !== 1 && state.shared.state === "done" && state.final.state !== "done" && existsSync(sharedBatch)) {
+      try { legacyPatterns = !readSetupBatch(sharedBatch).extended; }
+      catch { /* reconciliation reports malformed data without replaying applied facts */ }
+    }
+    if (legacyPatterns) {
+      // Keep applied facts, and ask only for the missing pattern metadata.
+      const prompt = buildSetupUnitPrompt(root, state, readBrief(root).brief, undefined, true);
+      renameSync(sharedBatch, sharedBatch.replace(/\.json$/u, `.applied-${(options.now ?? Date.now)()}.json`));
+      state.shared.state = "pending";
+      state.shared.applied = false;
+      queue.awaiting = [{ unit: "shared", kind: "write", repeats: 0 }];
+      const dispatched = dispatchPrompt(root, queue.awaiting[0]!, prompt);
+      save();
+      return handOut(root, state, listUnits(state)[0]!, "write", dispatched, notes);
+    }
+    if (state.shared.state !== "done" && !state.shared.applied) state.navigationVersion = 1;
+  }
+
   const units = listUnits(state);
   let applier: SetupBatchApplier | null = null;
   const apply = async (unit: Unit): Promise<BatchApplyOutcome> => {
     applier ??= (options.applier ?? (() => createSetupBatchApplier(root)))();
     progress(`Applying the batch for ${unit.label}…`);
-    let outcome = await applyOnce(applier, unit);
+    let outcome = await applyOnce(root, applier, unit, options);
     if (outcome.kind === "refused" && outcome.problems.some(isGraphProblem)) {
       // The code changed since the graph was built (hours can pass between calls): refresh it once and retry.
       progress("The code graph is out of date; refreshing it…");
       await (options.refreshGraph ?? (() => buildSetupGraph(root, { signal: options.signal })))();
       await applier.close().catch(() => undefined);
       applier = (options.applier ?? (() => createSetupBatchApplier(root)))();
-      outcome = await applyOnce(applier, unit);
+      outcome = await applyOnce(root, applier, unit, options);
     }
     return outcome;
   };
 
   try {
-    // 1. Settle the unit handed out last.
-    const awaiting = queue.awaiting;
-    if (awaiting !== undefined && awaiting.unit !== "finalize") {
-      const unit = units.find((candidate) => candidate.id === awaiting.unit);
-      if (unit === undefined || unit.progress.state === "done" || unit.progress.state === "skipped") {
-        delete queue.awaiting;
-      } else {
-        const settled = await settle(root, mexDir, state, unit, awaiting, apply, notes);
-        save();
-        if (settled !== null) {
-          // A task file that went missing (deleted, or a crash before it was written) is written again.
-          const prompt = settled.prompt !== "" || settled.kind === "fix" ? settled.prompt : await writePrompt(root, state, unit, mode);
-          return handOut(root, state, unit, settled.kind, prompt, notes, settled.note);
+    // Apply ready batches in plan order, irrespective of completion order.
+    const previous = queue.awaiting ?? [];
+    queue.awaiting = previous.filter((entry) => units.some((unit) => unit.id === entry.unit
+      && unit.progress.state !== "done" && unit.progress.state !== "skipped"));
+    const tasks: { unit: Unit; kind: "write" | "fix"; prompt: string; note?: string }[] = [];
+    const limit = queue.mode === "single" ? 1 : resolveParallelRuns(undefined, options.env);
+    if (options.retry !== undefined && !queue.awaiting.some((entry) => entry.unit === options.retry)) {
+      return blocked(`Task ${options.retry} is not running. Run \`${SETUP_NEXT_COMMAND}\` to see the current tasks.`, countSetupUnits(state));
+    }
+    for (const unit of units) {
+      if (unit.progress.state === "done" || unit.progress.state === "skipped") continue;
+      const handed = previous.find((entry) => entry.unit === unit.id);
+      const leftover = !handed && unit.batchFile !== undefined && existsSync(resolve(root, unit.batchFile));
+      if (handed || leftover) {
+        const entry: AwaitingTask = handed ?? { unit: unit.id, kind: "write", repeats: 0 };
+        const ready = leftover || options.start === true
+          || (entry.completionToken !== undefined && readReceipt(root, unit.id) === entry.completionToken);
+        const retry = options.retry === unit.id && !ready;
+        if (!ready && !retry) continue;
+        let settled: Settled;
+        if (retry) {
+          entry.repeats += 1;
+          if (entry.repeats >= MISSING_BATCH_LIMIT) {
+            unit.progress.state = "skipped";
+            unit.progress.reason = `no completion signal after ${MISSING_BATCH_LIMIT} retries`;
+            removeTaskFile(root, unit.id);
+            notes.push(`Warning: Skipped ${unit.label}: ${unit.progress.reason}. The rest continues.`);
+            settled = null;
+          } else {
+            settled = { kind: entry.kind, prompt: readTaskFile(root, unit.id) ?? "", note: `Retrying ${unit.id}. Stop its previous subagent before starting this task again.` };
+          }
+        } else {
+          settled = await settle(root, mexDir, state, unit, entry, apply, notes, options.start === true);
+          if ((leftover || options.start) && unit.progress.state === "done"
+            && unit.batchFile !== undefined && existsSync(resolve(root, unit.batchFile))) {
+            const facts = unit.progress.facts ?? 0;
+            notes[notes.length - 1] = `Applied the batch an earlier run left for ${unit.label}: ${facts} fact${facts === 1 ? "" : "s"}.`;
+          }
         }
+        queue.awaiting = queue.awaiting.filter((candidate) => candidate.unit !== unit.id);
+        if (settled !== null) {
+          queue.awaiting.push(entry);
+          // Persist a fix before the next apply can fail or the process can stop.
+          if (settled.prompt !== "") settled.prompt = dispatchPrompt(root, entry, settled.prompt);
+          tasks.push({ unit, ...settled });
+        }
+        save();
       }
     }
-
-    // 2. Hand out the next unit that is not settled. A batch an earlier run left
-    //    on disk is applied first (replay by opId makes this safe).
-    let next = units.find((unit) => unit.progress.state !== "done" && unit.progress.state !== "skipped");
-    while (next !== undefined && next.batchFile !== undefined && next.progress.applied !== true && existsSync(resolve(root, next.batchFile))) {
-      const outcome = await apply(next);
-      if (outcome.kind !== "applied" || (next.kind === "shared" && !isScaffoldPopulated(mexDir))) break;
-      next.progress.state = "done";
-      next.progress.facts = outcome.facts;
-      next.progress.applied = true;
-      notes.push(`Applied the batch an earlier run left for ${next.label}: ${outcome.facts} fact${outcome.facts === 1 ? "" : "s"}.`);
-      save();
-      next = units.find((unit) => unit.progress.state !== "done" && unit.progress.state !== "skipped");
+    // Outstanding fixes/repeats keep their slots; fill the rest with new work.
+    for (const unit of units) {
+      if (queue.awaiting.length >= limit) break;
+      if (unit.progress.state === "done" || unit.progress.state === "skipped"
+        || queue.awaiting.some((entry) => entry.unit === unit.id)) continue;
+      queue.awaiting.push({ unit: unit.id, kind: "write", repeats: 0 });
+      unit.progress.state = "running";
+      tasks.push({ unit, kind: "write", prompt: await writePrompt(root, state, unit, mode, options) });
     }
-    if (next !== undefined) {
-      if (next.kind === "final" && !isScaffoldPopulated(mexDir)) {
-        next.progress.state = "skipped";
-        next.progress.reason = "the shared files are not filled yet";
-        notes.push("Skipped the final pass: the shared files still have required placeholders.");
+    queue.awaiting.sort((a, b) => units.findIndex((unit) => unit.id === a.unit) - units.findIndex((unit) => unit.id === b.unit));
+    if (tasks.length > 0) {
+      for (const task of tasks) {
+        if (task.prompt === "" && task.kind !== "fix") task.prompt = await writePrompt(root, state, task.unit, mode, options);
+        const entry = queue.awaiting.find((entry) => entry.unit === task.unit.id)!;
+        if (entry.completionToken === undefined || readTaskFile(root, task.unit.id) !== task.prompt) {
+          task.prompt = dispatchPrompt(root, entry, task.prompt);
+        }
+      }
+      save();
+      if (tasks.length === 1) {
+        const task = tasks[0]!;
+        return handOut(root, state, task.unit, task.kind, task.prompt, notes, task.note);
+      }
+      const counts = countSetupUnits(state);
+      const files = tasks.map((task) => taskFile(task.unit.id));
+      return {
+        status: "task", exitCode: 0, progress: counts, taskFile: files[0], taskFiles: files,
+        output: [
+          `MEX setup ${counts.done}/${counts.total}: ${tasks.length} tasks`, ...notes,
+          ...tasks.flatMap((task, index) => [
+            ...(task.note ? [task.note] : []),
+            `- ${task.kind === "fix" ? "Fix" : "Read and follow"} ${files[index]}`,
+          ]),
+          "Start each task in its own subagent, in a fresh context.",
+          `As soon as any one finishes, run \`${SETUP_NEXT_COMMAND}\` again without waiting for the others. Repeat until setup is complete.`,
+          `Without subagents, finish these tasks one by one, then run \`${SETUP_NEXT_COMMAND}\`.`,
+        ].join("\n"),
+      };
+    }
+
+    if (queue.awaiting.length > 0) {
+      save();
+      return {
+        status: "task", exitCode: 0, progress: countSetupUnits(state),
+        output: [...notes, "Running tasks:", ...queue.awaiting.map((entry) => `- ${entry.unit}`),
+          `Wait for one to finish, then run \`${SETUP_NEXT_COMMAND}\` again.`,
+          `In a new chat, run \`${SETUP_NEXT_COMMAND} --start\` to recover earlier work.`,
+          `If a subagent stopped without finishing, stop it and run \`${SETUP_NEXT_COMMAND} --retry <task>\` with a task id above.`].join("\n"),
+      };
+    }
+
+    if (queue.mode === "units" && state.final.state !== "done") {
+      if (!isScaffoldPopulated(mexDir)) {
+        state.final.state = "skipped";
+        state.final.reason = "the shared files are not filled yet";
       } else {
-        const prompt = await writePrompt(root, state, next, mode);
-        queue.awaiting = {
-          unit: next.id, kind: "write", repeats: 0,
-          ...(next.kind === "final" ? { scaffoldHash: scaffoldHash(mexDir) } : {}),
-        };
-        next.progress.state = "running";
-        save();
-        return handOut(root, state, next, "write", prompt, notes);
+        const navigationStarted = performance.now();
+        try { reconcileSetupNavigation(root, state); }
+        catch (error) {
+          state.final.state = "pending";
+          save();
+          return blocked(`MEX could not finish setup links and indexes (${error instanceof Error ? error.message : String(error)}). Check .mex/local/setup-ops/*.json and the .mex/ scaffold; fix the reported batch data or scaffold file and rerun \`${SETUP_NEXT_COMMAND}\`; completed work is kept.`, countSetupUnits(state));
+        }
+        timing(options, "navigation", navigationStarted);
+        state.final.state = "done";
+        delete state.final.reason;
+        notes.push("Wrote setup patterns, routing rows and edges.");
       }
     }
 
     // 3. Everything is settled: finalize.
     save();
-    return await finish(root, mexDir, mode, state, queue, notes, progress, save, options);
+    const finalizeStarted = performance.now();
+    try { return await finish(root, mexDir, mode, state, queue, notes, progress, save, options); }
+    finally { timing(options, "finalize", finalizeStarted); }
   } finally {
     if (applier !== null) await (applier as SetupBatchApplier).close().catch(() => undefined);
     if (state.queue?.finalized !== true) {
       syncSetupNotice(root, countSetupUnits(state));
       // A half-finished setup leaves a valid, readable Wiki (never `migration_required`); agent memory has none.
+      const wikiStarted = performance.now();
       const warning = mode === "code-repo" ? await ensureWikiIndexUsable(root) : null;
+      timing(options, "wiki index", wikiStarted);
       if (warning !== null) progress(`Warning: ${warning}`);
     }
   }
@@ -246,13 +354,17 @@ async function startQueue(
 ): Promise<{ state: SetupPlanState; mode: SetupMode }> {
   progress("Preparing setup (scaffold, project scan and code graph); this runs once…");
   let lastGraphLine = 0;
+  let graphStarted: number | undefined;
   const prepared = await runHeadlessSetup({
     projectRoot: root,
     tools: existsSync(resolve(mexDir, "config.json")) ? loadConfiguredAiTools(mexDir) : [],
     confirmPopulation: true,
     stopBeforePopulation: true,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
-    onProgress: (update) => progress(`${update.label}${update.detail ? ` — ${update.detail}` : ""}`),
+    onProgress: (update) => {
+      if (update.step === "graph") graphStarted ??= performance.now();
+      progress(`${update.label}${update.detail ? ` — ${update.detail}` : ""}`);
+    },
     onMessage: progress,
     onGraphProgress: (graph) => {
       const now = Date.now();
@@ -261,6 +373,7 @@ async function startQueue(
       progress(`Building the code graph: ${graph.phase}${graph.total ? ` ${graph.completed ?? 0}/${graph.total}` : ""}`);
     },
   });
+  if (graphStarted !== undefined) timing(options, "graph build", graphStarted);
   const state = createQueueState(root, {
     mode: prepared.mode,
     projectState: prepared.preparation?.state ?? "existing",
@@ -340,13 +453,17 @@ function listUnits(state: SetupPlanState): Unit[] {
       id: `subsystem:${unit.slug}`, kind: "subsystem", label: `subsystem ${folder(unit.path, unit.remainder)}`, progress: unit, subsystem: unit,
       batchFile: unitBatchFile(unit.slug), scope: { opIdPrefix: opIdPrefix(unit.slug), files: [subsystemWikiFile(unit.slug)] },
     })),
-    { id: "final", kind: "final", label: "patterns, routing rows and edges", progress: state.final },
   ];
 }
 
-async function applyOnce(applier: SetupBatchApplier, unit: Unit): Promise<BatchApplyOutcome> {
+async function applyOnce(root: string, applier: SetupBatchApplier, unit: Unit, options: SetupNextOptions): Promise<BatchApplyOutcome> {
   try {
-    return await applier.apply(unit.batchFile!, unit.scope!);
+    const split = performance.now();
+    const file = setupOperationsFile(root, unit.batchFile!);
+    timing(options, "batch split", split);
+    const started = performance.now();
+    try { return await applier.apply(file, unit.scope!); }
+    finally { timing(options, "apply", started); }
   } catch (error) {
     return { kind: "refused", problems: [{ code: "SETUP_APPLY_FAILED", message: error instanceof Error ? error.message : String(error) }] };
   }
@@ -367,23 +484,22 @@ type Settled = { kind: "write" | "fix"; prompt: string; note?: string } | null;
  */
 async function settle(
   root: string, mexDir: string, state: SetupPlanState, unit: Unit,
-  awaiting: NonNullable<NonNullable<SetupPlanState["queue"]>["awaiting"]>,
-  apply: (unit: Unit) => Promise<BatchApplyOutcome>, notes: string[],
+  awaiting: NonNullable<NonNullable<SetupPlanState["queue"]>["awaiting"]>[number],
+  apply: (unit: Unit) => Promise<BatchApplyOutcome>, notes: string[], startingChat = false,
 ): Promise<Settled> {
-  const queue = state.queue!;
   const done = (facts?: number, note?: string) => {
     unit.progress.state = "done";
     delete unit.progress.reason;
-    if (facts !== undefined) unit.progress.facts = facts;
+    if (facts !== undefined) unit.progress.facts = unit.kind === "shared" ? Math.max(unit.progress.facts ?? 0, facts) : facts;
+    if (unit.kind === "shared") state.navigationVersion = 1;
+    if (unit.kind !== "single" && state.final.state === "done") state.final.state = "pending";
     if (unit.batchFile !== undefined) unit.progress.applied = true;
-    delete queue.awaiting;
     removeTaskFile(root, unit.id);
     if (note) notes.push(note);
   };
   const skip = (reason: string) => {
     unit.progress.state = "skipped";
     unit.progress.reason = reason;
-    delete queue.awaiting;
     removeTaskFile(root, unit.id);
     notes.push(`Warning: Skipped ${unit.label}: ${reason}. The rest continues.`);
   };
@@ -400,14 +516,6 @@ async function settle(
     return again(`Required placeholders remain in ${placeholderFiles(mexDir).join(", ") || "the scaffold"}. The task is not finished yet.`);
   }
 
-  if (unit.kind === "final") {
-    if (scaffoldHash(mexDir) === awaiting.scaffoldHash && awaiting.repeats < 1) {
-      return again("MEX sees no change in .mex/ since this task was handed out. Do the task below; if it truly needs no change, run `mex setup next` once more.");
-    }
-    done(undefined, "Patterns, routing rows and edges are recorded.");
-    return null;
-  }
-
   const batchPath = resolve(root, unit.batchFile!);
   const outcome = await apply(unit);
   if (outcome.kind === "applied") {
@@ -419,7 +527,7 @@ async function settle(
     return null;
   }
   if (outcome.kind === "missing") {
-    if (unit.kind === "shared" && isScaffoldPopulated(mexDir)) {
+    if (unit.kind === "shared" && !startingChat && isScaffoldPopulated(mexDir)) {
       done(0, "The shared files are filled (no facts batch was written).");
       return null;
     }
@@ -439,53 +547,34 @@ async function settle(
     skip(`its batch was refused twice (${first?.code ?? "refused"}: ${(first?.message ?? "").slice(0, 200)})`);
     return null;
   }
-  const prompt = buildBatchFixPrompt({
-    label: unit.label,
-    batchFile: unit.batchFile!,
-    wikiFiles: unit.scope!.files,
-    opIdPrefix: unit.scope!.opIdPrefix,
-    diagnostics: outcome.problems,
-  });
-  queue.awaiting = { unit: unit.id, kind: "fix", repeats: 0, ...(hash === null ? {} : { batchHash: hash }) };
+  const prompt = batchFixPrompt(unit, outcome.problems);
+  Object.assign(awaiting, { kind: "fix", repeats: 0, ...(hash === null ? {} : { batchHash: hash }) });
   return { kind: "fix", prompt, note: `MEX could not apply the batch for ${unit.label}; nothing from it was written. Fix it as the task below says.` };
 }
 
-async function writePrompt(root: string, state: SetupPlanState, unit: Unit, mode: SetupMode): Promise<string> {
-  const entry = (subsystem: SubsystemUnit): SubsystemPromptEntry => ({
-    path: subsystem.path,
-    ...(subsystem.remainder ? { remainder: true } : {}),
-    budget: subsystem.budget,
-    wikiFile: subsystemWikiFile(subsystem.slug),
-    batchFile: unitBatchFile(subsystem.slug),
-    opIdPrefix: opIdPrefix(subsystem.slug),
+function batchFixPrompt(unit: Unit, diagnostics: readonly BatchProblem[]): string {
+  return buildBatchFixPrompt({
+    label: unit.label, batchFile: unit.batchFile!, wikiFiles: unit.scope!.files,
+    opIdPrefix: unit.scope!.opIdPrefix, diagnostics,
   });
-  const brief = readBrief(root);
-  switch (unit.kind) {
-    case "single": {
-      const prompt = await buildSetupPopulationPrompt(mode, brief.state, brief.brief, root);
-      // The agent was not launched by setup: `mex setup next` checks and finalizes, not `mex setup`.
-      return prompt.replace(POPULATION_FINISH, QUEUE_POPULATION_FINISH);
+}
+
+async function writePrompt(root: string, state: SetupPlanState, unit: Unit, mode: SetupMode, options: SetupNextOptions): Promise<string> {
+  const started = performance.now();
+  try {
+    const brief = readBrief(root);
+    switch (unit.kind) {
+      case "single": {
+        const prompt = await buildSetupPopulationPrompt(mode, brief.state, brief.brief, root);
+        // The agent was not launched by setup: `mex setup next` checks and finalizes, not `mex setup`.
+        return prompt.replace(POPULATION_FINISH, QUEUE_POPULATION_FINISH);
+      }
+      case "shared":
+        return buildSetupUnitPrompt(root, state, brief.brief);
+      case "subsystem":
+        return buildSetupUnitPrompt(root, state, brief.brief, unit.subsystem!);
     }
-    case "shared":
-      return buildSharedFilesPrompt({
-        briefJson: brief.brief,
-        batchFile: unitBatchFile(SHARED_UNIT_SLUG),
-        opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG),
-        subsystems: state.subsystems.map(entry),
-      });
-    case "subsystem": {
-      const subsystem = unit.subsystem!;
-      const nested = subsystem.remainder
-        ? state.subsystems.filter((other) => other !== subsystem && other.path.startsWith(`${subsystem.path}/`)).map((other) => other.path)
-        : [];
-      return buildSubsystemPrompt({ subsystem: entry(subsystem), nested });
-    }
-    case "final":
-      return buildFinalPassPrompt({
-        written: state.subsystems.filter((subsystem) => subsystem.state === "done").map(entry),
-        skipped: state.subsystems.filter((subsystem) => subsystem.state !== "done"),
-      });
-  }
+  } finally { timing(options, "prompt build", started); }
 }
 
 /** The single population prompt's closing paragraph in this flow. */
@@ -497,7 +586,7 @@ function handOut(
   root: string, state: SetupPlanState, unit: Unit, kind: "write" | "fix", prompt: string, notes: string[], note?: string,
 ): SetupNextResult {
   const relative = taskFile(unit.id);
-  if (prompt !== "") writeText(resolve(root, relative), prompt);
+  if (prompt !== "" && readTaskFile(root, unit.id) !== prompt) writeText(resolve(root, relative), prompt);
   const counts = countSetupUnits(state);
   const lines = [
     `MEX setup ${counts.done}/${counts.total}: ${kind === "fix" ? `fix the batch for ${unit.label}` : unit.label}`,
@@ -505,9 +594,9 @@ function handOut(
     ...(note ? [note] : []),
     "",
     `Next task: its instructions are in ${relative}.`,
-    `- If you can start a subagent, start one with this task, in a fresh context, and wait for it to finish: "Read ${relative} and follow it exactly."`,
+    `- Start this task in its own subagent, in a fresh context: "Read ${relative} and follow it exactly."`,
     "- Otherwise, read that file and follow it yourself, here.",
-    `When the task is done, run \`${SETUP_NEXT_COMMAND}\`. Repeat until it prints that setup is complete.`,
+    `As soon as any task finishes, run \`${SETUP_NEXT_COMMAND}\` again without waiting for the others. Repeat until setup is complete.`,
   ];
   return { status: "task", exitCode: 0, progress: counts, taskFile: relative, output: lines.join("\n") };
 }
@@ -547,7 +636,7 @@ async function finish(
       const { buildSetupRepairPrompt } = await import("./finalize-repair.js");
       const prompt = buildSetupRepairPrompt(error.groundingFailures ?? [], error.wikiDiagnostics ?? []);
       writeText(resolve(root, taskFile("finalize")), prompt);
-      queue.awaiting = { unit: "finalize", kind: "fix", repeats: 0 };
+      queue.awaiting = [{ unit: "finalize", kind: "fix", repeats: 0 }];
       save();
       return {
         status: "task", exitCode: 0, progress: counts, taskFile: taskFile("finalize"),
@@ -609,6 +698,29 @@ function readTaskFile(root: string, id: QueueUnitId): string | null {
 
 function removeTaskFile(root: string, id: QueueUnitId): void {
   rmSync(resolve(root, taskFile(id)), { force: true });
+  rmSync(resolve(root, receiptFile(id)), { force: true });
+}
+
+function receiptFile(id: QueueUnitId): string {
+  return taskFile(id).replace(/\.md$/u, ".done");
+}
+
+function readReceipt(root: string, id: QueueUnitId): string | null {
+  try {
+    const path = resolve(root, receiptFile(id));
+    if (statSync(path).size > 128) return null;
+    return readFileSync(path, "utf8").trim();
+  } catch { return null; }
+}
+
+/** A fresh token prevents an old or partially written receipt completing a retry. */
+function dispatchPrompt(root: string, entry: AwaitingTask, prompt: string): string {
+  entry.completionToken = randomUUID();
+  rmSync(resolve(root, receiptFile(entry.unit)), { force: true });
+  const body = prompt.split("\n<!-- setup-next-completion -->")[0]!;
+  const result = `${body}\n<!-- setup-next-completion -->\nAs your very last step, after closing the completed batch and finishing all task edits, write exactly ${entry.completionToken} to ${receiptFile(entry.unit)}. Do not write this completion signal early. Then stop.\n`;
+  writeText(resolve(root, taskFile(entry.unit)), result);
+  return result;
 }
 
 function writeText(path: string, text: string): void {
@@ -628,27 +740,6 @@ function readBrief(root: string): { state: ProjectState; brief: string | null } 
 
 function fileHash(path: string): string | null {
   try { return createHash("sha256").update(readFileSync(path)).digest("hex"); } catch { return null; }
-}
-
-/** A hash of the canonical scaffold (everything in `.mex/` but `local/` and the databases). */
-function scaffoldHash(mexDir: string): string {
-  const hash = createHash("sha256");
-  const visit = (relative: string) => {
-    let entries;
-    try { entries = readdirSync(resolve(mexDir, relative), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); }
-    catch { return; }
-    for (const entry of entries) {
-      const path = relative === "" ? entry.name : `${relative}/${entry.name}`;
-      if (entry.isDirectory()) {
-        if (!(relative === "" && entry.name === "local")) visit(path);
-      } else if (entry.isFile() && !/\.db(?:-[a-z]+)?$/iu.test(entry.name)) {
-        hash.update(path);
-        try { hash.update(readFileSync(resolve(mexDir, path))); } catch { hash.update("unreadable"); }
-      }
-    }
-  };
-  visit("");
-  return hash.digest("hex");
 }
 
 /** The required scaffold files that still hold a template placeholder. */
@@ -694,7 +785,8 @@ function isAlive(pid: number): boolean {
 }
 
 function computePlan(root: string): SubsystemPlan | null {
-  try { return computeSubsystemPlan(root); } catch { return null; }
+  // Background setup plans before Graph is ready; preserve its ordering and pattern cap choices.
+  try { return computeSubsystemPlan(root, { useGraph: false }); } catch { return null; }
 }
 
 /**
@@ -722,4 +814,8 @@ export async function ensureWikiIndexUsable(projectRoot: string): Promise<string
   } catch (error) {
     return `The Wiki index could not be rebuilt (${error instanceof Error ? error.message : String(error)}); finalize rebuilds it.`;
   }
+}
+
+function timing(options: SetupNextOptions, phase: string, started: number): void {
+  try { options.onTiming?.(phase, performance.now() - started); } catch { /* observation only */ }
 }

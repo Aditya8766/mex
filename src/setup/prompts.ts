@@ -578,6 +578,7 @@ Update .mex/AGENTS.md:
  * written to a batch file that MEX applies.
  */
 export function buildSharedFilesPrompt(input: {
+  readonly skippedFolders?: readonly string[];
   readonly navigationData?: boolean;
   readonly briefJson: string | null;
   readonly batchFile: string;
@@ -607,7 +608,7 @@ THIS SESSION
   and your batch file. Do not edit source code.
 - When you are done, stop. Do not commit.
 
-${READ_CODE}
+${skippedFoldersLine(input.skippedFolders)}${READ_CODE}
 
 ${READ_BROAD_GROUND_TIGHT}
 
@@ -628,8 +629,17 @@ ${SHARED_PASS_1}
 ${input.navigationData ? setupNavigationSection(true) : ""}`;
 }
 
+/** Excluded source can inform exploration, but cannot support indexed groundings. */
+function skippedFoldersLine(folders: readonly string[] | undefined): string {
+  return folders?.length
+    ? `Source folders outside the code graph: ${folders.slice(0, 10).map((folder) => "`" + folder + "`").join(", ")}. Ground facts to indexed code instead.\n\n`
+    : "";
+}
+
 /** One fresh session for one subsystem: read its code, write its batch, run no commands. */
 export function buildSubsystemPrompt(input: {
+  readonly skippedFolders?: readonly string[];
+  readonly sharedDone?: boolean;
   readonly navigationData?: boolean;
   readonly subsystem: SubsystemPromptEntry;
   /** Planned subsystems inside this one's folder, which other sessions cover. */
@@ -655,10 +665,9 @@ SUBSYSTEM
 - Wiki file: .mex/${subsystem.wikiFile} (write "file": "${subsystem.wikiFile}" in every operation)
 - Batch file: ${subsystem.batchFile}
 
-Read first, for context: .mex/AGENTS.md, .mex/context/architecture.md and
-.mex/context/conventions.md.
-These files may still be scaffolds while the shared session runs. Use source
-files and manifests as evidence; do not wait for other sessions.
+${input.sharedDone === false
+    ? "The shared files are still being written. Do not rely on or edit .mex/AGENTS.md, .mex/context/architecture.md or .mex/context/conventions.md. Read source files and manifests directly for context; do not wait for other sessions."
+    : "Read first, for context: .mex/AGENTS.md, .mex/context/architecture.md and\n.mex/context/conventions.md.\nThese files may still be scaffolds while the shared session runs. Use source\nfiles and manifests as evidence; do not wait for other sessions."}
 
 PLANNED SUBSYSTEM FILES (folder responsibility; inspect code for exact boundaries):
 ${(input.planned ?? [subsystem]).map((entry) => `- ${entry.wikiFile}: ${entry.description ?? `code in ${folderLabel(entry.path, entry.remainder)}`}`).join("\n")}
@@ -668,7 +677,7 @@ THIS SESSION
 - Write only your batch file. Do not edit any other file, in .mex/ or in the code.
 - When the batch file is written, stop.
 
-${READ_CODE}
+${skippedFoldersLine(input.skippedFolders)}${READ_CODE}
 
 ${READ_BROAD_GROUND_TIGHT}
 

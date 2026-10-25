@@ -18,6 +18,9 @@
  * missing or broken agent CLI) stop the phase with a message saying a rerun of
  * `mex setup` continues. Every step is recorded, so a rerun keeps what is done.
  */
+import { execFileSync } from "node:child_process";
+import { createScopedSourcePredicate } from "../graph/status.js";
+import { isSupportedSourceFile } from "../graph/extraction/grammars.js";
 import { freemem, totalmem } from "node:os";
 import { getHeapStatistics } from "node:v8";
 import { graphWorkerHeap } from "../graph/candidate-process.js";
@@ -46,7 +49,7 @@ import {
 } from "./prompts.js";
 import { createSetupBatchApplier, type BatchApplyOutcome, type BatchProblem, type BatchScope, type SetupBatchApplier } from "./subsystem-apply.js";
 import { ScopeGuard } from "./subsystem-scope.js";
-import { readSetupBatch, reconcileSetupNavigation } from "./subsystem-links.js";
+import { readSetupBatch, reconcileSetupNavigation, setupOperationsFile } from "./subsystem-links.js";
 import {
   SHARED_UNIT_SLUG,
   savePlanState,
@@ -254,6 +257,75 @@ export function renderPlanProgress(state: SetupPlanState): string {
   ].join("\n");
 }
 
+/** One bounded Git listing per plan, never a filesystem walk of ignored folders. */
+export function discoverSkippedSourceFolders(projectRoot: string): string[] {
+  try {
+    const paths = execFileSync("git", ["ls-files", "-z", "--cached"], {
+      cwd: projectRoot, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 5_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).split("\0").filter((path) => isSupportedSourceFile(path)
+      && !path.split("/").some((part) => part.startsWith(".")));
+    const isScopedSource = createScopedSourcePredicate(projectRoot);
+    const folders = new Set<string>();
+    for (const path of paths.sort()) {
+      if (isScopedSource(path)) continue;
+      const parts = path.split("/");
+      for (let length = 1; length < parts.length; length += 1) {
+        const prefix = parts.slice(0, length).join("/");
+        if (!isScopedSource(`${prefix}/x.ts`)) {
+          // Paths are quoted in the prompt; avoid injecting control characters.
+          if (/^[\w./-]{1,200}$/u.test(prefix)) folders.add(`${prefix}/`);
+          break;
+        }
+      }
+      if (folders.size >= 10) break;
+    }
+    return [...folders].sort();
+  } catch { return []; }
+}
+
+/** Identical bounded prompts for background and one-paste subsystem setup. */
+export function buildSetupUnitPrompt(
+  projectRoot: string, state: SetupPlanState, scannerBrief: string | null,
+  unit?: SubsystemUnit, legacyPatterns = false,
+): string {
+  state.skippedSourceFolders ??= discoverSkippedSourceFolders(projectRoot);
+  const skippedFolders = state.skippedSourceFolders;
+  const nestedOf = (unit: SubsystemUnit) => unit.remainder
+    ? state.subsystems.filter((other) => other !== unit && other.path.startsWith(`${unit.path}/`)).map((other) => other.path)
+    : [];
+  const descriptions = new Map(state.subsystems.map((unit) => {
+    let names: string[] = [];
+    try {
+      const directory = opendirSync(resolve(projectRoot, unit.path));
+      try {
+        for (let count = 0; count < 100; count += 1) {
+          const entry = directory.readSync();
+          if (!entry) break;
+          if (entry.isFile() && !entry.name.startsWith(".")) names.push(entry.name);
+        }
+      } finally { directory.closeSync(); }
+      names = names.sort().slice(0, 5);
+    } catch { /* the folder itself still describes the planned responsibility */ }
+    return [unit.slug, `${folder(unit.path, unit.remainder)} — ${unit.files} source files${names.length ? `; entry files include ${names.join(", ")}` : "; explore its entry points and responsibilities"}`];
+  }));
+  const promptEntry = (unit: SubsystemUnit): SubsystemPromptEntry => ({
+    description: descriptions.get(unit.slug),
+    path: unit.path,
+    ...(unit.remainder ? { remainder: true } : {}),
+    budget: unit.budget,
+    wikiFile: subsystemWikiFile(unit.slug),
+    batchFile: unitBatchFile(unit.slug),
+    opIdPrefix: opIdPrefix(unit.slug),
+  });
+
+  if (unit) return buildSubsystemPrompt({ skippedFolders, sharedDone: state.shared.state === "done", navigationData: true, subsystem: promptEntry(unit), nested: nestedOf(unit), planned: state.subsystems.map(promptEntry) });
+  return legacyPatterns ? buildSharedPatternsPrompt(unitBatchFile(SHARED_UNIT_SLUG)) : buildSharedFilesPrompt({
+    skippedFolders, navigationData: true, briefJson: scannerBrief, batchFile: unitBatchFile(SHARED_UNIT_SLUG),
+    opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG), subsystems: state.subsystems.map(promptEntry),
+  });
+}
+
 export async function runSubsystemPopulation(options: SubsystemPopulationOptions): Promise<SubsystemPopulationOutcome> {
   const projectRoot = resolve(options.projectRoot);
   const mexDir = resolve(projectRoot, ".mex");
@@ -312,34 +384,6 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     } catch { /* observation only */ }
   };
 
-  const nestedOf = (unit: SubsystemUnit) => unit.remainder
-    ? state.subsystems.filter((other) => other !== unit && other.path.startsWith(`${unit.path}/`)).map((other) => other.path)
-    : [];
-  const descriptions = new Map(state.subsystems.map((unit) => {
-    let names: string[] = [];
-    try {
-      const directory = opendirSync(resolve(projectRoot, unit.path));
-      try {
-        for (let count = 0; count < 100; count += 1) {
-          const entry = directory.readSync();
-          if (!entry) break;
-          if (entry.isFile() && !entry.name.startsWith(".")) names.push(entry.name);
-        }
-      } finally { directory.closeSync(); }
-      names = names.sort().slice(0, 5);
-    } catch { /* the folder itself still describes the planned responsibility */ }
-    return [unit.slug, `${folder(unit.path, unit.remainder)} — ${unit.files} source files${names.length ? `; entry files include ${names.join(", ")}` : "; explore its entry points and responsibilities"}`];
-  }));
-  const promptEntry = (unit: SubsystemUnit): SubsystemPromptEntry => ({
-    description: descriptions.get(unit.slug),
-    path: unit.path,
-    ...(unit.remainder ? { remainder: true } : {}),
-    budget: unit.budget,
-    wikiFile: subsystemWikiFile(unit.slug),
-    batchFile: unitBatchFile(unit.slug),
-    opIdPrefix: opIdPrefix(unit.slug),
-  });
-
   const sharedBatchPath = resolve(projectRoot, unitBatchFile(SHARED_UNIT_SLUG));
   let legacyPatterns = false;
   if (state.navigationVersion !== 1 && state.shared.state === "done" && state.final.state !== "done" && existsSync(sharedBatchPath)) {
@@ -354,13 +398,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     progress: state.shared,
     batchFile: unitBatchFile(SHARED_UNIT_SLUG),
     scope: { opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG), files: [...SHARED_CONTEXT_FILES] },
-    writePrompt: () => legacyPatterns ? buildSharedPatternsPrompt(unitBatchFile(SHARED_UNIT_SLUG)) : buildSharedFilesPrompt({
-      navigationData: true,
-      briefJson: options.scannerBrief,
-      batchFile: unitBatchFile(SHARED_UNIT_SLUG),
-      opIdPrefix: opIdPrefix(SHARED_UNIT_SLUG),
-      subsystems: state.subsystems.map(promptEntry),
-    }),
+    writePrompt: () => buildSetupUnitPrompt(projectRoot, state, options.scannerBrief, undefined, legacyPatterns),
     allowed: (path) => [".mex/AGENTS.md", ".mex/ROUTER.md", ...SHARED_CONTEXT_FILES.map((file) => `.mex/${file}`)].includes(path),
   };
   const subsystemUnits: WorkUnit[] = state.subsystems.map((unit) => ({
@@ -371,7 +409,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
     batchFile: unitBatchFile(unit.slug),
     scope: { opIdPrefix: opIdPrefix(unit.slug), files: [subsystemWikiFile(unit.slug)] },
     transcriptTag: unit.slug,
-    writePrompt: () => buildSubsystemPrompt({ navigationData: true, subsystem: promptEntry(unit), nested: nestedOf(unit), planned: state.subsystems.map(promptEntry) }),
+    writePrompt: () => buildSetupUnitPrompt(projectRoot, state, options.scannerBrief, unit),
     allowed: () => false,
   }));
 
@@ -410,16 +448,7 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
       const started = now();
       let outcome: BatchApplyOutcome;
       try {
-        let batchFile = unit.batchFile!;
-        const path = resolve(projectRoot, batchFile);
-        if (existsSync(path)) {
-          const batch = readSetupBatch(path);
-          if (batch.extended) {
-            batchFile = batchFile.replace(/\.json$/u, ".operations.json");
-            writeFileSync(resolve(projectRoot, batchFile), JSON.stringify(batch.operations));
-          }
-        }
-        outcome = await applier.apply(batchFile, unit.scope!);
+        outcome = await applier.apply(setupOperationsFile(projectRoot, unit.batchFile!), unit.scope!);
       } catch (error) {
         // An apply that throws (a lock held elsewhere, a disk error) is reported like a refusal.
         outcome = { kind: "refused", problems: [{ code: "SETUP_APPLY_FAILED", message: error instanceof Error ? error.message : String(error) }] };
@@ -644,16 +673,12 @@ export async function runSubsystemPopulation(options: SubsystemPopulationOptions
 
   try {
     save();
-    // The shared files come first: every subsystem session reads them for context.
+    // Shared is first in the same queue; independent subsystems may start alongside it.
     const needsShared = legacyPatterns || state.shared.state !== "done" || !isScaffoldPopulated(mexDir);
-    if (needsShared && options.graphReady === undefined) {
-      coveragePhase = "shared";
-      await runUnit(sharedUnit);
-    }
     if (stopError === null) {
       coveragePhase = "subsystems";
       coverage();
-      const queue = [ ...(needsShared && options.graphReady !== undefined ? [sharedUnit] : []), ...subsystemUnits.filter((unit) => unit.progress.state !== "done") ];
+      const queue = [ ...(needsShared ? [sharedUnit] : []), ...subsystemUnits.filter((unit) => unit.progress.state !== "done") ];
       const active = new Map<WorkUnit, Promise<void>>();
       let warnedMemory = false;
       while (stopError === null && !phase.signal.aborted && (queue.length > 0 || active.size > 0)) {

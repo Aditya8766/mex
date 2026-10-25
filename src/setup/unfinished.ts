@@ -31,10 +31,10 @@ export const SETUP_NEXT_COMMAND = "mex setup next";
 
 /**
  * The one prompt a user pastes into an agent that MEX cannot launch itself.
- * Each `mex setup next` call prints one unit of work and the next command.
+ * Each `mex setup next` call prints pending tasks and the next command.
  */
 export const SETUP_HANDOFF_PROMPT = [
-  "Set up MEX for this project. In the project folder, run `mex setup next` and do exactly what it prints.",
+  "Set up MEX for this project. In the project folder, run `mex setup next --start` first, then do exactly what it prints.",
   "Repeat until it prints that setup is complete. Run each command on its own.",
 ].join("\n");
 
@@ -52,14 +52,15 @@ export interface UnfinishedSetup {
 export function countSetupUnits(state: SetupPlanState): { done: number; total: number } {
   const settled = (unit: { state: string }) => unit.state === "done" || unit.state === "skipped";
   if (state.queue?.mode === "single") return { done: settled(state.shared) ? 1 : 0, total: 1 };
-  const units = [state.shared, ...state.subsystems, state.final];
+  // Agent units only: MEX writes the navigation itself once they settle.
+  const units = [state.shared, ...state.subsystems];
   return { done: units.filter(settled).length, total: units.length };
 }
 
 export function unfinishedSetupLine(done: number, total: number, driver: "queue" | "background"): string {
   return driver === "queue"
-    ? `MEX setup ${done}/${total}, not finished. To continue, run \`${SETUP_NEXT_COMMAND}\` in your agent's chat and do what it prints.`
-    : `MEX setup ${done}/${total}, not finished. To continue, run \`mex setup\` (or \`${SETUP_NEXT_COMMAND}\` in your agent's chat).`;
+    ? `MEX setup ${done}/${total}, not finished. To continue, run \`${SETUP_NEXT_COMMAND} --start\` in your agent's chat and do what it prints.`
+    : `MEX setup ${done}/${total}, not finished. To continue, run \`mex setup\` (or \`${SETUP_NEXT_COMMAND} --start\` in your agent's chat).`;
 }
 
 /**
@@ -91,7 +92,7 @@ const MAX_NOTICE_PREVIEW_BYTES = 4 * 1024;
 export function renderSetupNotice(done: number, total: number, eol: "\n" | "\r\n" = "\n"): string {
   return [
     MEX_SETUP_NOTICE_START,
-    `MEX setup is not finished (${done}/${total}). Run \`${SETUP_NEXT_COMMAND}\` and do what it prints; repeat until it says setup is complete.`,
+    `MEX setup is not finished (${done}/${total}). Run \`${SETUP_NEXT_COMMAND} --start\` first and do what it prints; repeat until it says setup is complete.`,
     MEX_SETUP_NOTICE_END,
   ].join(eol);
 }

@@ -185,7 +185,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
                 let first = true;
                 let detail = tool
                   ? `Opening ${AI_TOOLS[tool].name} with your setup instructions. Exit the agent session to return to MEX.`
-                  : "No agent CLI MEX can launch is available. Choose the prompt and paste it into your agent: it runs `mex setup next` until setup is complete.";
+                  : "No agent CLI MEX can launch is available. Choose the prompt and paste it into your agent: it runs `mex setup next --start` first, then follows the printed commands.";
                 while (!abort.signal.aborted) {
                   tool = selectSetupAgent(input.selectedTools);
                   update({ screen: "population", detail, populationAgent: tool ? AI_TOOLS[tool].name : null });

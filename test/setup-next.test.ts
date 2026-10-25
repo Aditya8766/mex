@@ -27,7 +27,7 @@ const FOLDERS = {
   beta: ["route", "match", "group"],
   gamma: ["store", "load", "clear"],
 } as const;
-const FORCE = { MEX_SETUP_PER_SUBSYSTEM: "1" };
+const FORCE = { MEX_SETUP_PER_SUBSYSTEM: "1", MEX_SETUP_PARALLEL_RUNS: "1" };
 const NOW = "2026-10-24T10:00:00Z";
 /** A tool anchor MEX manages (it points at the scaffold), and a user's own rules file it must never touch. */
 const MANAGED_ANCHOR = "# Rules\r\n\r\nAt the start of every session, read `.mex/ROUTER.md`.\r\n";
@@ -74,14 +74,14 @@ const fact = (opId: string, file: string, title: string, groundsTo: unknown[]) =
 });
 
 /** What a user's agent (or its subagent) does with one task file. `badOnce` folders first get a wrong symbol. */
-function doTask(root: string, task: string, options: { badOnce?: Set<string>; fixes?: boolean } = {}): string {
+function writeTask(root: string, task: string, options: { badOnce?: Set<string>; fixes?: boolean } = {}): string {
   const write = (relative: string, value: unknown) => {
     mkdirSync(dirname(join(root, relative)), { recursive: true });
     writeFileSync(join(root, relative), JSON.stringify(value, null, 2));
   };
   if (task.includes("this first one fills the shared files")) {
     fillPlaceholders(root);
-    write(".mex/local/setup-ops/shared.json", [fact("setup_shared_entry", "context/architecture.md", "Inputs are trimmed by parsealpha", [{ file: "src/alpha/parse.ts", symbol: "parsealpha" }])]);
+    write(".mex/local/setup-ops/shared.json", [{ ...fact("setup_shared_entry", "context/architecture.md", "Inputs are trimmed by parsealpha", [{ file: "src/alpha/parse.ts", symbol: "parsealpha" }]), setup: { patterns: [{ file: "patterns/verify-input.md", content: "---\nname: verify-input\ndescription: Verify input changes\n---\n# Verify input\n" + ["Context", "Steps", "Gotchas", "Verify", "Debug", "Update Scaffold"].map((heading) => `## ${heading}\nInspect the input helpers and run their tests.\n`).join("") }] } }]);
     return "shared";
   }
   if (task.startsWith("You are writing the MEX knowledge for one subsystem")) {
@@ -120,6 +120,17 @@ function doTask(root: string, task: string, options: { badOnce?: Set<string>; fi
   throw new Error(`unknown task: ${task.slice(0, 80)}`);
 }
 
+function doTask(root: string, task: string, options: { badOnce?: Set<string>; fixes?: boolean } = {}): string {
+  const result = writeTask(root, task, options);
+  signalCompletion(root, task);
+  return result;
+}
+
+function signalCompletion(root: string, task: string): void {
+  const receipt = /write exactly ([a-f0-9-]+) to (\.mex\/local\/setup-next\/[^ ]+\.done)/u.exec(task)!;
+  writeFileSync(join(root, receipt[2]!), receipt[1]!);
+}
+
 async function next(root: string, env: NodeJS.ProcessEnv = FORCE): Promise<SetupNextResult> {
   return runSetupNext({ projectRoot: root, env });
 }
@@ -142,21 +153,21 @@ describe("mex setup next on a real graph", () => {
     // First call: prepare once, hand out the shared files.
     let result = await next(root);
     outputs.push(result.output);
-    expect(result.output).toContain("MEX setup 0/5: the shared files");
-    expect(result.output).toContain("If you can start a subagent, start one with this task, in a fresh context");
-    expect(result.output).toContain("When the task is done, run `mex setup next`.");
+    expect(result.output).toContain("MEX setup 0/4: the shared files");
+    expect(result.output).toContain("Start this task in its own subagent, in a fresh context");
+    expect(result.output).toContain("As soon as any task finishes, run `mex setup next` again without waiting for the others.");
     expect(result.taskFile).toBe(".mex/local/setup-next/shared.md");
     doTask(root, taskText(root, result), { badOnce });
 
     // Half-finished: status lines, the managed block, a valid Wiki that is not `migration_required` (#268).
     result = await next(root);
     expect(result.output).toContain("Applied the shared files: 1 fact.");
-    expect(result.output).toContain("MEX setup 1/5: subsystem src/alpha/");
-    expect(describeUnfinishedSetup(root)).toMatchObject({ done: 1, total: 5, driver: "queue" });
-    expect(describeUnfinishedSetup(root)!.line).toBe("MEX setup 1/5, not finished. To continue, run `mex setup next` in your agent's chat and do what it prints.");
+    expect(result.output).toContain("MEX setup 1/4: subsystem src/alpha/");
+    expect(describeUnfinishedSetup(root)).toMatchObject({ done: 1, total: 4, driver: "queue" });
+    expect(describeUnfinishedSetup(root)!.line).toBe("MEX setup 1/4, not finished. To continue, run `mex setup next --start` in your agent's chat and do what it prints.");
     expect(inspectSetupStatus(root).stage).toBe("needs_population");
-    expect((await projectSetupStatus(root)).unfinished).toMatchObject({ done: 1, total: 5 });
-    expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("MEX setup is not finished (1/5). Run `mex setup next`");
+    expect((await projectSetupStatus(root)).unfinished).toMatchObject({ done: 1, total: 4 });
+    expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("MEX setup is not finished (1/4). Run `mex setup next --start`");
     expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("\r\n<!-- mex-setup:end -->\r\n");
     expect(readFileSync(join(root, ".windsurfrules"), "utf8")).toBe(USER_RULES);
     expect(await wikiState(root)).toBe("fresh");
@@ -177,7 +188,7 @@ describe("mex setup next on a real graph", () => {
     expect(fixTask).toContain("GROUNDING_NOT_FOUND");
     expect(fixTask).toContain("routeMissing");
     expect(fixTask).toContain("routebeta");
-    expect(outputs.join("\n")).toContain("MEX setup 2/5: fix the batch for subsystem src/beta/");
+    expect(outputs.join("\n")).toContain("MEX setup 2/4: fix the batch for subsystem src/beta/");
 
     const state = loadPlanState(root).state!;
     expect(state.queue).toMatchObject({ mode: "units", finalized: true });
@@ -192,10 +203,22 @@ describe("mex setup next on a real graph", () => {
     expect(readFileSync(join(root, ".mex/context/beta.md"), "utf8")).toContain("routebeta caps input at 64 characters");
     expect(readdirSync(join(root, ".mex/local/setup-next")).filter((name) => name.endsWith(".md"))).toEqual([]);
 
+    expect(outputs.join("\n")).not.toContain("Next task: its instructions are in .mex/local/setup-next/final.md");
+    expect(state.final.state).toBe("done");
+    expect(state.navigationVersion).toBe(1);
+    const split = JSON.parse(readFileSync(join(root, ".mex/local/setup-ops/shared.operations.json"), "utf8"));
+    expect(split[0]).not.toHaveProperty("setup");
+    const navigation = ["ROUTER.md", "context/alpha.md", "context/architecture.md", "patterns/verify-input.md", "patterns/INDEX.md"];
+    const before = navigation.map((file) => readFileSync(join(root, ".mex", file), "utf8"));
+    expect(before[0]).toContain("| Working in src/alpha/ | `context/alpha.md` |");
+    expect(before[1]).toContain("target: context/architecture.md");
+    expect(before[2]).toContain("target: context/alpha.md");
+    expect(before[4]).toContain("verify-input.md");
     // Calling again is safe: nothing left to do.
     const again = await next(root);
     expect(again).toMatchObject({ status: "complete", exitCode: 0 });
     expect(again.output).toBe("MEX setup is already complete. There is nothing left to do.");
+    expect(navigation.map((file) => readFileSync(join(root, ".mex", file), "utf8"))).toEqual(before);
   }, 300_000);
 
   it("skips a unit refused twice or with no batch after three tries, never counts an unchanged batch twice, and resumes an abandoned chat", async () => {
@@ -204,37 +227,39 @@ describe("mex setup next on a real graph", () => {
     doTask(root, taskText(root, result));
     result = await next(root); // shared applied; alpha handed out
 
-    // An abandoned chat: the next call hands out the same task again, with a note.
-    const abandoned = await next(root);
-    expect(abandoned.output).toContain("MEX setup 1/5: subsystem src/alpha/");
-    expect(abandoned.output).toContain("MEX found no batch file at .mex/local/setup-ops/alpha.json. The task is not finished yet.");
+    // Early calls keep the running task; an abandoned chat can retry explicitly.
+    expect((await next(root)).output).toContain("Wait for one to finish");
+    const abandoned = await runSetupNext({ projectRoot: root, env: FORCE, retry: "subsystem:alpha" });
+    expect(abandoned.output).toContain("Retrying subsystem:alpha");
     expect(abandoned.taskFile).toBe(result.taskFile);
 
     // alpha: a wrong symbol, and a fix task the agent does not act on.
     doTask(root, taskText(root, abandoned), { badOnce: new Set(["alpha"]) });
     result = await next(root);
     expect(result.output).toContain("fix the batch for subsystem src/alpha/");
+    signalCompletion(root, taskText(root, result));
     const unchanged = await next(root);
     expect(unchanged.output).toContain("The batch file has not changed since the fix task was handed out.");
     expect(loadPlanState(root).state!.subsystems[0]!.state).not.toBe("skipped");
+    signalCompletion(root, taskText(root, unchanged));
     result = await next(root);
     expect(result.output).toContain("Warning: Skipped subsystem src/alpha/: its batch was refused twice (GROUNDING_NOT_FOUND");
     expect(result.output).toContain("subsystem src/beta/");
 
-    // beta: the agent never writes a batch.
+    // beta: the agent signals completion without writing a batch.
+    signalCompletion(root, taskText(root, result));
     result = await next(root);
+    signalCompletion(root, taskText(root, result));
     result = await next(root);
     expect(result.output).toContain("subsystem src/beta/");
+    signalCompletion(root, taskText(root, result));
     result = await next(root);
     expect(result.output).toContain("Warning: Skipped subsystem src/beta/: no batch file was written at .mex/local/setup-ops/beta.json after 3 tries");
-    expect(result.output).toContain("MEX setup 3/5: subsystem src/gamma/");
+    expect(result.output).toContain("MEX setup 3/4: subsystem src/gamma/");
 
     doTask(root, taskText(root, result));
     result = await next(root);
-    expect(result.output).toContain("patterns, routing rows and edges");
-    expect(taskText(root, result)).toContain("These subsystems have no file yet");
-    doTask(root, taskText(root, result));
-    result = await next(root);
+    expect(result.output).toContain("Wrote setup patterns, routing rows and edges.");
     expect(result.status).toBe("complete");
     expect(result.output).toContain("Subsystems covered: 1 of 3, 4 facts written. Skipped: src/alpha/ (its batch was refused twice");
     expect(result.output).toContain("src/beta/ (no batch file was written");
@@ -259,8 +284,9 @@ describe("mex setup next on a real graph", () => {
     writeFileSync(join(root, ".mex/local/setup-plan.json"), "{ not json");
     result = await next(root);
     expect(result.output).toContain("Warning: The stored setup plan (.mex/local/setup-plan.json) could not be used because it is not valid JSON");
+    // With the plan lost, the completed batch replays without another agent task.
     expect(result.output).toContain("Applied the batch an earlier run left for the shared files: 1 fact.");
-    expect(result.output).toContain("MEX setup 1/5: subsystem src/alpha/");
+    expect(result.output).toContain("MEX setup 1/4: subsystem src/alpha/");
     expect(readdirSync(join(root, ".mex/local")).some((name) => name.startsWith("setup-plan.json.unreadable-"))).toBe(true);
   }, 300_000);
 
@@ -272,9 +298,10 @@ describe("mex setup next on a real graph", () => {
     expect(task).toContain("COVERAGE — cover the whole project");
     expect(task).toContain(QUEUE_POPULATION_FINISH);
     expect(task).not.toContain("rerun `mex setup`");
-    // Called again before the work is done: the same task, with what is missing.
+    // Called before completion: leave the task running without handing it out again.
     const early = await next(root, {});
-    expect(early.output).toContain("Required placeholders remain in .mex/AGENTS.md");
+    expect(early.output).toContain("Wait for one to finish");
+    expect(early.taskFile).toBeUndefined();
     doTask(root, task);
     result = await next(root, {});
     expect(result.status).toBe("complete");
@@ -286,20 +313,20 @@ describe("mex setup next on a real graph", () => {
     const root = repository();
     const paused = await runHeadlessSetup({ projectRoot: root, tools: ["windsurf"], perSubsystem: { env: FORCE } });
     expect(paused).toMatchObject({ stage: "needs_population", populationTool: null, prompt: SETUP_HANDOFF_PROMPT });
-    expect(paused.message).toContain("MEX setup 0/5, not finished.");
+    expect(paused.message).toContain("MEX setup 0/4, not finished.");
     expect(await wikiState(root)).toBe("fresh");
-    expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("MEX setup is not finished (0/5)");
+    expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("MEX setup is not finished (0/4)");
 
     let result = await next(root);
-    expect(result.output).toContain("MEX setup 0/5: the shared files");
+    expect(result.output).toContain("MEX setup 0/4: the shared files");
     doTask(root, taskText(root, result));
     result = await next(root);
-    expect(result.output).toContain("MEX setup 1/5");
+    expect(result.output).toContain("MEX setup 1/4");
 
     // The shared files are filled, but subsystems remain: setup pauses with the line to continue.
     const rerun = await runHeadlessSetup({ projectRoot: root, confirmPopulation: true, perSubsystem: { env: FORCE } });
     expect(rerun).toMatchObject({ stage: "needs_population", ready: false, prompt: SETUP_HANDOFF_PROMPT });
-    expect(rerun.message).toContain("MEX setup 1/5, not finished.");
+    expect(rerun.message).toContain("MEX setup 1/4, not finished.");
     expect(loadPlanState(root).state!.queue!.finalized).toBeUndefined();
     expect(inspectSetupStatus(root).ready).toBe(false);
   }, 300_000);

@@ -48,7 +48,7 @@ describe("the managed setup block", () => {
 
     expect(syncSetupNotice(root, { done: 2, total: 9 }).sort()).toEqual([".cursorrules", "CLAUDE.md"]);
     const withBlock = readFileSync(join(root, "CLAUDE.md"), "utf8");
-    expect(withBlock).toBe(`${claude}\n${MEX_SETUP_NOTICE_START}\nMEX setup is not finished (2/9). Run \`mex setup next\` and do what it prints; repeat until it says setup is complete.\n${MEX_SETUP_NOTICE_END}\n`);
+    expect(withBlock).toBe(`${claude}\n${MEX_SETUP_NOTICE_START}\nMEX setup is not finished (2/9). Run \`mex setup next --start\` first and do what it prints; repeat until it says setup is complete.\n${MEX_SETUP_NOTICE_END}\n`);
     expect(readFileSync(join(root, ".cursorrules"), "utf8")).toContain(`\r\n${MEX_SETUP_NOTICE_END}\r\n`);
     expect(readFileSync(join(root, ".windsurfrules"), "utf8")).toBe(windsurf);
 
@@ -96,10 +96,10 @@ describe("the unfinished-setup line", () => {
     state.shared.state = "done";
     state.subsystems[0]!.state = "skipped";
     savePlanState(root, state);
-    expect(countSetupUnits(state)).toEqual({ done: 2, total: 4 });
+    expect(countSetupUnits(state)).toEqual({ done: 2, total: 3 });
     expect(describeUnfinishedSetup(root)).toEqual({
-      done: 2, total: 4, driver: "queue",
-      line: "MEX setup 2/4, not finished. To continue, run `mex setup next` in your agent's chat and do what it prints.",
+      done: 2, total: 3, driver: "queue",
+      line: "MEX setup 2/3, not finished. To continue, run `mex setup next --start` in your agent's chat and do what it prints.",
     });
     state.queue.finalized = true;
     savePlanState(root, state);
@@ -111,8 +111,8 @@ describe("the unfinished-setup line", () => {
     const state = createPlanState(PLAN);
     state.shared.state = "done";
     savePlanState(root, state);
-    expect(describeUnfinishedSetup(root)).toMatchObject({ done: 1, total: 4, driver: "background" });
-    expect(describeUnfinishedSetup(root)!.line).toContain("run `mex setup` (or `mex setup next` in your agent's chat)");
+    expect(describeUnfinishedSetup(root)).toMatchObject({ done: 1, total: 3, driver: "background" });
+    expect(describeUnfinishedSetup(root)!.line).toContain("run `mex setup` (or `mex setup next --start` in your agent's chat)");
     state.finalizedAt = new Date().toISOString();
     savePlanState(root, state);
     expect(describeUnfinishedSetup(root)).toBeNull();
@@ -127,7 +127,7 @@ describe("the unfinished-setup line", () => {
 
   it("asks the user to paste one short prompt", () => {
     expect(SETUP_HANDOFF_PROMPT.split("\n")).toHaveLength(2);
-    expect(SETUP_HANDOFF_PROMPT).toContain("run `mex setup next` and do exactly what it prints");
+    expect(SETUP_HANDOFF_PROMPT).toContain("run `mex setup next --start` first, then do exactly what it prints");
     expect(SETUP_HANDOFF_PROMPT).toContain("Repeat until it prints that setup is complete");
   });
 });

@@ -66,6 +66,8 @@ export type SharedUnit = UnitProgress;
 export type FinalUnit = UnitProgress;
 
 export interface SetupPlanState {
+  /** Bounded source folders excluded by corpus policy; computed once per plan. */
+  skippedSourceFolders?: string[];
   /** Shared/subsystem sessions author navigation data rather than a final agent. */
   navigationVersion?: 1;
   graph?: { startedAt: string; finishedAt?: string; durationMs?: number; outcome: "running" | "completed" | "failed" };
@@ -93,17 +95,19 @@ export type QueueUnitId = "shared" | "final" | "single" | "finalize" | `subsyste
  */
 export interface SetupQueueState {
   readonly mode: "single" | "units";
-  /** The unit whose instructions were printed last, and what was asked. */
+  /** Units whose instructions were printed last, in plan order. Legacy objects load as a one-item list. */
   awaiting?: {
     readonly unit: QueueUnitId;
     readonly kind: "write" | "fix";
+    /** Exact receipt required before this dispatch can be settled. */
+    completionToken?: string;
     /** The batch file's hash when fix instructions were printed (an unchanged file is not a second attempt). */
     readonly batchHash?: string;
     /** The canonical scaffold's hash when the instructions were printed (the final pass writes no batch). */
     readonly scaffoldHash?: string;
     /** Times the same instructions were printed again with nothing new to settle. */
     repeats: number;
-  };
+  }[];
   /** Finalize ran and setup is complete. */
   finalized?: boolean;
 }
@@ -242,16 +246,22 @@ function readQueue(value: unknown): SetupQueueState | null | undefined {
   if (!isRecord(value) || (value.mode !== "single" && value.mode !== "units")) return null;
   let awaiting: SetupQueueState["awaiting"];
   if (value.awaiting !== undefined) {
-    const raw = value.awaiting;
-    if (!isRecord(raw) || typeof raw.unit !== "string" || !QUEUE_UNIT_PATTERN.test(raw.unit)
-      || (raw.kind !== "write" && raw.kind !== "fix")) return null;
-    awaiting = {
-      unit: raw.unit as QueueUnitId,
-      kind: raw.kind,
-      ...(typeof raw.batchHash === "string" ? { batchHash: raw.batchHash.slice(0, 128) } : {}),
-      ...(typeof raw.scaffoldHash === "string" ? { scaffoldHash: raw.scaffoldHash.slice(0, 128) } : {}),
-      repeats: isCount(raw.repeats, 1_000) ? raw.repeats : 0,
-    };
+    const entries = Array.isArray(value.awaiting) ? value.awaiting : [value.awaiting];
+    if (entries.length > 67) return null;
+    awaiting = [];
+    for (const raw of entries) {
+      if (!isRecord(raw) || typeof raw.unit !== "string" || !QUEUE_UNIT_PATTERN.test(raw.unit)
+        || (raw.kind !== "write" && raw.kind !== "fix")) return null;
+      if (awaiting.some((entry) => entry.unit === raw.unit)) return null;
+      awaiting.push({
+        unit: raw.unit as QueueUnitId,
+        kind: raw.kind,
+        ...(typeof raw.completionToken === "string" && /^[a-f0-9-]{36}$/u.test(raw.completionToken) ? { completionToken: raw.completionToken } : {}),
+        ...(typeof raw.batchHash === "string" ? { batchHash: raw.batchHash.slice(0, 128) } : {}),
+        ...(typeof raw.scaffoldHash === "string" ? { scaffoldHash: raw.scaffoldHash.slice(0, 128) } : {}),
+        repeats: isCount(raw.repeats, 1_000) ? raw.repeats : 0,
+      });
+    }
   }
   return { mode: value.mode, ...(awaiting ? { awaiting } : {}), ...(value.finalized === true ? { finalized: true } : {}) };
 }
@@ -317,6 +327,8 @@ export function parsePlanState(text: string): { state: SetupPlanState } | { stat
   }
   return {
     state: {
+      ...(Array.isArray(raw.skippedSourceFolders) ? { skippedSourceFolders: raw.skippedSourceFolders.slice(0, 10)
+        .filter((folder): folder is string => typeof folder === "string" && /^[\w./-]{1,200}\/$/u.test(folder) && !folder.split("/").includes("..")) } : {}),
       kind: SETUP_PLAN_STATE_KIND,
       version: SETUP_PLAN_STATE_VERSION,
       createdAt: typeof raw.createdAt === "string" ? raw.createdAt.slice(0, 40) : new Date(0).toISOString(),
