@@ -693,7 +693,9 @@ describe("release benchmark contract", () => {
     expect(record.measured).toEqual(calibration.measured);
     expect(record.limits).toEqual(calibration.limits);
     expect(record.files).toEqual(calibration.files);
-    expect(createHash("sha256").update(readFileSync(new URL("./budgets.json", import.meta.url))).digest("hex"))
+    expect(createHash("sha256").update(readFileSync(new URL("./budgets.json", import.meta.url), "utf8").replace(/
+/gu, "
+")).digest("hex"))
       .toBe(record.unchangedOperationalBudgetsSha256);
     for (const [field, extension] of [["jsBytes", ".js"], ["cssBytes", ".css"], ["fontBytes", ".woff2"]]) {
       expect(calibration.files.filter(({ file }) => file.endsWith(extension)).reduce((total, { bytes }) => total + bytes, 0))
