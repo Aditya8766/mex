@@ -10,7 +10,7 @@ import type { Claim } from "../types.js";
 import type { Root, Code, Content, InlineCode, ListItem, Strong, Text } from "mdast";
 
 const KNOWN_EXTENSIONS = /\.(ts|js|tsx|jsx|py|go|rs|rb|java|json|yaml|yml|toml|md|css|scss|html|vue|svelte|sh)$/;
-const COMMAND_PREFIXES = /^(npm|yarn|pnpm|bun|make|cargo|python|pip|go|node|npx|tsx)\s/;
+const COMMAND_PREFIXES = /^(?:cd\s+[^&\n]+&&\s*)?(npm|yarn|pnpm|bun|make|cargo|python|pip|go|node|npx|tsx|nx)\s/;
 const DEPENDENCY_SECTION_PATTERNS = /key\s*libraries|core\s*technologies|dependencies|stack|tech/i;
 /** Paths with angle brackets or square brackets are template placeholders, not real paths */
 const TEMPLATE_PLACEHOLDER = /[<>\[\]{}]/;
@@ -217,6 +217,10 @@ export function extractClaims(filePath: string, source: string): Claim[] {
         // `bun test` in a dependency entry names a tool's command. A package
         // name never contains whitespace.
         if (/\s/.test(child.value)) continue;
+        // A mixed-case identifier embedded in a descriptive label names a
+        // class (for example a validation pipe), rather than a package. A
+        // code-leading label remains an explicit package declaration.
+        if (node.children[0] !== child && /^[A-Z][a-z0-9]+[A-Z]/.test(child.value)) continue;
         claims.push({
           kind: "dependency",
           value: child.value,
