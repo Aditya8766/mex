@@ -597,7 +597,7 @@ async function refreshGraphWithLease(
     return maintenanceResult(started, finished, buildResult, published);
   } finally {
     if (candidatePath) cleanupOwnedDatabase(paths, candidatePath);
-    flushGraphPhaseTimings("refresh");
+    flushGraphPhaseTimings("refresh", paths.projectRoot);
   }
 }
 

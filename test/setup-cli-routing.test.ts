@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ hub: vi.fn(), setup: vi.fn(), entry: vi.fn(), parseTools: vi.fn(), tui: vi.fn(), capture: vi.fn() }));
+const mocks = vi.hoisted(() => ({ hub: vi.fn(), setup: vi.fn(), entry: vi.fn(), parseTools: vi.fn(), tui: vi.fn(), capture: vi.fn(), next: vi.fn() }));
 vi.mock("../src/hub/command.js", () => ({ launchHub: mocks.hub }));
 vi.mock("../src/setup/index.js", () => ({ runSetup: mocks.setup, parseSetupTools: mocks.parseTools }));
-vi.mock("../src/setup/entry.js", () => ({ resolveDefaultEntry: mocks.entry }));
+vi.mock("../src/setup/entry.js", () => ({ resolveDefaultEntry: mocks.entry, findSetupProjectRoot: () => "/project" }));
+vi.mock("../src/setup/next.js", () => ({ runSetupNext: mocks.next }));
 vi.mock("../src/tui.js", () => ({ launchTui: mocks.tui }));
 vi.mock("../src/telemetry/index.js", async (original) => ({
   ...await original<typeof import("../src/telemetry/index.js")>(), captureEvent: mocks.capture, flush: async () => {},
@@ -18,6 +19,20 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); process.exitCode = 0; });
 
 describe("setup entry points", () => {
+  it("routes `mex setup next` to the one-step command, prints its output and keeps its exit code", async () => {
+    mocks.next.mockResolvedValue({ status: "task", exitCode: 0, progress: { done: 1, total: 5 }, output: "MEX setup 1/5: subsystem src/a/" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { program } = await import("../src/cli.js");
+    await program.parseAsync(["setup", "next"], { from: "user" });
+    expect(mocks.next).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ projectRoot: "/project" }));
+    expect(log).toHaveBeenCalledWith("MEX setup 1/5: subsystem src/a/");
+    expect(mocks.setup).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(0);
+    mocks.next.mockResolvedValue({ status: "blocked", exitCode: 1, progress: null, output: "No Git repository found." });
+    await program.parseAsync(["setup", "next"], { from: "user" });
+    expect(process.exitCode).toBe(1);
+  });
+
   it.each([
     [["setup", "--browser"], { openBrowser: true, setup: true }],
     [["setup", "--browser", "--mode", "agent-memory", "--no-open", "--port", "48124"], { openBrowser: false, setup: true, mode: "agent-memory", port: 48124 }],
