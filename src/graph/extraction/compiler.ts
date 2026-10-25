@@ -21,7 +21,7 @@ import {
   sep,
 } from "node:path";
 import ts from "typescript";
-import { flushGraphPhaseTimings, recordGraphPhase, timeGraphPhase } from "../phase-timing.js";
+import { flushGraphPhaseTimings, phaseTimingsEnabled, recordGraphPhase, timeGraphPhase } from "../phase-timing.js";
 
 // v3 (#240): checker-rendered signatures no longer embed absolute module paths.
 // v4 (#209): checker-rendered unions list their members in one canonical order.
@@ -2964,7 +2964,7 @@ function recordRenderOutcome(out: RenderOutcome, enclosing: ts.Node): void {
   if (!out.truncated) return;
   recordGraphPhase("compiler.truncatedRenders", 1);
   // Locations stay out of phase records; opt-in diagnostics report at most ten.
-  if (process.env.MEX_GRAPH_PHASE_TIMINGS && reportedRenderTruncations++ < 10) {
+  if (phaseTimingsEnabled() && reportedRenderTruncations++ < 10) {
     const source = enclosing.getSourceFile();
     const { line } = source.getLineAndCharacterOfPosition(enclosing.getStart(source));
     console.warn(`Compiler render truncated: ${source.fileName}:${line + 1}`);
