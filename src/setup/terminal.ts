@@ -1,5 +1,4 @@
 import { basename, resolve } from "node:path";
-import { existsSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { AI_TOOLS, type AiTool } from "../types.js";
 import { BACKGROUND_AGENT_CLIS, isBackgroundAgentTool } from "../agent-command.js";
@@ -9,7 +8,9 @@ import {
   ensureToolAnchors, findSetupProjectRoot, installSetupAgentAssets, isScaffoldPopulated,
   type SetupRunOptions, type SetupRunResult,
 } from "./index.js";
-import { createSetupScaffold, resolveSetupMode, setupTemplatesDirectory, throwIfSetupAborted } from "./phases.js";
+import {
+  createSetupScaffold, requireSetupGitRepository, resolveSetupMode, setupTemplatesDirectory, throwIfSetupAborted,
+} from "./phases.js";
 import { runHeadlessSetup, type HeadlessSetupResult } from "./headless.js";
 import { SetupError } from "./errors.js";
 import { classifySetupAgentAssetsError } from "./agent-errors.js";
@@ -29,6 +30,8 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   const mode = resolveSetupMode(mexDir, options.mode);
   const selectedTools = [...new Set(options.tools ?? loadConfiguredAiTools(mexDir))];
   if (options.dryRun) return previewSetup(projectRoot, mode, selectedTools, options.tools !== undefined);
+  // Before the tool picker: a choice the engine would then refuse is wasted (#287).
+  requireSetupGitRepository(projectRoot, mode);
   const interactive = Boolean(stdin.isTTY && stdout.isTTY && !options.yes && !process.env.CI && process.env.TERM !== "dumb");
   const abort = new AbortController();
   let cancelCode = 130;
@@ -309,9 +312,7 @@ function pressEnterToReturn(signal: AbortSignal): Promise<"return" | "cancel"> {
 function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", tools: AiTool[], explicit: boolean): SetupRunResult {
   console.log(`MEX setup · DRY RUN · ${mode === "agent-memory" ? "agent-memory workspace" : basename(projectRoot)}`);
   console.log("No files will be created or modified.");
-  if (mode === "code-repo" && !existsSync(resolve(projectRoot, ".git"))) {
-    throw new SetupError("No Git repository found. Run `git init` first, then rerun setup.");
-  }
+  requireSetupGitRepository(projectRoot, mode);
   console.log(`Using ${explicit ? "requested" : "configured"} AI tools: ${tools.map(tool => AI_TOOLS[tool].name).join(", ") || "none"}`);
   createSetupScaffold({ projectRoot, mode, dryRun: true,
     onIgnore: message => console.log(message),

@@ -43,12 +43,27 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup acceptance${skipReaso
     { entry: "bare mex", command: [] },
   ])("$entry shows the ASCII banner and choices at 80x24 before any setup writes, then cancels cleanly", async ({ command }) => {
     const f = fixture("incomplete");
+    // Without --mode both entries set up a code repository, which needs Git.
+    execFileSync("git", ["-c", "init.templateDir=", "init", "--quiet"], { cwd: f.project, stdio: "pipe", env: f.env });
     const result = await terminal(f, [], [{ expect: "Choose your AI tools", missing: [".mex", ".agents", "AGENTS.md", ".gitignore"], input: "\u0003" }], { columns: 80, rows: 24, command });
     expect(result.exitCode, result.output).toBe(130);
     expect(result.output).toContain("88888b.d88b.   .d88b.  888  888");
     expect(result.output).toContain("Codex");
     expect(result.output).toContain("Space multi-select");
     expect(result.output).toContain("Setup cancelled.");
+    expect(readdirSync(f.project)).toEqual([".git"]);
+    expect(existsSync(f.record)).toBe(false);
+  });
+
+  it.each([
+    { entry: "mex setup", command: ["setup"] },
+    { entry: "bare mex", command: [] },
+  ])("$entry in a folder without Git stops before the tool picker and writes nothing (#287)", async ({ command }) => {
+    const f = fixture("incomplete");
+    const result = await terminal(f, [], [], { columns: 80, rows: 24, command });
+    expect(result.exitCode, result.output).toBe(1);
+    expect(result.output).toContain("No Git repository found. Run `git init` first, then rerun setup.");
+    expect(result.output).not.toContain("Choose your AI tools");
     expect(readdirSync(f.project)).toEqual([]);
     expect(existsSync(f.record)).toBe(false);
   });

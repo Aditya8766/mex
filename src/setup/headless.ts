@@ -55,6 +55,7 @@ import {
   buildSetupGraph,
   buildSetupPopulationPrompt,
   createSetupScaffold,
+  requireSetupGitRepository,
   resolveSetupMode,
   scanSetupCodebase,
   throwIfSetupAborted,
@@ -260,9 +261,7 @@ export async function runHeadlessSetup(
 
   throwIfSetupAborted(options.signal);
 
-  if (mode === "code-repo" && !existsSync(resolve(projectRoot, ".git"))) {
-    throw new SetupError("No Git repository found. Run `git init` first, then rerun setup.");
-  }
+  requireSetupGitRepository(projectRoot, mode);
 
   const singlePaused = readSingleUsagePause(projectRoot);
   const resumeSingle = singlePaused?.queue?.mode === "single" && singlePaused.shared.reason === "usage_limit";
