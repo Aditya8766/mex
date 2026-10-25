@@ -11,9 +11,9 @@ import { join } from "node:path";
  * or counts.
  *
  * The value selects the target file:
- * - `0`, `false`, or `off` keeps timing disabled. These used to be read as
- *   paths, so setting the flag to switch it off wrote to a file named after
- *   the value instead.
+ * - `0`, `false`, `no`, or `off` keeps timing disabled. These used to be
+ *   read as paths, so setting the flag to switch it off wrote to a file named
+ *   after the value instead.
  * - `1`, `true`, `on`, or `yes` selects the default sink
  *   `.mex/local/graph-phase-timings.jsonl`: checkout-local and ignored by
  *   `.mex/.gitignore`, so the usual "turn the flag on" spelling cannot
@@ -38,7 +38,7 @@ export function resolvePhaseTimingsFile(value: string | undefined): string | nul
   const raw = value;
   if (raw.trim() === "") return null;
   const flag = raw.trim().toLowerCase();
-  if (flag === "0" || flag === "false" || flag === "off") return null;
+  if (flag === "0" || flag === "false" || flag === "no" || flag === "off") return null;
   if (flag === "1" || flag === "true" || flag === "on" || flag === "yes") {
     return DEFAULT_TIMINGS_FILE;
   }

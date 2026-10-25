@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file.
 - Setup finalization names each grounding reference it could not verify (file, entity, node id and reason) instead of only a count.
 - A reference that setup's agent wrote and the code graph cannot verify (an unknown node id, a placeholder anchor) gets one agent repair turn; if it is still unverifiable it is removed with a warning that names it, and the link text stays. Setup no longer fails on it.
 - Rerunning `mex setup` after the code changed no longer fails or removes knowledge. A grounded fact that was already recorded (a body hash, a cached baseline, or present in the committed file) whose code changed, moved or was removed is left exactly as written, never sent to the repair agent, and setup completes. The final message, in the terminal and in the Hub, says how many grounded entities changed since they were recorded, names a few files, and points to `mex sync`. When setup cannot edit a file to remove a bad reference, it names the file and the entry to delete by hand, changes no other file, and a rerun continues.
+- `MEX_GRAPH_PHASE_TIMINGS=1` no longer appends graph phase timings to a file named `1` in the working directory. `1`, `true`, `yes` or `on` (any case) writes to `.mex/local/graph-phase-timings.jsonl`, which is checkout-local and git-ignored; `0`, `false`, `no` or `off` leaves timings off; any other value is still the path to append to (#291).
 
 ### Compatibility
 
