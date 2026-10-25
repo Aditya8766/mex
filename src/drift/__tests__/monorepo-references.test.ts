@@ -23,6 +23,25 @@ beforeEach(() => { root = mkdtempSync(join(tmpdir(), "mex-monorepo-")); });
 afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
 describe("repository references", () => {
+  it.each(["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rs"])("resolves extensionless tracked modules and index files (%s)", (extension) => {
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    write(`apps/api/src/shared/framework/response.decorator.${extension}`);
+    write(`apps/api/src/shared/commands/project.command.${extension}`);
+    write(`libs/core/src/shared/commands/project.command.${extension}`);
+    write(`apps/api/src/shared/services/index.${extension}`);
+    execFileSync("git", ["add", "apps", "libs"], { cwd: root });
+    expect(paths("shared/framework/response.decorator", "shared/commands/project.command", "shared/services", "apps/api/src/shared/services")).toEqual([]);
+    expect(paths("shared/framework/respons.decorator", "apps/api/src/shared/servces")).toHaveLength(2);
+    write(`output/untracked.command.${extension}`);
+    expect(paths("untracked.command")).toHaveLength(1);
+  });
+  it("rejects deleted extensionless targets and does not strip non-source extensions", () => {
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    write("src/deleted.command.ts"); write("src/config.json");
+    execFileSync("git", ["add", "src"], { cwd: root });
+    unlinkSync(join(root, "src/deleted.command.ts"));
+    expect(paths("src/deleted.command", "src/config")).toHaveLength(2);
+  });
   it("resolves deep unique bare filenames and partial suffixes without a depth cap", () => {
     write("apps/api/src/features/a/b/c/d/interceptors/access.ts");
     expect(paths("access.ts", "interceptors/access.ts")).toEqual([]);
@@ -63,6 +82,26 @@ describe("repository references", () => {
 });
 
 describe("workspace manifests", () => {
+  it("checks placeholder script templates against all workspace manifests", () => {
+    pkg("package.json", { workspaces: ["packages/*"], scripts: {} });
+    pkg("packages/shared/package.json", { scripts: { "generate:chat-schema": "tool", "build:api:prod": "tool", "a.b:one": "tool" } });
+    for (const value of ["pnpm --filter @sample/shared generate:<provider>-schema", "npm run build:<target>:<mode>", "yarn run a.b:<name>"]) {
+      expect(checkCommands([claim(value, "command")], root), value).toEqual([]);
+    }
+    for (const script of ["generate:<provider>-missing", "build:<target>:qa", "a+b:<name>", "missing-script"]) {
+      const issues = checkCommands([claim(`pnpm run ${script}`, "command")], root);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].message).toContain(script);
+      if (script.includes("<")) expect(issues[0].message).toContain("template");
+    }
+  });
+  it("extracts package and library claims but excludes code identifiers and calls", () => {
+    pkg("package.json", { dependencies: { react: "1", "@nestjs/core": "1", "socket.io": "1" } });
+    write("doc.md", "# Key Libraries\n- **`safeOutboundRequest` / `HttpClientService({ enforceProtection: true })`** for outbound HTTP\n- **`React`** UI\n- **`NestJS`** framework\n- **`Socket.io`** transport\n- **`FastAPI`** server\n- **`absent-package`** dependency\n- **`@sample/missing`** dependency\n- **`missing`** dependency\n- **helpers `InputPipe`** validation\n");
+    const claims = extractClaims(join(root, "doc.md"), "doc.md");
+    expect(claims.filter((c) => c.kind === "dependency").map((c) => c.value)).toEqual(["React", "NestJS", "Socket.io", "FastAPI", "absent-package", "@sample/missing", "missing"]);
+    expect(checkDependencies(claims, root).map((issue) => issue.claim?.value)).toEqual(["FastAPI", "absent-package", "@sample/missing", "missing"]);
+  });
   const setup = () => {
     pkg("package.json", { workspaces: ["apps/*", "!apps/excluded"], scripts: {} });
     pkg("apps/api/package.json", { name: "@sample/api", nx: { targets: { deploy: {} } }, scripts: { "generate:client": "tool", lint: "tool" },

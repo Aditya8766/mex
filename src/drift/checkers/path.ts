@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import ts from "typescript";
+import { parseJsonc } from "../../jsonc.js";
 import { RepositoryInventory } from "../repository.js";
 import type { Claim, DriftIssue } from "../../types.js";
 
@@ -15,6 +15,8 @@ const SCOPED_PACKAGE = /^@([\w-]+)\/([\w-]+)(\/.*)?$/;
 
 /** URLs are not filesystem paths */
 const URL_PATTERN = /^(?:https?|ftp|file):\/\/|^\/\//;
+
+const SOURCE_EXTENSION = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs)$/;
 
 /** Check that all claimed paths exist on disk */
 export function checkPaths(
@@ -64,7 +66,15 @@ export function checkPaths(
     if (alias === null && pathExists(claim.value, projectRoot, scaffoldRoot)) continue;
     if (alias === null && repository.files) {
       const suffix = claim.value.replace(/^\.\//, "").replace(/\/$/, "");
-      if (!suffixMatches.has(suffix)) suffixMatches.set(suffix, files.filter((file) => (file === suffix || file.endsWith(`/${suffix}`)) && repository.safeFile(file)));
+      if (!suffixMatches.has(suffix)) suffixMatches.set(suffix, files.filter((file) => {
+        const module = file.replace(SOURCE_EXTENSION, "");
+        const candidates = [file];
+        if (module !== file) {
+          candidates.push(module);
+          if (module.endsWith("/index")) candidates.push(module.slice(0, -6));
+        }
+        return candidates.some((candidate) => candidate === suffix || candidate.endsWith(`/${suffix}`)) && repository.safeFile(file);
+      }));
       // Prose names files by base name or a partial path. The check asks whether
       // the referenced file exists, so any tracked file it names satisfies it;
       // several matches (`package.json`, `index.ts`) are not drift.
@@ -92,7 +102,43 @@ export function checkPaths(
     });
   }
 
-  return issues;
+  const namedInSource = collectSourceLiterals(issues, repository);
+  return issues.filter((issue) => !namedInSource.has(issue.claim!.value));
+}
+
+/**
+ * Build scripts can intentionally name absent legacy inputs. Accept only an
+ * exact quoted path in tracked source, never Markdown or an arbitrary substring.
+ * Git selects matching files in one bounded subprocess; safe reads then verify
+ * literals without following symlinks. Failure retains the original findings.
+ */
+function collectSourceLiterals(issues: DriftIssue[], repository: RepositoryInventory): Set<string> {
+  const found = new Set<string>();
+  const candidates = [...new Set(issues.map((issue) => issue.claim!.value))]
+    .filter((value) => value.includes("/") && SOURCE_EXTENSION.test(value) && !/[\n\r"'`]/.test(value));
+  if (!candidates.length || candidates.length > 64 || candidates.join("\n").length > 16_384) return found;
+  try {
+    const output = execFileSync("git", ["grep", "-l", "-z", "-F", "-f", "-", "--", "*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.py", "*.go", "*.rs"], {
+      cwd: repository.root, input: candidates.join("\n") + "\n", encoding: "utf8",
+      maxBuffer: 1_048_576, timeout: 5000, stdio: ["pipe", "pipe", "ignore"],
+    });
+    const files = output.split("\0").filter(Boolean);
+    if (files.length > 1024) return found;
+    let remaining = 8_388_608;
+    for (const file of files) {
+      // Tests often retain obsolete example paths; they do not establish that
+      // production code still names an input.
+      if (/(?:^|\/)(?:__tests__|test|tests)\/|\.(?:test|spec)\./.test(file)) continue;
+      const content = repository.readBounded(file, Math.min(remaining, 1_048_576));
+      if (content === null) continue;
+      remaining -= Buffer.byteLength(content);
+      for (const value of candidates) {
+        if (["'", '"', "`"].some((quote) => content.includes(quote + value + quote))) found.add(value);
+      }
+      if (remaining <= 0) break;
+    }
+  } catch { /* Git unavailable, no matches, timeout or output limit: retain findings. */ }
+  return found;
 }
 
 /**
@@ -134,7 +180,18 @@ function isUnrootedReference(
  */
 function collectIgnoredPaths(values: string[], projectRoot: string): Set<string> {
   const ignored = new Set<string>();
-  const candidates = [...new Set(values)].filter((v) => v.length > 0);
+  const candidates = [...new Set(values)].filter((value) => {
+    // One outside path makes Git reject the entire batch. Check both separator
+    // styles regardless of the host, and keep excluded values as normal claims.
+    if (!value || /^(?:[/\\]|[A-Za-z]:)/.test(value) || /[\r\n\0]/.test(value)) return false;
+    let depth = 0;
+    for (const segment of value.split(/[/\\]/)) {
+      if (segment === "..") {
+        if (--depth < 0) return false;
+      } else if (segment && segment !== ".") depth++;
+    }
+    return true;
+  });
   if (candidates.length === 0) return ignored;
 
   try {
@@ -181,9 +238,12 @@ function collectAliases(repository: RepositoryInventory): Alias[] {
     const content = repository.readBounded(file, Math.min(remaining, 1_048_576));
     if (content === null) return null;
     remaining -= Buffer.byteLength(content);
-    const parsed = ts.parseConfigFileTextToJson(file, content);
-    if (parsed.error) return null;
-    const config = parsed.config;
+    let config;
+    try {
+      const parsed = parseJsonc(content);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      config = parsed as { extends?: string; compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> } };
+    } catch { return null; }
     const directory = dirname(resolve(repository.root, file));
     let parent: ReturnType<typeof load> = null;
     if (typeof config.extends === "string" && config.extends.startsWith(".")) {

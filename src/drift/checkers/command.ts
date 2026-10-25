@@ -138,13 +138,16 @@ export function checkCommands(
       // and a word naming too many scripts is skipped the same way.
       for (const script of new Set(expandBraces(scriptName) ?? [])) {
         if (/[{}]/.test(script)) continue;
-        if (pkgScripts && !pkgScripts.has(script)) {
+        const template = /<[^<>\s]+>/.test(script);
+        if (pkgScripts && !(template ? [...pkgScripts].some((name) => matchesScriptTemplate(script, name)) : pkgScripts.has(script))) {
           issues.push({
             code: "DEAD_COMMAND",
             severity: "error",
             file: claim.source,
             line: claim.line,
-            message: `Script "${script}" not found in package.json scripts`,
+            message: template
+              ? `Script template "${script}" matches no package.json script`
+              : `Script "${script}" not found in package.json scripts`,
             claim,
           });
         }
@@ -173,6 +176,22 @@ export function checkCommands(
   }
 
   return issues;
+}
+
+/** Match literal segments in order, without interpreting regex or shell syntax. */
+function matchesScriptTemplate(template: string, script: string): boolean {
+  const parts = template.split(/<[^<>\s]+>/);
+  const first = parts.shift()!;
+  const last = parts.pop()!;
+  if (!script.startsWith(first) || !script.endsWith(last)) return false;
+  let offset = first.length;
+  const end = script.length - last.length;
+  for (const part of parts) {
+    const next = script.indexOf(part, offset);
+    if (next < 0 || next + part.length > end) return false;
+    offset = next + part.length;
+  }
+  return offset <= end;
 }
 
 /** Read explicit project targets once; abstain if this corpus is incomplete. */
@@ -218,7 +237,12 @@ const MAX_BRACE_EXPANSIONS = 64;
 function expandBraces(word: string): string[] | null {
   const expanded: string[] = [];
   // A stack, with alternatives pushed in reverse, keeps the written order.
-  const pending = [word];
+  // Adjacent pipes in a script token denote prose alternatives. Whitespace
+  // pipelines and shell || are deliberately outside this notation.
+  const alternatives = word.split("|");
+  const pending = alternatives.length > 1 && alternatives.every((part) => /^[\w:.-]+$/.test(part))
+    ? alternatives.reverse() : [word];
+  if (pending.length > MAX_BRACE_EXPANSIONS) return null;
   while (pending.length > 0) {
     const next = pending.pop()!;
     const group = /\{([^{}]*,[^{}]*)\}/.exec(next);
