@@ -1016,7 +1016,7 @@ function beginResponse(
  * The list is no longer emitted, but Scope's source admission is sensitive to
  * this reserve: at some budgets a larger source share lets an optional body
  * displace a later file's compact answer. The reserve keeps its size until
- * that admission order is fixed on its own.
+ * that admission order is fixed on its own (#305).
  */
 const RETIRED_SUMMARY_RESERVE = {
   sourceBackedNodes: Array(24).fill("method:0123456789abcdef0123456789abcdef"),
