@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { inspectSetupStatus, runHeadlessSetup } from "../src/setup/headless.js";
 import { QUEUE_POPULATION_FINISH, runSetupNext, type SetupNextResult } from "../src/setup/next.js";
 import { loadPlanState } from "../src/setup/subsystem-state.js";
+import { readNextGraph } from "../src/setup/next-graph.js";
 import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup } from "../src/setup/unfinished.js";
 import { createRepositoryWikiPort } from "../src/wiki/application-adapter.js";
 import { projectSetupStatus } from "../src/hub/setup/readiness.js";
@@ -132,6 +133,13 @@ function signalCompletion(root: string, task: string): void {
 }
 
 async function next(root: string, env: NodeJS.ProcessEnv = FORCE): Promise<SetupNextResult> {
+  // Simulated sessions finish immediately. Let the real detached graph catch up
+  // before expecting their batches to apply; the initial task is returned first.
+  if (existsSync(join(root, ".mex/local/setup-next-graph.json"))) {
+    for (let attempt = 0; readNextGraph(root)?.status === "running" && attempt < 600; attempt++) {
+      await new Promise((accept) => setTimeout(accept, 100));
+    }
+  }
   return runSetupNext({ projectRoot: root, env });
 }
 
@@ -157,6 +165,8 @@ describe("mex setup next on a real graph", () => {
     expect(result.output).toContain("Start this task in its own subagent, in a fresh context");
     expect(result.output).toContain("As soon as any task finishes, run `mex setup next` again without waiting for the others.");
     expect(result.taskFile).toBe(".mex/local/setup-next/shared.md");
+    expect(result.output).toContain("The code graph is still building");
+    expect(readNextGraph(root)?.status).toBe("running");
     doTask(root, taskText(root, result), { badOnce });
 
     // Half-finished: status lines, the managed block, a valid Wiki that is not `migration_required` (#268).

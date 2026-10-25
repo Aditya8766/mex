@@ -115,6 +115,8 @@ export interface HeadlessSetupOptions {
    * `mex setup next`, which hands population to the user's agent unit by unit.
    */
   readonly stopBeforePopulation?: boolean;
+  /** One-paste preparation delegates graph maintenance to its durable worker. */
+  readonly deferPreparationGraph?: boolean;
   readonly signal?: AbortSignal;
   readonly onProgress?: (update: HeadlessSetupProgress) => void;
   readonly onPopulationActivity?: (activity: HeadlessPopulationActivity) => void;
@@ -327,7 +329,7 @@ export async function runHeadlessSetup(
     scannerBrief = await scanSetupCodebase(projectRoot, mexDir);
   }
 
-  if (mode === "code-repo" && options.stopBeforePopulation === true) {
+  if (mode === "code-repo" && options.stopBeforePopulation === true && !options.deferPreparationGraph) {
     report("graph");
     await buildSetupGraph(projectRoot, {
       background: true,

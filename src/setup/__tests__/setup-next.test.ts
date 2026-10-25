@@ -8,6 +8,9 @@ import { createPlanState, loadPlanState, savePlanState, unitBatchFile } from "..
 import { buildSetupUnitPrompt, discoverSkippedSourceFolders } from "../subsystem-runs.js";
 import * as links from "../subsystem-links.js";
 import type { SetupBatchApplier } from "../subsystem-apply.js";
+import * as nextGraph from "../next-graph.js";
+
+vi.mock("../next-graph.js", () => ({ ensureNextGraph: vi.fn(async () => ({ status: "ready" })) }));
 
 vi.mock("../index.js", async (original) => ({
   ...await original<typeof import("../index.js")>(),
@@ -59,6 +62,44 @@ it("uses the background prompt including navigation data and the complete planne
   f.complete("shared");
   result = await f.next();
   expect(f.read(result.taskFile!)).toContain(buildSetupUnitPrompt(f.root, loadPlanState(f.root).state!, null, f.state.subsystems[0]));
+});
+
+it("holds completed batches for the graph, refills free slots, and applies them once ready", async () => {
+  const f = parallelFixture(); f.save(); await f.next();
+  f.batch("shared"); f.batch("a");
+  vi.mocked(nextGraph.ensureNextGraph).mockResolvedValueOnce({ version: 1, token: "test", pid: process.pid,
+    startedAt: Date.now(), status: "running", completed: 7, total: 20 });
+  const waiting = await f.next();
+  expect(waiting.output).toContain("still building (7 of 20 files)");
+  expect(f.apply).not.toHaveBeenCalled();
+  expect(waiting.taskFiles).toEqual(["c", "d"].map(slug => `.mex/local/setup-next/subsystem-${slug}.md`));
+  expect(loadPlanState(f.root).state!.shared.state).not.toBe("done");
+  await f.next();
+  expect(f.apply.mock.calls.filter(([file]) => file.includes("shared.operations"))).toHaveLength(1);
+  expect(loadPlanState(f.root).state!.shared.state).toBe("done");
+});
+
+it("keeps --start batches without receipts waiting across calls and names failed-worker recovery", async () => {
+  const f = fixture(); f.save(); await f.next();
+  f.write(unitBatchFile("a"), '[{"opId":"setup_a_one"}]');
+  vi.mocked(nextGraph.ensureNextGraph).mockResolvedValueOnce({ version: 1, token: "test", pid: process.pid,
+    startedAt: Date.now(), status: "running", completed: 1, total: 20 });
+  const waiting = await runSetupNext({ projectRoot: f.root, start: true,
+    applier: () => ({ apply: f.apply, close: async () => ({ changed: false }) }) });
+  expect(waiting.taskFile).toBeUndefined();
+  expect(waiting.output).toContain("Finished tasks waiting for the code graph");
+  expect(waiting.output).not.toContain("Wait for one to finish");
+  expect(f.apply).not.toHaveBeenCalled();
+  vi.mocked(nextGraph.ensureNextGraph).mockResolvedValueOnce({ version: 1, token: "test", pid: process.pid,
+    startedAt: Date.now(), status: "failed", completed: 1, total: 20,
+    message: "Graph worker (failed; exit; signal SIGKILL).", diagnostic: "Worker diagnostics: bounded tail" });
+  const failed = await f.next();
+  expect(failed.status).toBe("blocked");
+  expect(failed.output).toContain("SIGKILL");
+  expect(failed.output).toContain("mex setup next --start");
+  expect(f.apply).not.toHaveBeenCalled();
+  expect((await f.next()).status).toBe("complete");
+  expect(f.apply).toHaveBeenCalledTimes(1);
 });
 
 it.each([null, [], { links: "bad" }, { patterns: [{ file: "patterns/task.md", content: "bad" }] }])("refuses malformed setup metadata %j before apply, then accepts the repaired split", async (setup) => {

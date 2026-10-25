@@ -7,7 +7,7 @@ import { defineConfig } from "tsup";
  */
 export default defineConfig([
   {
-    entry: { cli: "src/cli-bootstrap.ts", "graph-candidate": "src/graph/candidate-entry.ts" },
+    entry: { cli: "src/cli-bootstrap.ts", "graph-candidate": "src/graph/candidate-entry.ts", "setup-graph": "src/setup/next-graph-entry.ts" },
     format: ["esm"],
     target: "node20",
     outDir: "dist",

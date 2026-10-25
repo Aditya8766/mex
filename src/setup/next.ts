@@ -51,6 +51,7 @@ import {
 import { readSetupBatch, reconcileSetupNavigation, setupOperationsFile } from "./subsystem-links.js";
 import { computeSubsystemPlan, type SubsystemPlan } from "./subsystems.js";
 import { SETUP_NEXT_COMMAND, countSetupUnits, syncSetupNotice, unfinishedSetupLine } from "./unfinished.js";
+import { ensureNextGraph } from "./next-graph.js";
 
 /** Task files `mex setup next` hands out, ignored by Git with the rest of `.mex/local/`. */
 export const SETUP_NEXT_DIRECTORY = ".mex/local/setup-next";
@@ -169,6 +170,14 @@ async function step(
     return { status: "complete", exitCode: 0, progress: countSetupUnits(state), output: "MEX setup is already complete. There is nothing left to do." };
   }
 
+  const graph = mode === "code-repo" ? await ensureNextGraph(root, options.start === true) : null;
+  if (graph?.status === "failed") {
+    return blocked(`${graph.message ?? "The background code graph build failed."}\n${graph.diagnostic ?? ""}\nRun \`mex setup next --start\` to retry the graph build; finished tasks are kept.`, countSetupUnits(state));
+  }
+  const graphReady = graph === null || graph.status === "ready";
+  if (graph?.status === "running" && graph.message) notes.push(graph.message);
+  if (!graphReady) notes.push(`The code graph is still building (${graph.total > 0 ? `${graph.completed} of ${graph.total} files` : "discovering files"}). Finished tasks wait for it; run \`${SETUP_NEXT_COMMAND}\` again to continue.`);
+
   if (queue.mode === "units") {
     // Old queues may already have handed out the former final agent task.
     queue.awaiting = queue.awaiting?.filter((entry) => entry.unit !== "final");
@@ -230,6 +239,15 @@ async function step(
           || (entry.completionToken !== undefined && readReceipt(root, unit.id) === entry.completionToken);
         const retry = options.retry === unit.id && !ready;
         if (!ready && !retry) continue;
+        if (!graphReady && ready && (unit.kind === "single" ? isScaffoldPopulated(mexDir)
+          : unit.batchFile !== undefined && existsSync(resolve(root, unit.batchFile)))) {
+          // --start accepts earlier completed batches without receipts. Retain that
+          // decision across calls while the graph finishes, without re-dispatching.
+          entry.completionToken ??= randomUUID();
+          writeText(resolve(root, receiptFile(unit.id)), entry.completionToken);
+          if (!queue.awaiting.some((candidate) => candidate.unit === unit.id)) queue.awaiting.push(entry);
+          continue;
+        }
         let settled: Settled;
         if (retry) {
           entry.repeats += 1;
@@ -262,7 +280,9 @@ async function step(
     }
     // Outstanding fixes/repeats keep their slots; fill the rest with new work.
     for (const unit of units) {
-      if (queue.awaiting.length >= limit) break;
+      const occupied = queue.awaiting.filter((entry) => entry.completionToken === undefined
+        || readReceipt(root, entry.unit) !== entry.completionToken).length;
+      if (occupied >= limit) break;
       if (unit.progress.state === "done" || unit.progress.state === "skipped"
         || queue.awaiting.some((entry) => entry.unit === unit.id)) continue;
       queue.awaiting.push({ unit: unit.id, kind: "write", repeats: 0 });
@@ -302,13 +322,24 @@ async function step(
 
     if (queue.awaiting.length > 0) {
       save();
+      const waiting = !graphReady ? queue.awaiting.filter((entry) => entry.completionToken !== undefined
+        && readReceipt(root, entry.unit) === entry.completionToken) : [];
+      const running = queue.awaiting.filter((entry) => !waiting.includes(entry));
       return {
         status: "task", exitCode: 0, progress: countSetupUnits(state),
-        output: [...notes, "Running tasks:", ...queue.awaiting.map((entry) => `- ${entry.unit}`),
-          `Wait for one to finish, then run \`${SETUP_NEXT_COMMAND}\` again.`,
+        output: [...notes,
+          ...(running.length ? ["Running tasks:", ...running.map((entry) => `- ${entry.unit}`),
+            `Wait for one to finish, then run \`${SETUP_NEXT_COMMAND}\` again.`] : []),
+          ...(waiting.length ? ["Finished tasks waiting for the code graph:", ...waiting.map((entry) => `- ${entry.unit}`),
+            `Wait for the code graph, then run \`${SETUP_NEXT_COMMAND}\` again.`] : []),
           `In a new chat, run \`${SETUP_NEXT_COMMAND} --start\` to recover earlier work.`,
           `If a subagent stopped without finishing, stop it and run \`${SETUP_NEXT_COMMAND} --retry <task>\` with a task id above.`].join("\n"),
       };
+    }
+
+    if (!graphReady) {
+      save();
+      return { status: "task", exitCode: 0, progress: countSetupUnits(state), output: notes.join("\n") };
     }
 
     if (queue.mode === "units" && state.final.state !== "done") {
@@ -348,32 +379,23 @@ async function step(
   }
 }
 
-/** Prepare once (scaffold, identity, scan, graph) and store a new plan for this flow. */
+/** Prepare the scaffold, identity and scan once, then store this flow's plan. */
 async function startQueue(
   root: string, mexDir: string, options: SetupNextOptions, progress: (line: string) => void, replacing: boolean,
 ): Promise<{ state: SetupPlanState; mode: SetupMode }> {
-  progress("Preparing setup (scaffold, project scan and code graph); this runs once…");
-  let lastGraphLine = 0;
-  let graphStarted: number | undefined;
+  progress("Preparing setup (scaffold and project scan); the code graph will build in the background…");
   const prepared = await runHeadlessSetup({
     projectRoot: root,
     tools: existsSync(resolve(mexDir, "config.json")) ? loadConfiguredAiTools(mexDir) : [],
     confirmPopulation: true,
     stopBeforePopulation: true,
+    deferPreparationGraph: true,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     onProgress: (update) => {
-      if (update.step === "graph") graphStarted ??= performance.now();
       progress(`${update.label}${update.detail ? ` — ${update.detail}` : ""}`);
     },
     onMessage: progress,
-    onGraphProgress: (graph) => {
-      const now = Date.now();
-      if (now - lastGraphLine < 5_000) return;
-      lastGraphLine = now;
-      progress(`Building the code graph: ${graph.phase}${graph.total ? ` ${graph.completed ?? 0}/${graph.total}` : ""}`);
-    },
   });
-  if (graphStarted !== undefined) timing(options, "graph build", graphStarted);
   const state = createQueueState(root, {
     mode: prepared.mode,
     projectState: prepared.preparation?.state ?? "existing",
