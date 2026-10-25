@@ -10,6 +10,7 @@ import {
   type GraphCandidateProgress,
   type GraphCandidateRequest,
 } from "./candidate-protocol.js";
+import { phaseTimingsWorkerEnv } from "./phase-timing.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STARTUP_TIMEOUT_MS = 15_000;
@@ -160,7 +161,7 @@ function superviseCandidate(options: GraphCandidateProcessOptions, request: Grap
     try {
       child = spawn(process.execPath, [...heap.args, options.__internal?.entrypoint ?? candidateEntrypoint()], {
         cwd: options.projectRoot,
-        env: { ...process.env, MEX_TELEMETRY: "0", DO_NOT_TRACK: "1" },
+        env: { ...process.env, ...phaseTimingsWorkerEnv(), MEX_TELEMETRY: "0", DO_NOT_TRACK: "1" },
         // FD 4 is a lifeline. A watchdog in the child observes EOF even while
         // its main thread is inside synchronous TypeScript or SQLite work.
         // Overlapped enables asynchronous reads on the inherited Windows

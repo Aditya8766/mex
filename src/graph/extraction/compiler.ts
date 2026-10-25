@@ -919,7 +919,7 @@ export function buildTypeScriptExtraction(
   }
 
   recordGraphPhase("compiler.finish", performance.now() - finishStarted);
-  flushGraphPhaseTimings("compiler.extract");
+  flushGraphPhaseTimings("compiler.extract", root);
 
   const summaryProjects: ParsedProject[] = [
     ...parsedProjects.filter((project) => !crashedProjects.has(project)),
