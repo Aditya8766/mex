@@ -1,4 +1,4 @@
-import { populationWarning, fillPopulationPlaceholders, populationPlaceholderFiles } from "./population-audit.js";
+import { populationWarning, fillPopulationPlaceholders, populationPlaceholderFiles, unpopulatedScaffoldFiles } from "./population-audit.js";
 /**
  * `mex setup next`: the one-paste setup for agents MEX cannot launch itself.
  *
@@ -42,6 +42,7 @@ import {
   SHARED_UNIT_SLUG,
   createPlanState,
   loadPlanState,
+  isUnstartedSetupPlan,
   savePlanState,
   subsystemWikiFile,
   unitBatchFile,
@@ -159,7 +160,9 @@ async function step(
   // Older authored scaffolds need finalization only. Do not invent another
   // population plan (or replace a completed one) for harmless leftover tokens.
   if (loaded.notice === undefined && isScaffoldPopulated(mexDir)
-    && (state === null || state.finalizedAt !== undefined || state.queue?.finalized === true)) {
+    && (state === null || state.finalizedAt !== undefined || state.queue?.finalized === true
+      || state.queue?.mode === "single"
+      || (populationPlaceholderFiles(mexDir).length > 0 && isUnstartedSetupPlan(root, state)))) {
     const result = await runHeadlessSetup({
       projectRoot: root, mode, tools: loadConfiguredAiTools(mexDir),
       confirmPopulation: true, signal: options.signal, onMessage: progress,
@@ -557,7 +560,7 @@ async function settle(
       done(undefined, "The scaffold is populated.");
       return null;
     }
-    return again(`Required placeholders remain in ${placeholderFiles(mexDir).join(", ") || "the scaffold"}. The task is not finished yet.`);
+    return again(`Required project knowledge is missing in ${placeholderFiles(mexDir).join(", ") || "the scaffold"}. Complete only those files; preserve completed knowledge. The task is not finished yet.`);
   }
 
   const batchPath = resolve(root, unit.batchFile!);
@@ -611,7 +614,8 @@ async function writePrompt(root: string, state: SetupPlanState, unit: Unit, mode
       case "single": {
         const prompt = await buildSetupPopulationPrompt(mode, brief.state, brief.brief, root);
         // The agent was not launched by setup: `mex setup next` checks and finalizes, not `mex setup`.
-        return prompt.replace(POPULATION_FINISH, QUEUE_POPULATION_FINISH);
+        return `Continue only the missing project knowledge in ${placeholderFiles(resolve(root, ".mex")).join(", ")}. Preserve completed files and facts; do not restart population.\n\n`
+          + prompt.replace(POPULATION_FINISH, QUEUE_POPULATION_FINISH);
       }
       case "shared":
         return buildSetupUnitPrompt(root, state, brief.brief);
@@ -791,14 +795,7 @@ function fileHash(path: string): string | null {
 
 /** The required scaffold files that still hold a template placeholder. */
 function placeholderFiles(mexDir: string): string[] {
-  return ["AGENTS.md", "ROUTER.md", ...SHARED_CONTEXT_FILES].filter((file) => {
-    try {
-      const content = readFileSync(resolve(mexDir, file), "utf8");
-      return content.includes("[Project Name]") || content.includes("[YYYY-MM-DD]");
-    } catch {
-      return true;
-    }
-  }).map((file) => `.mex/${file}`);
+  return unpopulatedScaffoldFiles(mexDir).map(file => `.mex/${file}`);
 }
 
 /** One `mex setup next` at a time per project; a lock from a dead or very old call is taken over. */

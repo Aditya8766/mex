@@ -159,9 +159,14 @@ global `mex`.
   harness and fake agents; the Python harness is skipped on Windows.
 - Population completion also audits patterns, grounded facts and structural
   links. Demand code facts only when graph coverage includes parsed sources.
-  Compare each required file to its template with marker values and Wiki stamps
-  ignored. Finalization fills known date/name tokens in authored files itself,
-  reports each file, and must not create a plan or launch an agent for leftovers.
+  Require authored body content rather than byte differences from today's
+  templates: older release instructions, metadata, headings, comments and spacing
+  are not population. Finalization fills the date metadata, the initial
+  project-title slot and tokens in ordinary sentences, preserving code, comments
+  and placeholder documentation. It names
+  each changed file and must not create a plan or launch an agent for leftovers.
+  A never-dispatched legacy queue can be finalized over authored knowledge;
+  graph/run/batch/dispatch evidence means the stored work must still continue.
 - Drift staleness uses committed Git history. Correct uncommitted content can
   remain stale until the canonical scaffold is committed.
 - An unrelated incomplete parse does not invalidate exact Wiki grounding from

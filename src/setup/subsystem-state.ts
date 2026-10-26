@@ -34,6 +34,17 @@ export function readSetupPlanSnapshot(projectRoot: string): SetupPlanState | nul
     return parsePlanState(readFileSync(path, "utf8")).state;
   } catch { return null; }
 }
+
+/** Earlier setup versions queued all work for an authored scaffold with one
+ * leftover token. Only an undispatched plan with no run or batch evidence may
+ * be bypassed; real interrupted work must continue from its recorded units. */
+export function isUnstartedSetupPlan(projectRoot: string, state: SetupPlanState): boolean {
+  return state.graph === undefined && !state.queue?.awaiting?.length
+    && [state.shared, ...state.subsystems, state.final].every(unit => unit.state === "pending"
+      && unit.runs.length === 0 && unit.reason === undefined && !unit.applied && unit.facts === undefined)
+    && [SHARED_UNIT_SLUG, ...state.subsystems.map(unit => unit.slug)].every(slug =>
+      !existsSync(resolve(projectRoot, unitBatchFile(slug))));
+}
 /** The unit that fills the shared scaffold files writes its facts here. */
 export const SHARED_UNIT_SLUG = "shared";
 
