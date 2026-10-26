@@ -103,7 +103,7 @@ describe("status-first setup rerun (#284)", () => {
   });
 
   it("--force and an explicit new tool still run the full flow", async () => {
-    vi.spyOn(setup, "installSetupAgentAssets").mockImplementation(() => undefined);
+    vi.spyOn(setup, "installSetupAgentAssets").mockImplementation(() => null);
     const root = fixture();
     await runHeadlessSetup({ projectRoot: root, mode: "agent-memory", tools: [], populate: populate(root) });
     const forced = await rerun(root, { force: true });
