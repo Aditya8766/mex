@@ -2052,3 +2052,137 @@ describe("budget accounting honesty", () => {
     expect(records.at(-1)?.textFallbackFiles).not.toContain("main.ts");
   });
 });
+
+describe("runGraphScope --fingerprint", () => {
+  let fpRoot: string;
+  let fpEngine: GraphEngine;
+  let fpDeps: AgentCommandDeps;
+  let fpDb: ReturnType<typeof openSqlite>;
+  const task = "checkout discount";
+  const sourcedIds = (records: Record<string, unknown>[]): string[] => [...new Set(records
+    .filter((record) => record.type === "source")
+    .flatMap((record) => (record.ranges as Array<{ nodeIds: string[] }>).flatMap((range) => range.nodeIds)))];
+
+  beforeAll(async () => {
+    fpRoot = mkdtempSync(join(tmpdir(), "mex-scope-fingerprint-"));
+    // Two ~120-line functions: their source alone fills the default 3,500-token budget.
+    const steps = Array.from({ length: 120 }, (_, i) => (
+      `  total += cart.length * ${i} + applyDiscount(${i}); // step ${i} of the checkout pipeline`
+    ));
+    const tiers = Array.from({ length: 120 }, (_, i) => (
+      `  if (total > ${i}) total = total - ${i} * 0.01; // discount tier ${i}`
+    ));
+    writeFileSync(join(fpRoot, "big.ts"), [
+      "export function checkout(cart: string[]): number {", "  let total = 0;", ...steps, "  return total;", "}", "",
+      "export function applyDiscount(total: number): number {", ...tiers, "  return total;", "}", "",
+    ].join("\n"));
+    writeFileSync(join(fpRoot, "cart.ts"), [
+      "export function addItem(cart: string[], item: string): string[] {", "  return [...cart, item];", "}", "",
+      "export function checkout(cart: string[]): number {", "  return applyDiscount(cart.length * 10);", "}", "",
+      "function applyDiscount(total: number): number {", "  return total > 50 ? total * 0.9 : total;", "}", "",
+    ].join("\n"));
+    fpEngine = createGraphEngine({ rootDir: fpRoot });
+    await fpEngine.build(fpRoot);
+    fpDb = openSqlite(join(fpRoot, ".mex", "graph.db"));
+    fpDeps = { open: () => ({ graph: fpEngine, db: fpDb, close: () => {} }), write: (line) => lines.push(line) };
+    // A real graph build; the default hook timeout is too tight on a loaded runner.
+  }, 30_000);
+
+  afterAll(() => {
+    fpDb.close();
+    fpEngine.close();
+    rmSync(fpRoot, { recursive: true, force: true });
+  });
+
+  it("returns a fingerprinted fact for every source-backed node in the default source detail", () => {
+    const records = capture(() => runGraphScope(task, fpRoot, fpDeps, { fingerprint: true }));
+    const sourced = sourcedIds(records);
+    expect(sourced.length).toBeGreaterThan(0);
+    for (const id of sourced) {
+      const fact = records.find((record) => record.type === "fact" && record.id === id);
+      expect(fact?.fingerprint, id).toEqual(expect.any(String));
+    }
+    const summary = records.at(-1)!;
+    expect(summary).toMatchObject({ type: "summary", status: "ok" });
+    expect(summary.estimatedOutputTokens as number).toBeLessThanOrEqual(3500);
+  });
+
+  it("counts source-backed nodes in returnedNodes, not only fact records", () => {
+    const records = capture(() => runGraphScope(task, fpRoot, fpDeps, {}));
+    const sourced = sourcedIds(records);
+    const factIds = records.filter((record) => record.type === "fact").map((record) => record.id as string);
+    expect(sourced.length).toBeGreaterThan(0);
+    expect(records.at(-1)!.returnedNodes).toBe(new Set([...sourced, ...factIds]).size);
+  });
+
+  it.each(["minimal", "standard", "source"] as const)(
+    "adds fingerprints at %s detail only when --fingerprint is set",
+    (detail) => {
+      const on = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail, fingerprint: true }));
+      const off = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail }));
+      const onFacts = on.filter((record) => record.type === "fact");
+      expect(onFacts.length).toBeGreaterThan(0);
+      for (const fact of onFacts) expect(fact.fingerprint).toEqual(expect.any(String));
+      for (const fact of off.filter((record) => record.type === "fact")) expect(fact).not.toHaveProperty("fingerprint");
+    },
+  );
+
+  it.each(["minimal", "standard"] as const)(
+    "keeps fingerprints at %s detail when flows alone would fill the budget",
+    (detail) => {
+      const off = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail, maxOutputTokens: 1500 }));
+      expect(off.filter((record) => record.type === "fact")).toHaveLength(0);
+      const on = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail, maxOutputTokens: 1500, fingerprint: true }));
+      const facts = on.filter((record) => record.type === "fact");
+      expect(facts.length).toBeGreaterThan(0);
+      for (const fact of facts) expect(fact.fingerprint).toEqual(expect.any(String));
+      // Flows keep their bounded share.
+      expect(on.some((record) => record.type === "flow")).toBe(true);
+      expect(on.at(-1)!.estimatedOutputTokens as number).toBeLessThanOrEqual(1500);
+    },
+  );
+
+  it("gives a flow endpoint returned as source a fingerprint even when it is not a ranked candidate", () => {
+    const records = capture(() => runGraphScope(task, fpRoot, fpDeps, {
+      fingerprint: true, maxNodes: 1, maxOutputTokens: 3500,
+    }));
+    const sourced = sourcedIds(records);
+    expect(sourced.length).toBeGreaterThan(0);
+    const facts = records.filter((record) => record.type === "fact");
+    for (const id of sourced) {
+      expect(facts.find((fact) => fact.id === id)?.fingerprint, id).toEqual(expect.any(String));
+    }
+    expect(facts.some((fact) => fact.score === 0)).toBe(true);
+  });
+
+  it.each(["minimal", "standard"] as const)(
+    "reports partial with a warning, not no-match, when no fingerprint fits at %s detail",
+    (detail) => {
+      const records = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail, maxOutputTokens: 800, fingerprint: true }));
+      const summary = records.at(-1)!;
+      expect(summary.status).toBe("partial");
+      expect(summary.warnings).toContainEqual(expect.stringMatching(/^Fingerprints omitted: \d+ fact\(s\)/));
+      expect(summary.estimatedOutputTokens as number).toBeLessThanOrEqual(800);
+      const off = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail, maxOutputTokens: 800 }));
+      expect(off.at(-1)!.warnings).not.toContainEqual(expect.stringMatching(/^Fingerprints omitted/));
+    },
+  );
+
+  it("never returns source without its fingerprint, or no fingerprints without saying so", () => {
+    for (const detail of ["minimal", "standard", "source"] as const) {
+      for (const maxOutputTokens of [1000, 1500, 2000, 3500, 6000]) {
+        const records = capture(() => runGraphScope(task, fpRoot, fpDeps, { detail, maxOutputTokens, fingerprint: true }));
+        const facts = records.filter((record) => record.type === "fact");
+        for (const id of sourcedIds(records)) {
+          expect(facts.find((fact) => fact.id === id)?.fingerprint, `${detail} ${maxOutputTokens} ${id}`)
+            .toEqual(expect.any(String));
+        }
+        const summary = records.at(-1)!;
+        expect(summary.estimatedOutputTokens as number).toBeLessThanOrEqual(maxOutputTokens);
+        if (!facts.some((fact) => typeof fact.fingerprint === "string")) {
+          expect(summary.status, `${detail} ${maxOutputTokens}`).toBe("partial");
+        }
+      }
+    }
+  });
+});
