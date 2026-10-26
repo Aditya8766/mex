@@ -73,7 +73,12 @@ function simulatedAgent(root: string, options: { badOnce?: string[] } = {}) {
       for (const file of walkMarkdown(join(root, ".mex")).filter((path) => shared.some((name) => path.replaceAll("\\", "/").endsWith(`.mex/${name}`)))) {
         const text = readFileSync(file, "utf8");
         const filled = text.replaceAll("[Project Name]", "fixture").replaceAll("[YYYY-MM-DD]", "2026-10-23");
-        if (filled !== text) writeFileSync(file, filled + "\nAuthored project guidance from source inspection.\n");
+        if (filled !== text) {
+          // Project knowledge goes in the project sections, not after MEX-managed boilerplate.
+          const slot = /^## (?:What This Is|Current (?:Project|Operational) State)[^\n]*\r?\n/mu.exec(filled);
+          const at = slot ? slot.index + slot[0].length : filled.length;
+          writeFileSync(file, filled.slice(0, at) + "\nAuthored project guidance from source inspection.\n" + filled.slice(at));
+        }
       }
       write(".mex/local/setup-ops/shared.json", [fact("setup_shared_entry", "context/architecture.md", "Inputs are trimmed by parsealpha", [{ file: "src/alpha/parse.ts", symbol: "parsealpha" }])]);
     } else if (prompt.startsWith("You are writing the MEX knowledge for one subsystem")) {

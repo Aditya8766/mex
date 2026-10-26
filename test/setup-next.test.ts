@@ -64,7 +64,12 @@ function fillPlaceholders(root: string): void {
   for (const file of walkMarkdown(join(root, ".mex"))) {
     const text = readFileSync(file, "utf8");
     const filled = text.replaceAll("[Project Name]", "fixture").replaceAll("[YYYY-MM-DD]", "2026-10-24");
-    if (filled !== text) writeFileSync(file, filled + "\nAuthored project guidance from source inspection.\n");
+    if (filled !== text) {
+      // Project knowledge goes in the project sections, not after MEX-managed boilerplate.
+      const slot = /^## (?:What This Is|Current (?:Project|Operational) State)[^\n]*\r?\n/mu.exec(filled);
+      const at = slot ? slot.index + slot[0].length : filled.length;
+      writeFileSync(file, filled.slice(0, at) + "\nAuthored project guidance from source inspection.\n" + filled.slice(at));
+    }
   }
 }
 
@@ -316,7 +321,8 @@ describe("mex setup next on a real graph", () => {
     doTask(root, task);
     result = await next(root, {});
     expect(result.status).toBe("complete");
-    expect(result.output).toContain("MEX setup is complete.");
+    // The fixture only fills the template slots, so setup finishes with the thin-knowledge warning.
+    expect(result.output).toContain("Warning: Population finished without project patterns");
     expect(inspectSetupStatus(root).ready).toBe(true);
   }, 300_000);
 
