@@ -1,3 +1,4 @@
+import { withSetupLock } from "./setup-lock.js";
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { isCliAvailable } from "../cli-tools.js";
@@ -248,7 +249,22 @@ export async function runHeadlessSetup(
   options: HeadlessSetupOptions,
 ): Promise<HeadlessSetupResult> {
   const projectRoot = resolve(options.projectRoot);
-  cleanupStaleSetupPrompts(projectRoot);
+  const mexDir = resolve(projectRoot, ".mex");
+  throwIfSetupAborted(options.signal);
+  if (resolveSetupMode(mexDir, options.mode) === "code-repo" && !existsSync(resolve(projectRoot, ".git"))) {
+    throw new SetupError("No Git repository found. Run `git init` first, then rerun setup.");
+  }
+  // One setup per checkout at a time (#310), taken before anything changes.
+  return withSetupLock(mexDir, async () => {
+    cleanupStaleSetupPrompts(projectRoot);
+    return runLockedSetup(options);
+  });
+}
+
+async function runLockedSetup(
+  options: HeadlessSetupOptions,
+): Promise<HeadlessSetupResult> {
+  const projectRoot = resolve(options.projectRoot);
   const mexDir = resolve(projectRoot, ".mex");
   const mode = resolveSetupMode(mexDir, options.mode);
   const templatesDir = setupTemplatesDirectory();
