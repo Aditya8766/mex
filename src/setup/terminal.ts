@@ -22,6 +22,9 @@ import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup } from "./unfinished.js";
 import { waitForTerminalReturn } from "./terminal-return.js";
 
 const CONTINUE = "Run `mex setup` to continue. Existing authored files are preserved.";
+const AGENT_CONTINUE = "\nYou are the population agent. Follow the prompt below in this session.\n"
+  + "When done, run `mex setup` again to finalize. Existing authored files are preserved.\n"
+  + "Do not commit until setup reports complete (`mex setup` exits with code 0).";
 
 /** The terminal owns presentation and interaction; all writes use the shared setup engine. */
 export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupRunResult> {
@@ -32,7 +35,8 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   if (options.dryRun) return previewSetup(projectRoot, mode, selectedTools, options.tools !== undefined);
   // Before the tool picker: a choice the engine would then refuse is wasted (#287).
   requireSetupGitRepository(projectRoot, mode);
-  const interactive = Boolean(stdin.isTTY && stdout.isTTY && !options.yes && !process.env.CI && process.env.TERM !== "dumb");
+  const hasTerminal = Boolean(stdin.isTTY && stdout.isTTY);
+  const interactive = hasTerminal && !options.yes && !process.env.CI && process.env.TERM !== "dumb";
   const abort = new AbortController();
   let cancelCode = 130;
   let cancellationDetail = "";
@@ -54,7 +58,8 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
     if (!interactive) {
       console.log(`MEX setup · ${basename(projectRoot)} · ${mode}`);
       const unfinished = describeUnfinishedSetup(projectRoot);
-      if (unfinished) console.log(unfinished.line);
+      if (unfinished) console.log(hasTerminal ? unfinished.line
+        : `MEX setup ${unfinished.done}/${unfinished.total}, not finished. To continue, run \`mex setup next --start\` in this session and do what it prints.`);
       let lastGraphPhase = "";
       let lastGraphLogAt = 0;
       const result = await runHeadlessSetup({
@@ -74,8 +79,17 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
       for (const note of result.anchorNotes) console.log(`Action needed: ${note}`);
       if (!result.ready) {
         const handoff = result.prompt === SETUP_HANDOFF_PROMPT;
-        console.log(`\nSetup paused: scaffold population is still required.\n${handoff ? result.message : CONTINUE}`);
-        if (result.prompt) console.log(`\nPopulation prompt${handoff ? " (paste it into your agent)" : ""}:\n\n${result.prompt}`);
+        console.log("\nSetup paused: scaffold population is still required.");
+        if (hasTerminal) console.log(handoff ? result.message : CONTINUE);
+        else if (handoff) console.log("You are the population agent. Run `mex setup next --start` in this session and do exactly what it prints.\n"
+          + "Repeat until it prints that setup is complete. Existing authored files are preserved.\n"
+          + "Do not commit until setup reports complete.");
+        else {
+          console.log(result.message);
+          console.log(result.prompt ? AGENT_CONTINUE
+            : "Run `mex setup` again to continue. Existing authored files are preserved.\nDo not commit until setup reports complete (`mex setup` exits with code 0).");
+        }
+        if (result.prompt) console.log(`\nPopulation prompt${handoff && hasTerminal ? " (paste it into your agent)" : ""}:\n\n${result.prompt}`);
         return { outcome: "paused", exitCode: 2, message: "Scaffold population is still required." };
       }
       console.log(result.message);
