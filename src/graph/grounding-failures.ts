@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { relative, resolve } from "node:path";
-import { extractGroundings, findMexAnchors } from "../markdown.js";
+import YAML from "yaml";
+import { extractFrontmatter, extractGroundings, findMexAnchors } from "../markdown.js";
 
 /** A grounding held by a block-level Wiki entity (`<!-- mex:entity ... -->`). */
 export interface BlockEntityGrounding {
@@ -17,6 +18,43 @@ export interface BlockEntityGrounding {
 export interface GroundingDocumentReader {
   blockGroundings(content: string): readonly BlockEntityGrounding[];
   failureEntities(content: string): (node: string) => string | null;
+}
+
+function nodesOfEntries(value: unknown, into: Set<string>): void {
+  if (!Array.isArray(value)) return;
+  for (const entry of value) {
+    const node = entry !== null && typeof entry === "object" ? (entry as { node?: unknown }).node : undefined;
+    if (typeof node === "string" && node.length > 0) into.add(node);
+  }
+}
+
+/**
+ * Every node a committed file names in a grounding, however complete the
+ * entry is. The readers above return nothing for a store that holds an entry
+ * written as a node id alone, but a reference that was committed that way is
+ * still recorded knowledge: it must read as committed, so a node that later
+ * disappears is drift, never a mistake to drop. Reads the frontmatter
+ * `grounds_to` and `mex.grounds_to` stores and the metadata of block entities.
+ */
+function committedNodeIds(text: string): Set<string> {
+  const found = new Set<string>();
+  try {
+    const frontmatter = extractFrontmatter(text) as { grounds_to?: unknown; mex?: { grounds_to?: unknown } } | null;
+    if (frontmatter !== null && typeof frontmatter === "object") {
+      nodesOfEntries(frontmatter.grounds_to, found);
+      if (frontmatter.mex !== null && typeof frontmatter.mex === "object") nodesOfEntries(frontmatter.mex.grounds_to, found);
+    }
+  } catch { /* an unreadable frontmatter names nothing */ }
+  for (const block of text.matchAll(/<!--\s*mex:entity\b([\s\S]*?)-->/gu)) {
+    try {
+      const metadata = YAML.parse(block[1] ?? "") as { grounds_to?: unknown; groundsTo?: unknown } | null;
+      if (metadata !== null && typeof metadata === "object") {
+        nodesOfEntries(metadata.grounds_to, found);
+        nodesOfEntries(metadata.groundsTo, found);
+      }
+    } catch { /* a block that does not parse names nothing */ }
+  }
+  return found;
 }
 
 /**
@@ -67,6 +105,7 @@ export function committedReferenceLookup(
         for (const grounding of extractGroundings(shown.stdout)) found.add(grounding.node);
         for (const anchor of findMexAnchors(shown.stdout)) found.add(anchor.nodeId);
         for (const { grounding } of reader?.blockGroundings(shown.stdout) ?? []) found.add(grounding.node);
+        for (const node of committedNodeIds(shown.stdout)) found.add(node);
       } catch { return "unknown"; }
       return found;
     }

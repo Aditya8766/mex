@@ -163,6 +163,16 @@ async function waitForSubscription(harness: ReturnType<typeof setupHarness>, tim
 }
 
 describe("Hub setup wizard", () => {
+  it("says how far an unfinished setup got and the one line that continues it", async () => {
+    const message = "MEX setup 3/9, not finished. To continue, run `mex setup next --start` in your agent's chat and do what it prints.";
+    const harness = setupHarness({ hasScaffold: true, stage: "needs_population", unfinished: { done: 3, total: 9, message } }, {
+      status: "paused", stage: "needs_population", prompt: "Set up MEX for this project. Run `mex setup next --start` first.", message,
+    });
+    renderSetup(harness.api);
+    const notice = await screen.findByText("Setup 3/9, not finished");
+    expect(notice.closest("p")).toHaveTextContent("run `mex setup next --start` in your agent's chat");
+  });
+
   it("shows integration pointers as advisory guidance without turning completion into failure", async () => {
     const harness = setupHarness({ stage: "ready", ready: true, hasScaffold: true, populated: true }, {
       stage: "ready", ready: true, status: "succeeded", anchorNotes: ["Add .mex/ROUTER.md to your existing .cursorrules."],

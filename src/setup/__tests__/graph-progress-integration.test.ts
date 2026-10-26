@@ -81,7 +81,9 @@ describe("real setup graph progress", () => {
     expect(JSON.stringify(updates)).not.toContain(root);
     expect(JSON.stringify(updates)).not.toContain("private-calculation.ts");
     expect(existsSync(join(root, ".mex/graph.db"))).toBe(true);
-    expect(existsSync(join(root, ".mex/wiki.db"))).toBe(false);
+    // A paused setup keeps a provisional Wiki index over the unmigrated scaffold, so the Wiki
+    // reads as valid rather than `migration_required` (#268); finalize migrates and rebuilds it.
+    expect(existsSync(join(root, ".mex/wiki.db"))).toBe(true);
     expect(readdirSync(join(root, ".mex")).filter(name => name.includes("candidate") || name.endsWith(".lock"))).toEqual([]);
     expect(() => execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, stdio: "ignore" })).toThrow();
   });
