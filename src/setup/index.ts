@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { globIterateSync } from "glob";
+import { Glob, Ignore } from "glob";
+import { GRAPH_CORPUS_IGNORE_GLOBS, readConfiguredGraphIgnoreGlobs } from "../graph/corpus-policy.js";
 import chalk from "chalk";
 import {
   findConfig,
@@ -52,7 +53,8 @@ const SOURCE_EXTENSIONS = [
   "*.py", "*.js", "*.ts", "*.tsx", "*.jsx", "*.go", "*.rs", "*.java",
   "*.kt", "*.swift", "*.rb", "*.php", "*.c", "*.cpp", "*.cs", "*.ex",
   "*.exs", "*.zig", "*.lua", "*.dart", "*.scala", "*.clj", "*.erl",
-  "*.hs", "*.ml", "*.vue", "*.svelte",
+  "*.hs", "*.ml", "*.vue", "*.svelte", "*.mjs", "*.cjs", "*.mts", "*.cts",
+  "*.kts", "*.h", "*.cc", "*.hpp",
 ];
 
 const TOOL_CONFIGS: Record<string, { src: string; dest: string }> = {
@@ -236,22 +238,50 @@ export function isScaffoldPopulated(mexDir: string): boolean {
 export function detectProjectState(projectRoot: string, mexDir: string): ProjectState {
   const scaffoldPopulated = isScaffoldPopulated(mexDir);
 
-  // Find a source file at any depth, stopping after the first match. Without
-  // a depth cap, installed dependencies must be ignored explicitly: Python
-  // packages sit under site-packages/dist-packages in any virtual environment,
-  // whatever it is named (#288).
-  const patterns = SOURCE_EXTENSIONS.map(
-    (ext) => `**/${ext}`
-  );
-  const sourceFiles = globIterateSync(patterns, {
-    cwd: projectRoot,
-    ignore: [
-      "**/node_modules/**", "**/.mex/**", "**/vendor/**", "**/.git/**",
-      "**/site-packages/**", "**/dist-packages/**",
-    ],
-    nodir: true,
-  });
-  const hasSourceFiles = !sourceFiles.next().done;
+  // Glob's synchronous iterator completes its filesystem walk before yielding.
+  // Walk directories ourselves so the first source match really stops I/O.
+  const options = new Glob(SOURCE_EXTENSIONS.map(ext => `**/${ext}`), { cwd: projectRoot });
+  const sources = new Ignore(options.pattern, options);
+  // Reuse graph policy, including repository configuration. Setup recognizes
+  // additional languages and excludes installed dependencies/build artifacts;
+  // unlike subsystem ranking, authored tests and examples still count as code.
+  // Default graph ignores are directory names; use the same cheap name check
+  // as graph read discovery, reserving glob matching for configured patterns.
+  const excludedFolders = new Set([
+    ...GRAPH_CORPUS_IGNORE_GLOBS.map(pattern => pattern.slice(3, -3)),
+    "vendor", "vendored", "third_party", "third-party", "thirdparty", "external", "bower_components",
+    "target", "__pycache__", "venv", "generated", "__generated__", "gen", "codegen",
+    "site-packages", "dist-packages",
+  ]);
+  const configuredIgnores = readConfiguredGraphIgnoreGlobs(projectRoot);
+  const ignored = configuredIgnores.length ? new Ignore(configuredIgnores, options) : null;
+  const pending = [projectRoot];
+  let hasSourceFiles = false;
+  search: while (pending.length > 0) {
+    const directory = pending.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      // Like glob, skip directories removed or unreadable during discovery.
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      if (entry.isDirectory() && excludedFolders.has(options.nocase ? entry.name.toLowerCase() : entry.name)) continue;
+      const path = resolve(directory, entry.name);
+      if (ignored) {
+        const candidate = options.scurry.cwd.resolve(path);
+        if (ignored.ignored(candidate) || (entry.isDirectory() && ignored.childrenIgnored(candidate))) continue;
+      }
+      if (entry.isDirectory()) {
+        pending.push(path);
+      } else if (entry.isFile() && sources.ignored(options.scurry.cwd.resolve(path))) {
+        hasSourceFiles = true;
+        break search;
+      }
+    }
+  }
 
   if (scaffoldPopulated && hasSourceFiles) {
     return "partial";
