@@ -61,6 +61,7 @@ import {
   scanSetupCodebase,
   throwIfSetupAborted,
 } from "./phases.js";
+import { stampPlacedTemplates } from "./wiki-stamp.js";
 
 export const SETUP_PROGRESS_STEPS = [
   "detect",
@@ -287,6 +288,10 @@ async function runLockedSetup(
 
   report("scaffold");
   createSetupScaffold({ projectRoot, mode, signal: options.signal });
+  if (mode === "code-repo") {
+    await stampPlacedTemplates(projectRoot, mexDir, templatesDir, (message) => options.onMessage?.(message));
+    throwIfSetupAborted(options.signal);
+  }
 
   report("tools");
   const requestedTools = uniqueTools(options.tools ?? loadConfiguredAiTools(mexDir));
