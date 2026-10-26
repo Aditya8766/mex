@@ -258,15 +258,18 @@ describe("managed agent asset installation", () => {
     expect(readFileSync(skill, "utf8").endsWith("user note\r\n")).toBe(true);
   });
 
-  it("writes the same LF payload and ownership hashes from LF and CRLF packages", () => {
-    const lf = createFixture();
-    const crlf = createFixture();
-    toCrlf(crlf.source);
-    sync(lf, ["claude"]);
-    sync(crlf, ["claude"]);
-    expect(snapshotTree(join(crlf.project, ".claude/skills")))
-      .toEqual(snapshotTree(join(lf.project, ".claude/skills")));
-    expect(read(crlf.project, ".claude/skills/mex-inbox/SKILL.md")).toBe("inbox v1\n");
+  it("copies a CRLF package exactly and accepts an LF checkout of it", () => {
+    const fixture = createFixture();
+    toCrlf(fixture.source);
+    sync(fixture, ["claude"]);
+    const directory = join(fixture.project, ".claude/skills/mex-inbox");
+    expect(read(fixture.project, ".claude/skills/mex-inbox/SKILL.md")).toBe("inbox v1\r\n");
+    for (const path of ["SKILL.md", "references/workflow.md"].map((name) => join(directory, name))) {
+      writeFileSync(path, readFileSync(path, "utf8").replace(/\r\n/gu, "\n"));
+    }
+    const before = snapshotTree(directory);
+    expect(actionFor(sync(fixture, ["claude"]), "mex-inbox").action).toBe("noop");
+    expect(snapshotTree(directory)).toEqual(before);
   });
 
   it.each(["lf", "crlf", "mixed"] as const)(

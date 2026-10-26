@@ -419,9 +419,7 @@ function readPackagedDirectory(
     if (!entryStat.isFile()) {
       throw invalidPackagedSkill(skill, `Packaged skills may contain only regular files: ${relativePath}`);
     }
-    // Package sources can themselves be a Windows Git checkout. Record and
-    // write one LF text representation regardless of the package's checkout.
-    const bytes = withLineFeeds(readRegularFileNoFollow(absolutePath));
+    const bytes = readRegularFileNoFollow(absolutePath);
     files.push({
       relativePath,
       bytes,
