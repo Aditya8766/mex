@@ -34,7 +34,7 @@ export async function assessSetupHealth(projectRoot: string): Promise<SetupHealt
   if (!status.hasScaffold) missing.push("The .mex/ scaffold has not been created.");
   else if (!status.populated) missing.push("Scaffold population is not finished.");
   const unfinished = describeUnfinishedSetup(root);
-  if (unfinished !== null) missing.push(unfinished.line);
+  if (unfinished !== null) missing.push(`MEX setup ${unfinished.done}/${unfinished.total}, not finished.`);
 
   // An agent-memory workspace has no code graph to describe.
   let graph: string | null = null;
