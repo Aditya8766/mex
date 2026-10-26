@@ -338,7 +338,10 @@ async function loadPty(): Promise<{ pty: PtyModule | null; skipReason?: string }
   try {
     const pty = createRequire(import.meta.url)("node-pty") as PtyModule;
     // Loading the JS package alone does not prove the native backend works.
-    const child = pty.spawn(process.execPath, ["-e", "console.log('CONPTY_TTY', Boolean(process.stdin.isTTY && process.stdout.isTTY))"], {
+    // ConPTY repaints output (a space can become a cursor move) and can report
+    // exit before delivering it, so the probe prints one plain token, stays
+    // alive, and the verdict comes from its output, not its exit.
+    const child = pty.spawn(process.execPath, ["-e", "process.stdout.write(process.stdin.isTTY && process.stdout.isTTY ? 'CONPTY_TTY_YES\\n' : 'CONPTY_TTY_NO\\n'); setTimeout(() => {}, 10000)"], {
       name: "xterm-256color", cols: 80, rows: 24, cwd: repo, env: process.env, useConpty: true,
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -347,11 +350,12 @@ async function loadPty(): Promise<{ pty: PtyModule | null; skipReason?: string }
         let output = "";
         timer = setTimeout(() => reject(new Error("ConPTY startup probe timed out")), 5000);
         child.on("error", reject);
-        child.onData(data => { output = (output + plain(data)).slice(-1000); });
-        child.onExit(({ exitCode }) => {
-          if (exitCode === 0 && output.includes("CONPTY_TTY true")) resolve();
-          else reject(new Error(`ConPTY startup probe exited ${exitCode} without a real TTY`));
+        child.onData(data => {
+          output = (output + plain(data)).slice(-1000);
+          if (output.includes("CONPTY_TTY_YES")) resolve();
+          else if (output.includes("CONPTY_TTY_NO")) reject(new Error("ConPTY startup probe ran without a real TTY"));
         });
+        child.onExit(({ exitCode }) => reject(new Error(`ConPTY startup probe exited ${exitCode} before reporting a TTY`)));
       });
     } finally {
       clearTimeout(timer);
