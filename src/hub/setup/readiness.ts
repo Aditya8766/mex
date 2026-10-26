@@ -40,7 +40,6 @@ export async function projectSetupStatus(projectRoot: string): Promise<SetupStat
   const health = ready || (status.ready && status.mode === "agent-memory")
     ? await import("../../setup/health.js").then(({ assessSetupHealth }) => assessSetupHealth(projectRoot))
     : null;
-  const needsRepair = health !== null && !health.healthy && !health.needsCommitOnly;
   return {
     mode: status.mode,
     projectName: status.projectName,
@@ -50,10 +49,10 @@ export async function projectSetupStatus(projectRoot: string): Promise<SetupStat
     graphReady: status.graphReady,
     wikiReady: status.wikiReady,
     state: status.state,
-    stage: needsRepair ? "needs_finalize" : status.ready ? status.mode === "agent-memory" ? "complete" : ready ? "ready" : "needs_commit" : status.stage,
+    stage: status.ready ? status.mode === "agent-memory" ? "complete" : ready ? "ready" : "needs_commit" : status.stage,
     configuredTools: status.configuredTools,
     tools: [...status.tools],
-    ready: ready && !needsRepair,
+    ready,
     commitCommands: status.mode === "code-repo" && status.ready
       ? setupCommitCheckpointCommands(status.configuredTools)
       : [],

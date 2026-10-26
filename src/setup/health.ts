@@ -116,7 +116,7 @@ async function observeWiki(root: string): Promise<{ missing?: string; note?: str
     const { state } = await wiki.inspectIndex();
     if (state === "fresh" || state === "degraded") return {};
     if (state === "stale") return { note: "The Wiki index is behind the knowledge files. Run `mex wiki rebuild-index` to update it." };
-    if (state === "migration_required") return { missing: "The Wiki index schema is incompatible and needs a rebuild." };
+    if (state === "migration_required") return { missing: "The knowledge files need the Wiki migration." };
     return { missing: state === "missing" ? "The Wiki index has not been built." : "The Wiki index needs a rebuild." };
   } catch {
     return { missing: "The Wiki index could not be inspected and needs a rebuild." };

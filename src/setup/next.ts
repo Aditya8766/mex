@@ -173,11 +173,6 @@ async function step(
     } catch { /* the JSON state is the record */ }
   };
   if (queue.finalized === true) {
-    const { assessSetupHealth } = await import("./health.js");
-    const health = await assessSetupHealth(root);
-    if (!health.healthy && !health.needsCommitOnly) {
-      return blocked(`Setup needs repair:\n${health.missing.map(item => `- ${item}`).join("\n")}\nRun \`mex setup\` to repair the checkout, then run \`mex setup next\` again.`, countSetupUnits(state));
-    }
     syncSetupNotice(root, null);
     return { status: "complete", exitCode: 0, progress: countSetupUnits(state), output: "MEX setup is already complete. There is nothing left to do." };
   }

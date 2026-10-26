@@ -295,13 +295,9 @@ export class HubSetupRunner {
     try {
       if (this.commitService) await this.commitService.verifyRecovery();
       const current = inspectSetupStatus(this.projectRoot);
-      let canFinishExisting = !this.finalizeOnly && request.confirmPopulation === true
+      const canFinishExisting = !this.finalizeOnly && request.confirmPopulation === true
         && current.ready && current.mode === request.mode
         && JSON.stringify(current.configuredTools) === JSON.stringify(request.tools);
-      if (canFinishExisting) {
-        const observed = await projectSetupStatus(this.projectRoot);
-        canFinishExisting = observed.stage === "ready" || observed.stage === "complete" || observed.stage === "needs_commit";
-      }
       const result: HeadlessSetupResult = canFinishExisting ? {
         mode: current.mode,
         stage: current.stage,
