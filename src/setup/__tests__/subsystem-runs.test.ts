@@ -20,6 +20,7 @@ import {
 import { createPlanState, loadPlanState, savePlanState, type SetupPlanState } from "../subsystem-state.js";
 import type { SubsystemPlan } from "../subsystems.js";
 import { populateDuringGraph } from "../concurrent-graph.js";
+import { setupTemplatesDirectory } from "../phases.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -32,7 +33,7 @@ function project(populated = false): string {
   for (const file of SHARED_FILES) {
     const path = join(root, ".mex", file);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, populated ? `# ${file}\n\nFilled.\n` : `# [Project Name]\n\nlast_updated: [YYYY-MM-DD]\n`);
+    writeFileSync(path, populated ? `# ${file}\n\nFilled.\n` : readFileSync(join(setupTemplatesDirectory(), file), "utf8"));
   }
   return root;
 }
