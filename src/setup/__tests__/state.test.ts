@@ -53,7 +53,7 @@ describe("setup state and scaffold ownership", () => {
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, "class App {}\n");
 
-    expect(detectProjectState(root, mex)).toBe("partial");
+    expect(detectProjectState(root, mex)).toBe("populated");
   });
 
   it.each([...new Set([

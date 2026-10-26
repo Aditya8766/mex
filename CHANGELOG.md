@@ -19,6 +19,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Setup audits population for project patterns, code-linked facts and structural links, warning by name when knowledge is thin. Code-fact checks apply only when the graph indexed supported sources. One leftover placeholder in authored knowledge gets one targeted file repair recorded in the existing setup plan, without repopulating the scaffold (#283, #164).
+
 - Setup and `mex skills sync` no longer refuse a managed skill whose files differ from what MEX installed only in line endings. Git checks text files out with CRLF under `core.autocrlf=true`, the Windows default, so a Windows clone of a set-up repository failed setup with "Official MEX agent assets have conflicts". A CRLF checkout of an unmodified skill is now left as it is, updated normally when the package changes, and a real edit is still preserved and reported (#308).
   Ownership hashes recorded from a CRLF package are also recognized in an LF checkout. Only UTF-8 text is compared across line endings; binary files, BOMs, trailing-newline changes, and edits after preview still require exact preservation.
 - Setup pauses when an agent reaches its usage limit, reports the reset time when available, and keeps finished work. Rerun `mex setup` after the limit resets to continue.
@@ -43,6 +45,8 @@ All notable changes to this project will be documented in this file.
 - `MEX_GRAPH_PHASE_TIMINGS=1` no longer appends graph phase timings to a file named `1` in the working directory. `1`, `true`, `yes` or `on` (any case) writes to `.mex/local/graph-phase-timings.jsonl` under the project root, which is checkout-local and git-ignored, also when mex runs from a subdirectory with `--root`; `0`, `false`, `no` or `off` leaves timings off; any other value is still the path to append to, and a relative path now means the same file for the Hub's graph worker as for the command that started it (#291).
 
 ### Compatibility
+
+- Setup’s internal project state `partial` is renamed `populated`, including the private Hub setup status contract. Existing one-paste brief files retain compatibility.
 
 - `GRAPH_INDEX_ORPHAN_CANDIDATE` (warning) and `GRAPH_INDEX_RECOVERY_DATA_PRESENT` (info) are new diagnostic codes in `mex graph status` output; the status value and exit code are unchanged. Graph schemas are unchanged (#205).
 - The bare graph summary adds `operation` (`unchanged`, `refresh` or `rebuild`) and refresh work counts when applicable. A fresh graph reports zero files indexed (#208).

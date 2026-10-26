@@ -55,7 +55,7 @@ export const SetupStatusSchema = z.object({
   populated: z.boolean(),
   graphReady: z.boolean(),
   wikiReady: z.boolean(),
-  state: z.enum(["existing", "fresh", "partial"]),
+  state: z.enum(["existing", "fresh", "populated"]),
   stage: SetupStageSchema,
   configuredTools: z.array(aiTool).max(8),
   tools: z.array(SetupToolStatusSchema).max(8),

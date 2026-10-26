@@ -1,3 +1,4 @@
+import { populationWarning, targetedPlaceholderFile, targetedPlaceholderPrompt } from "./population-audit.js";
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { isCliAvailable } from "../cli-tools.js";
@@ -263,10 +264,15 @@ export async function runHeadlessSetup(
 
   requireSetupGitRepository(projectRoot, mode);
 
-  const singlePaused = readSingleUsagePause(projectRoot);
-  const resumeSingle = singlePaused?.queue?.mode === "single" && singlePaused.shared.reason === "usage_limit";
+  const storedSingle = loadPlanState(projectRoot).state;
+  const singlePaused = readSingleUsagePause(projectRoot) ?? (storedSingle?.queue?.mode === "single"
+    && !storedSingle.queue.finalized && storedSingle.finalizedAt === undefined && storedSingle.shared.state !== "done" ? storedSingle : null);
+  const resumeSingle = singlePaused !== null;
   const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir) && !resumeSingle;
   const state = detectProjectState(projectRoot, mexDir);
+  const repairFile = targetedPlaceholderFile(mexDir, templatesDir, mode);
+  const repairPlan = repairFile === null ? null : loadPlanState(projectRoot).state;
+  const repairAttempted = repairPlan?.placeholderRepair?.file === repairFile && repairPlan.placeholderRepair.attempted;
   report("detect", describeDetectedState(mode, state));
 
   report("scaffold");
@@ -375,7 +381,7 @@ export async function runHeadlessSetup(
   let perSubsystemState: SetupPlanState | null = null;
   let perSubsystemTool: BackgroundAgentTool | undefined;
   let plan: SubsystemPlan | null | undefined;
-  if (!resumeSingle && mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
+  if (repairFile === null && !resumeSingle && mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
     const env = options.perSubsystem?.env ?? process.env;
     const resuming = perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
     if (!scaffoldPopulatedAtStart || resuming) {
@@ -406,7 +412,7 @@ export async function runHeadlessSetup(
     report("graph");
     await buildSetupGraph(projectRoot, { background: true, signal: options.signal, onProgress: options.onGraphProgress });
   }
-  const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan);
+  const prompt = repairFile === null ? await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan) : targetedPlaceholderPrompt(repairFile);
   options.onPopulationPrompt?.(prompt);
   if (perSubsystemState === null) report("population");
 
@@ -497,7 +503,7 @@ export async function runHeadlessSetup(
     coverageNotice = outcome.summary;
     options.onMessage?.(outcome.summary);
     populationFinished = isScaffoldPopulated(mexDir);
-  } else if (!populationFinished && options.confirmPopulation !== true) {
+  } else if (!populationFinished && options.confirmPopulation !== true && !repairAttempted) {
     throwIfSetupAborted(options.signal);
     // The single session applies its own batches with `mex` commands: Claude Code or Codex only.
     let tool: BackgroundAgentTool | undefined;
@@ -505,6 +511,14 @@ export async function runHeadlessSetup(
       const choice = await findAgent(selectedTools, true);
       announce(choice);
       tool = choice?.tool;
+    }
+    const recorded = singlePaused ?? repairPlan ?? createPlanState({ source: "tree", ranking: "size", sourceFiles: 0, target: { min: 0, max: 0 }, candidates: [] });
+    if (options.populate !== undefined || tool !== undefined) {
+      recorded.queue ??= { mode: "single" };
+      recorded.shared.state = "running";
+      recorded.shared.reason = "population_incomplete";
+      if (repairFile !== null) recorded.placeholderRepair = { file: repairFile, attempted: true };
+      savePlanState(projectRoot, recorded);
     }
     const launched = await (options.populate ?? launchHeadlessSetupPopulation)({
       selectedTools,
@@ -521,12 +535,10 @@ export async function runHeadlessSetup(
     populationCompleted = launched.completed;
     throwIfSetupAborted(options.signal);
     if (launched.completed) {
-      if (resumeSingle && singlePaused) {
-        singlePaused.shared.state = "done";
-        delete singlePaused.shared.reason;
-        singlePaused.final.state = "done";
-        savePlanState(projectRoot, singlePaused);
-      }
+      recorded.shared.state = isScaffoldPopulated(mexDir) ? "done" : "pending";
+      delete recorded.shared.reason;
+      recorded.final.state = "done";
+      savePlanState(projectRoot, recorded);
       populationFinished = isScaffoldPopulated(mexDir);
     }
   }
@@ -605,7 +617,10 @@ export async function runHeadlessSetup(
     throwIfSetupAborted(options.signal);
   }
 
+  const auditNotice = !scaffoldPopulatedAtStart || perSubsystemState !== null ? await populationWarning(projectRoot, mexDir, mode) : null;
+  if (auditNotice !== null) options.onMessage?.(auditNotice);
   const groundingNotice = [
+    auditNotice ?? "",
     finalized.dropped.length
       ? `Dropped references: ${finalized.dropped.slice(0, 3).map(f => `${f.file} → ${f.node}`).join("; ")}${finalized.dropped.length > 3 ? `; and ${finalized.dropped.length - 3} more` : ""}.`
       : "",
@@ -630,7 +645,7 @@ export async function runHeadlessSetup(
     message: mode === "code-repo"
       ? "Graph and Wiki are ready. Review and commit the canonical MEX setup."
         + (coverageNotice ? ` ${coverageNotice}` : "") + (groundingNotice ? ` ${groundingNotice}` : "")
-      : "Setup complete.",
+      : `Setup complete.${auditNotice ? ` ${auditNotice}` : ""}`,
   };
 }
 

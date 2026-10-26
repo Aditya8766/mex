@@ -284,7 +284,7 @@ export function detectProjectState(projectRoot: string, mexDir: string): Project
   }
 
   if (scaffoldPopulated && hasSourceFiles) {
-    return "partial";
+    return "populated";
   } else if (hasSourceFiles) {
     return "existing";
   } else {
