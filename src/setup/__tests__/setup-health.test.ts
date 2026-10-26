@@ -11,6 +11,9 @@ import { assessSetupHealth } from "../health.js";
 import { SCAFFOLD_FILES } from "../phases.js";
 import { runSetupNext } from "../next.js";
 import { createPlanState, savePlanState } from "../subsystem-state.js";
+import { resolveDefaultEntry } from "../entry.js";
+import { projectSetupStatus } from "../../hub/setup/readiness.js";
+import { openSqlite } from "../../graph/db/sqlite.js";
 
 // #284: rerunning setup on a set-up checkout reports its status instead of
 // redoing work, and otherwise names what is missing before finishing it.
@@ -114,6 +117,23 @@ describe("status-first setup rerun (#284)", () => {
     const result = await runSetupNext({ projectRoot: root });
     expect(result.status).toBe("task");
     expect(result.output).not.toContain("MEX is already set up here");
+    const terminal = await rerun(root);
+    expect(terminal.result.outcome).toBe("complete");
+    expect(terminal.output).not.toContain("MEX is already set up here");
+  });
+
+  it("does not let a finalized queue hide a deleted required file", async () => {
+    const root = fixture();
+    await runHeadlessSetup({ projectRoot: root, mode: "agent-memory", tools: [], populate: populate(root) });
+    const plan = createPlanState({ source: "tree", ranking: "size", sourceFiles: 0, target: { min: 1, max: 1 }, candidates: [] });
+    plan.queue = { mode: "single", finalized: true };
+    plan.shared.state = "done";
+    savePlanState(root, plan);
+    rmSync(join(root, ".mex/context/stack.md"));
+    const result = await runSetupNext({ projectRoot: root });
+    expect(result.status).toBe("blocked");
+    expect(result.output).toContain("Run `mex setup` to repair");
+    expect(result.output).not.toContain("already complete");
   });
 
   it("--force and an explicit new tool still run the full flow", async () => {
@@ -158,6 +178,18 @@ describe("status-first setup rerun (#284)", () => {
     execFileSync("git", ["commit", "-m", "Set up MEX"], { cwd: root, stdio: "ignore" });
     const healthy = await rerun(root);
     expect(healthy.output).toMatch(/MEX is already set up here \(\d+ entities, \d+ facts?, graph current\)\./u);
+    expect(await resolveDefaultEntry(root)).toBe("setup");
+
+    const wikiPath = join(root, ".mex/wiki.db");
+    const db = openSqlite(wikiPath);
+    db.prepare("UPDATE wiki_meta SET value = '999' WHERE key = 'schema_version'").run();
+    db.close();
+    const incompatible = snapshot(root);
+    expect(await assessSetupHealth(root)).toMatchObject({ healthy: false, needsCommitOnly: false });
+    expect(await projectSetupStatus(root)).toMatchObject({ ready: false, stage: "needs_finalize" });
+    expect(snapshot(root)).toEqual(incompatible);
+    expect((await rerun(root)).result).toMatchObject({ outcome: "complete", exitCode: 0 });
+    expect(await assessSetupHealth(root)).toMatchObject({ healthy: true });
 
     writeFileSync(join(root, "src", "index.ts"), "export function ready(): boolean { return false; }\n");
     const drift = await rerun(root);

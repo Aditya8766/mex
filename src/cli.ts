@@ -189,11 +189,6 @@ async function runSetupCommand(options: {
   force?: boolean;
 }): Promise<void> {
   try {
-    if (!options.dryRun) {
-      const { cleanupStaleSetupPrompts } = await import("./agent-prompt.js");
-      const { findSetupProjectRoot } = await import("./setup/entry.js");
-      cleanupStaleSetupPrompts(findSetupProjectRoot());
-    }
     if (options.browser) {
       await runBrowserCommand({ ...options, setup: true });
       return;

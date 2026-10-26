@@ -19,6 +19,14 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); process.exitCode = 0; });
 
 describe("setup entry points", () => {
+  it("leaves prompt cleanup to the setup engine after the status shortcut", async () => {
+    const prompts = await import("../src/agent-prompt.js");
+    const cleanup = vi.spyOn(prompts, "cleanupStaleSetupPrompts");
+    const { program } = await import("../src/cli.js");
+    await program.parseAsync(["setup"], { from: "user" });
+    expect(mocks.setup).toHaveBeenCalledOnce();
+    expect(cleanup).not.toHaveBeenCalled();
+  });
   it("routes `mex setup next` to the one-step command, prints its output and keeps its exit code", async () => {
     mocks.next.mockResolvedValue({ status: "task", exitCode: 0, progress: { done: 1, total: 5 }, output: "MEX setup 1/5: subsystem src/a/" });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);

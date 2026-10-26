@@ -423,6 +423,16 @@ describe("setup run lifecycle", () => {
     expect(SetupRunSchema.parse(runner.snapshot()).transcriptId).toBeUndefined();
   });
 
+  it("repairs an incompatible index instead of using file-presence completion", async () => {
+    mocks.inspect.mockReturnValue({ ...status, ready: true, populated: true, stage: "ready" });
+    mocks.status.mockResolvedValue({ ...status, ready: false, populated: true, stage: "needs_finalize" });
+    mocks.execute.mockResolvedValue(result);
+    const runner = new HubSetupRunner({ projectRoot: "/test" });
+    runner.start({ mode: "code-repo", tools: ["codex"], confirmPopulation: true });
+    await vi.waitFor(() => expect(mocks.execute).toHaveBeenCalledOnce());
+    await runner.shutdown();
+  });
+
   it("keeps completed Agent memory free of commit commands and Hub promotion", async () => {
     mocks.inspect.mockReturnValue({ ...status, mode: "agent-memory", ready: true, populated: true, stage: "ready" });
     mocks.status.mockResolvedValue({ ...status, mode: "agent-memory", ready: false, populated: true, stage: "complete" });
