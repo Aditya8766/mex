@@ -157,6 +157,10 @@ global `mex`.
   placeholders remain, even if an agent CLI is installed. It never waits on an
   interactive session. Test the shipped interactive CLI with the POSIX PTY
   harness and fake agents; the Python harness is skipped on Windows.
+- Population completion also audits patterns, grounded facts and structural
+  links. Demand code facts only when graph coverage includes parsed sources.
+  A single authored-file placeholder gets one targeted pass, recorded in the
+  existing setup plan; an unresolved pass needs manual repair rather than a loop.
 - Drift staleness uses committed Git history. Correct uncommitted content can
   remain stale until the canonical scaffold is committed.
 - An unrelated incomplete parse does not invalidate exact Wiki grounding from
