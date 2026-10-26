@@ -1,3 +1,4 @@
+import { withSetupLock } from "./setup-lock.js";
 /**
  * `mex setup next`: the one-paste setup for agents MEX cannot launch itself.
  *
@@ -115,7 +116,6 @@ function folder(path: string, remainder?: boolean): string {
 /** Run one step of the one-paste setup. Never throws for an expected problem: the output says what to do. */
 export async function runSetupNext(options: SetupNextOptions): Promise<SetupNextResult> {
   const root = resolve(options.projectRoot);
-  cleanupStaleSetupPrompts(root);
   const mexDir = resolve(root, ".mex");
   const progress = (line: string) => { try { options.onProgress?.(line); } catch { /* observation only */ } };
   let mode: SetupMode;
@@ -124,6 +124,17 @@ export async function runSetupNext(options: SetupNextOptions): Promise<SetupNext
   if (mode === "code-repo" && !existsSync(resolve(root, ".git"))) {
     return blocked("No Git repository found. Run `git init` first, then run `mex setup next` again.");
   }
+  try {
+    return await withSetupLock(mexDir, () => runSetupNextLocked(options, root, mexDir, mode, progress));
+  } catch (error) {
+    return blocked(error instanceof SetupError ? error.userMessage : error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function runSetupNextLocked(
+  options: SetupNextOptions, root: string, mexDir: string, mode: SetupMode, progress: (line: string) => void,
+): Promise<SetupNextResult> {
+  cleanupStaleSetupPrompts(root);
   mkdirSync(resolve(root, ".mex", "local"), { recursive: true });
   const release = acquireLock(root, options.now ?? Date.now);
   if (release === null) {

@@ -790,6 +790,7 @@ describe("no unscoped scaffold writes", () => {
       "src/setup/subsystem-runs.ts": "writes the checkout-local plan progress view and marks applied batch files under .mex/local; never Wiki Markdown",
       "src/setup/subsystem-state.ts": "atomically saves the checkout-local setup plan state under .mex/local and sets a corrupt one aside",
       "src/setup/unfinished.ts": "adds or removes only its own marker-bounded setup notice in root instruction files that already point to MEX, never .mex/",
+      "src/setup/setup-lock.ts": "creates and removes only its own checkout-local .mex/local/setup.lock, exclusively and without following links",
       "src/team/artifacts/filesystem.ts": "atomically publishes bounded team-owned canonical artifacts",
       "src/team/local-state/receipt-signer.ts": "atomically provisions the bounded local-only C preview signing credential",
       "src/team/relay/cli/local-preview.ts": "removes only the exact contained checkout-local Relay receipt after successful apply",
