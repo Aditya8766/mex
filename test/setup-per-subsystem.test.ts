@@ -171,7 +171,7 @@ describe("per-subsystem setup on a real graph", () => {
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain("COVERAGE — cover the whole project");
     expect(subsystemLaunch.prompts).toEqual([]);
-    expect(existsSync(join(root, SETUP_PLAN_STATE_FILE))).toBe(false);
+    expect(loadPlanState(root).state).toMatchObject({ queue: { mode: "single" }, shared: { state: "pending" }, subsystems: [] });
   }, 240_000);
 
   it("runs per-subsystem sessions on a small repository when the only agent has file tools, and says which agent runs", async () => {

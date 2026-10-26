@@ -257,7 +257,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
             });
             if (!result.ready) {
               outcome = { outcome: populationFailure ? "failed" : "paused", exitCode: populationFailure ? 1 : 2,
-                message: `${populationFailure ? `Setup failed: ${populationFailure}` : `Setup paused at population. ${result.message}`} ${describeUnfinishedSetup(projectRoot)?.line ?? CONTINUE}` };
+                message: `${populationFailure ? `Setup failed: ${populationFailure}` : `Setup paused at population. ${result.message}`} ${describeUnfinishedSetup(projectRoot)?.line ? `${describeUnfinishedSetup(projectRoot)!.line} ` : ""}${CONTINUE}` };
               continue;
             }
             validated = result;
@@ -281,7 +281,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
           const { projectSetupStatus } = await import("../hub/setup/readiness.js");
           const finished = await projectSetupStatus(projectRoot);
           const message = finished.mode === "agent-memory" || finished.ready
-            ? `Setup complete.${validated.coverageNotice ? ` ${validated.coverageNotice}` : ""}${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Hub stopped. Run \`mex hub\` to open Hub again.`
+            ? `Setup complete. Hub stopped.${validated.coverageNotice ? ` ${validated.coverageNotice}` : ""}${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Run \`mex hub\` to open Hub again.`
             : `${validated.message} Hub stopped. Run \`mex setup --browser\` to reopen the completion page.`;
           outcome = { outcome: "complete", exitCode: 0, message };
         } catch (error) {

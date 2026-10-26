@@ -19,7 +19,6 @@ import { describeGroundingDrift } from "../graph/grounding-failures.js";
 import { BACKGROUND_AGENT_CLIS, COMMAND_CAPABLE_AGENTS, isBackgroundAgentTool, type BackgroundAgentTool } from "../agent-command.js";
 import {
   HeadlessPopulationError,
-  readSingleUsagePause,
   describeSetupAgentChoice,
   findAvailableSetupAgent,
   launchHeadlessSetupPopulation,
@@ -31,7 +30,7 @@ import {
 } from "./headless-population.js";
 import type { SetupBatchApplier } from "./subsystem-apply.js";
 import { populateDuringGraph } from "./concurrent-graph.js";
-import { createPlanState, hasUnfinishedPlanState, loadPlanState, savePlanState, type SetupPlanState } from "./subsystem-state.js";
+import { createPlanState, hasUnfinishedPlanState, loadPlanState, readSetupPlanSnapshot, savePlanState, type SetupPlanState } from "./subsystem-state.js";
 import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup, syncSetupNotice } from "./unfinished.js";
 import {
   SubsystemPhaseStoppedError,
@@ -264,14 +263,14 @@ export async function runHeadlessSetup(
 
   requireSetupGitRepository(projectRoot, mode);
 
-  const storedSingle = loadPlanState(projectRoot).state;
-  const singlePaused = readSingleUsagePause(projectRoot) ?? (storedSingle?.queue?.mode === "single"
+  const storedSingle = readSetupPlanSnapshot(projectRoot);
+  const singlePaused = (storedSingle?.queue?.mode === "single"
     && !storedSingle.queue.finalized && storedSingle.finalizedAt === undefined && storedSingle.shared.state !== "done" ? storedSingle : null);
   const resumeSingle = singlePaused !== null;
   const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir) && !resumeSingle;
   const state = detectProjectState(projectRoot, mexDir);
   const repairFile = targetedPlaceholderFile(mexDir, templatesDir, mode);
-  const repairPlan = repairFile === null ? null : loadPlanState(projectRoot).state;
+  const repairPlan = repairFile === null ? null : storedSingle;
   const repairAttempted = repairPlan?.placeholderRepair?.file === repairFile && repairPlan.placeholderRepair.attempted;
   report("detect", describeDetectedState(mode, state));
 
