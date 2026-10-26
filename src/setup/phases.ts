@@ -71,7 +71,7 @@ export function verifyExistingSetupConfig(mexDir: string): void {
   }
 }
 
-export type ProjectState = "existing" | "fresh" | "populated";
+export type ProjectState = "existing" | "fresh" | "partial";
 
 export type SetupMode = "code-repo" | "agent-memory";
 

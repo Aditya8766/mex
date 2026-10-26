@@ -64,7 +64,7 @@ function fillPlaceholders(root: string): void {
   for (const file of walkMarkdown(join(root, ".mex"))) {
     const text = readFileSync(file, "utf8");
     const filled = text.replaceAll("[Project Name]", "fixture").replaceAll("[YYYY-MM-DD]", "2026-10-24");
-    if (filled !== text) writeFileSync(file, filled);
+    if (filled !== text) writeFileSync(file, filled + "\nAuthored project guidance from source inspection.\n");
   }
 }
 
@@ -227,7 +227,8 @@ describe("mex setup next on a real graph", () => {
     // Calling again is safe: nothing left to do.
     const again = await next(root);
     expect(again).toMatchObject({ status: "complete", exitCode: 0 });
-    expect(again.output).toBe("MEX setup is already complete. There is nothing left to do.");
+    expect(again.output).toContain("MEX setup is already complete. There is nothing left to do.");
+    expect(again.output).toContain("section-to-document refines links");
     expect(navigation.map((file) => readFileSync(join(root, ".mex", file), "utf8"))).toEqual(before);
   }, 300_000);
 

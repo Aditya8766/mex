@@ -53,7 +53,7 @@ describe("setup state and scaffold ownership", () => {
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, "class App {}\n");
 
-    expect(detectProjectState(root, mex)).toBe("populated");
+    expect(detectProjectState(root, mex)).toBe("partial");
   });
 
   it.each([...new Set([
@@ -154,13 +154,13 @@ describe("setup state and scaffold ownership", () => {
     expect(detectProjectState(root, join(root, ".mex"))).toBe("fresh");
   });
 
-  it("recognizes a fully populated scaffold and rejects remaining placeholders", () => {
+  it("recognizes authored scaffold files even with leftover placeholders", () => {
     const root = fixture();
     const mex = join(root, ".mex");
     writePopulatedScaffold(mex);
     expect(isScaffoldPopulated(mex)).toBe(true);
     writeFileSync(join(mex, "context", "setup.md"), "last_updated: [YYYY-MM-DD]\n");
-    expect(isScaffoldPopulated(mex)).toBe(false);
+    expect(isScaffoldPopulated(mex)).toBe(true);
   });
 
   it("never overwrites an existing scaffold file on rerun", () => {

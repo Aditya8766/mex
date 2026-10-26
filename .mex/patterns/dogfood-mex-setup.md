@@ -159,8 +159,9 @@ global `mex`.
   harness and fake agents; the Python harness is skipped on Windows.
 - Population completion also audits patterns, grounded facts and structural
   links. Demand code facts only when graph coverage includes parsed sources.
-  A single authored-file placeholder gets one targeted pass, recorded in the
-  existing setup plan; an unresolved pass needs manual repair rather than a loop.
+  Compare each required file to its template with marker values and Wiki stamps
+  ignored. Finalization fills known date/name tokens in authored files itself,
+  reports each file, and must not create a plan or launch an agent for leftovers.
 - Drift staleness uses committed Git history. Correct uncommitted content can
   remain stale until the canonical scaffold is committed.
 - An unrelated incomplete parse does not invalidate exact Wiki grounding from

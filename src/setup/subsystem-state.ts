@@ -80,8 +80,6 @@ export type SharedUnit = UnitProgress;
 export type FinalUnit = UnitProgress;
 
 export interface SetupPlanState {
-  /** A single authored-file placeholder gets one targeted pass, in the existing plan. */
-  placeholderRepair?: { file: string; attempted: boolean };
   /** Bounded source folders excluded by corpus policy; computed once per plan. */
   skippedSourceFolders?: string[];
   /** Shared/subsystem sessions author navigation data rather than a final agent. */
@@ -353,9 +351,6 @@ export function parsePlanState(text: string): { state: SetupPlanState } | { stat
       shared,
       subsystems,
       final,
-      ...(isRecord(raw.placeholderRepair) && typeof raw.placeholderRepair.file === "string"
-        && ["AGENTS.md", "ROUTER.md", "context/architecture.md", "context/stack.md", "context/conventions.md", "context/decisions.md", "context/setup.md"].includes(raw.placeholderRepair.file)
-        && typeof raw.placeholderRepair.attempted === "boolean" ? { placeholderRepair: { file: raw.placeholderRepair.file, attempted: raw.placeholderRepair.attempted } } : {}),
       ...(raw.navigationVersion === 1 ? { navigationVersion: 1 as const } : {}),
       ...(isRecord(raw.graph) && typeof raw.graph.startedAt === "string"
         && ["running", "completed", "failed"].includes(String(raw.graph.outcome)) ? { graph: {

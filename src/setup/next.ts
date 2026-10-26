@@ -1,5 +1,4 @@
-import { populationWarning, targetedPlaceholderFile, targetedPlaceholderPrompt } from "./population-audit.js";
-import { setupTemplatesDirectory } from "./phases.js";
+import { populationWarning, fillPopulationPlaceholders, populationPlaceholderFiles } from "./population-audit.js";
 /**
  * `mex setup next`: the one-paste setup for agents MEX cannot launch itself.
  *
@@ -149,6 +148,27 @@ async function step(
   if (loaded.notice) notes.push(`Warning: ${loaded.notice}`);
   let state = loaded.state;
   let mode = savedMode;
+  if (state?.queue?.finalized === true && isScaffoldPopulated(mexDir) && populationPlaceholderFiles(mexDir).length === 0) {
+    const warning = await populationWarning(root, mexDir, mode);
+    syncSetupNotice(root, null);
+    return {
+      status: "complete", exitCode: 0, progress: countSetupUnits(state),
+      output: "MEX setup is already complete. There is nothing left to do." + (warning ? `\n${warning}` : ""),
+    };
+  }
+  // Older authored scaffolds need finalization only. Do not invent another
+  // population plan (or replace a completed one) for harmless leftover tokens.
+  if (loaded.notice === undefined && isScaffoldPopulated(mexDir)
+    && (state === null || state.finalizedAt !== undefined || state.queue?.finalized === true)) {
+    const result = await runHeadlessSetup({
+      projectRoot: root, mode, tools: loadConfiguredAiTools(mexDir),
+      confirmPopulation: true, signal: options.signal, onMessage: progress,
+    });
+    return {
+      status: result.ready ? "complete" : "blocked", exitCode: result.ready ? 0 : 1,
+      progress: state === null ? null : countSetupUnits(state), output: result.message,
+    };
+  }
   if (state !== null && state.queue === undefined) {
     // Background sessions stopped part-way: this flow continues the same plan.
     state.queue = { mode: "units" };
@@ -423,8 +443,7 @@ function createQueueState(root: string, start: QueueStart): SetupPlanState {
   writeText(resolve(root, BRIEF_FILE), JSON.stringify({ state: start.projectState, brief: start.scannerBrief }));
   const populated = isScaffoldPopulated(mexDir);
   let state: SetupPlanState | null = null;
-  const repairFile = targetedPlaceholderFile(mexDir, setupTemplatesDirectory(), start.mode);
-  if (repairFile === null && start.mode === "code-repo" && start.projectState !== "fresh" && (!populated || start.replacing === true)) {
+  if (start.mode === "code-repo" && start.projectState !== "fresh" && (!populated || start.replacing === true)) {
     const plan = computePlan(root);
     if (plan !== null && shouldRunPerSubsystem({ plan, resuming: false, ...(start.env === undefined ? {} : { env: start.env }) })) {
       state = createPlanState(plan);
@@ -438,7 +457,6 @@ function createQueueState(root: string, start: QueueStart): SetupPlanState {
     state.final.state = "done";
     if (populated) state.shared.state = "done";
   }
-  if (repairFile !== null) state.placeholderRepair = { file: repairFile, attempted: false };
   savePlanState(root, state);
   return state;
 }
@@ -539,7 +557,6 @@ async function settle(
       done(undefined, "The scaffold is populated.");
       return null;
     }
-    if (state.placeholderRepair?.attempted) throw new SetupError(`The targeted pass left a placeholder in .mex/${state.placeholderRepair.file}. Resolve it manually, then run mex setup next; no full repopulation is needed.`);
     return again(`Required placeholders remain in ${placeholderFiles(mexDir).join(", ") || "the scaffold"}. The task is not finished yet.`);
   }
 
@@ -592,11 +609,6 @@ async function writePrompt(root: string, state: SetupPlanState, unit: Unit, mode
     const brief = readBrief(root);
     switch (unit.kind) {
       case "single": {
-        const file = state.placeholderRepair?.file ?? targetedPlaceholderFile(resolve(root, ".mex"), setupTemplatesDirectory(), mode);
-        if (file !== null && file !== undefined) {
-          state.placeholderRepair = { file, attempted: true };
-          return targetedPlaceholderPrompt(file);
-        }
         const prompt = await buildSetupPopulationPrompt(mode, brief.state, brief.brief, root);
         // The agent was not launched by setup: `mex setup next` checks and finalizes, not `mex setup`.
         return prompt.replace(POPULATION_FINISH, QUEUE_POPULATION_FINISH);
@@ -646,6 +658,7 @@ async function finish(
     return blocked([...notes, "The shared scaffold files still have required placeholders, so setup cannot finalize yet. "
       + `Run \`${SETUP_NEXT_COMMAND}\` to get that task again.`].join("\n"), counts);
   }
+  notes.push(...fillPopulationPlaceholders(root, mexDir, progress));
   let groundingNotice = "";
   if (mode === "code-repo") {
     progress("Finalizing: capturing grounding baselines and indexing the Wiki…");
@@ -765,7 +778,7 @@ function writeText(path: string, text: string): void {
 function readBrief(root: string): { state: ProjectState; brief: string | null } {
   try {
     const parsed = JSON.parse(readFileSync(resolve(root, BRIEF_FILE), "utf8")) as { state?: unknown; brief?: unknown };
-    const state = parsed.state === "partial" ? "populated" : parsed.state === "fresh" || parsed.state === "populated" ? parsed.state : "existing";
+    const state = parsed.state === "fresh" || parsed.state === "partial" ? parsed.state : "existing";
     return { state, brief: typeof parsed.brief === "string" ? parsed.brief : null };
   } catch {
     return { state: "existing", brief: null };

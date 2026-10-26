@@ -439,6 +439,7 @@ export class HubSetupRunner {
         + (result.groundingNotice ? ` ${result.groundingNotice}` : "")
       : status.stage === "complete"
         ? "Agent memory is ready. Your selected AI tools can use this workspace."
+          + (result.groundingNotice ? ` ${result.groundingNotice}` : "")
         : result.message;
     this.run = {
       status: paused ? "paused" : result.ready || result.populated ? "succeeded" : "paused",
