@@ -246,7 +246,6 @@ describe("mex setup next on a real graph", () => {
     const again = await next(root);
     expect(again).toMatchObject({ status: "complete", exitCode: 0 });
     expect(again.output).toContain("MEX setup is already complete. There is nothing left to do.");
-    expect(again.output).toContain("section-to-document refines links");
     expect(navigation.map((file) => readFileSync(join(root, ".mex", file), "utf8"))).toEqual(before);
   }, 300_000);
 

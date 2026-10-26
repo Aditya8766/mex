@@ -55,7 +55,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   }
   if (health?.needsCommitOnly && !interactive) {
     const message = "MEX is prepared here but the setup is not committed yet. Run `mex setup --browser` to review and commit it.";
-    console.log(message);
+    console.log([message, ...health.notes].join("\n"));
     return { outcome: "complete", exitCode: 0, message };
   }
   if (health && health.missing.length > 0 && !interactive) {

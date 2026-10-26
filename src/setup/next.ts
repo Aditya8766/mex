@@ -179,7 +179,7 @@ async function step(
   // population plan (or replace a completed one) for harmless leftover tokens.
   if (loaded.notice === undefined && isScaffoldPopulated(mexDir)
     && (state === null || state.finalizedAt !== undefined || state.queue?.finalized === true
-      || state.queue?.mode === "single"
+      || (state.queue?.mode === "single" && isUnstartedSetupPlan(root, state))
       || (populationPlaceholderFiles(mexDir).length > 0 && isUnstartedSetupPlan(root, state)))) {
     const result = await runHeadlessSetup({
       projectRoot: root, mode, tools: loadConfiguredAiTools(mexDir),

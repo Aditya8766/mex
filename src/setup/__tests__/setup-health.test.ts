@@ -109,6 +109,8 @@ describe("status-first setup rerun (#284)", () => {
     const plan = createPlanState({ source: "tree", ranking: "size", sourceFiles: 0, target: { min: 1, max: 1 }, candidates: [] });
     plan.queue = { mode: "single" };
     plan.shared.state = "running";
+    // A real interrupted unit has a run record; a plan with none never started (#283).
+    plan.shared.runs.push({ kind: "write", startedAt: new Date().toISOString(), durationMs: 1000, outcome: "stopped" });
     savePlanState(root, plan);
     expect(await assessSetupHealth(root)).toMatchObject({ healthy: false, needsCommitOnly: false });
     const result = await runSetupNext({ projectRoot: root });
