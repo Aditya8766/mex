@@ -1,11 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runSetupNext } from "../next.js";
 import { runHeadlessSetup } from "../headless.js";
-import { SETUP_LOCK_FILE, acquireSetupLock, withSetupLock } from "../setup-lock.js";
+import { SETUP_LOCK_FILE, acquireSetupLock, assertSetupAvailable, withSetupLock } from "../setup-lock.js";
 
 const roots: string[] = [];
 
@@ -123,13 +123,75 @@ describe("setup lock (#310)", () => {
       held.release();
     }
   });
+  it("reports a live setup before anything changes, and ignores an abandoned one", () => {
+    const mexDir = join(fixture(), ".mex");
+    expect(() => assertSetupAvailable(mexDir)).not.toThrow();
+    const lock = acquireSetupLock(mexDir);
+    expect(() => assertSetupAvailable(mexDir)).toThrow(/already running/u);
+    lock.release();
+    writeLock(mexDir, { pid: exitedPid(), host: hostname() });
+    expect(() => assertSetupAvailable(mexDir)).not.toThrow();
+  });
+
+  it("reclaims a lock whose pid now belongs to a process started after the lock, or copied from another clone", () => {
+    const mexDir = join(fixture(), ".mex");
+    writeLock(mexDir, { pid: process.pid, host: hostname() }, false);
+    writeFileSync(join(mexDir, SETUP_LOCK_FILE), JSON.stringify({ pid: process.pid, host: hostname(), token: "old", startedAt: "2020-01-01T00:00:00.000Z" }));
+    acquireSetupLock(mexDir).release();
+    writeFileSync(join(mexDir, SETUP_LOCK_FILE), JSON.stringify({ pid: process.pid, host: hostname(), token: "copied", startedAt: new Date().toISOString(), root: join(mexDir, "other") }));
+    acquireSetupLock(mexDir).release();
+  });
+
+  it("does not delete a live lock that replaced the abandoned one this run had judged", () => {
+    const mexDir = join(fixture(), ".mex");
+    writeLock(mexDir, { pid: exitedPid(), host: hostname() });
+    const path = join(mexDir, SETUP_LOCK_FILE);
+    const live = JSON.stringify({ pid: process.pid, host: hostname(), token: "live", startedAt: new Date().toISOString() });
+    // This run reads the abandoned lock and judges it; before it removes it,
+    // another run has reclaimed it and a live owner holds the path.
+    let calls = 0;
+    const now = () => { calls += 1; if (calls === 2) writeFileSync(path, live); return new Date(); };
+    expect(() => acquireSetupLock(mexDir, now)).toThrow(/already running/u);
+    expect(readFileSync(path, "utf8")).toBe(live);
+  });
+
+  it("clears a crash-leftover reclaim gate and then reclaims", () => {
+    const mexDir = join(fixture(), ".mex");
+    writeLock(mexDir, { pid: exitedPid(), host: hostname() });
+    const gate = join(mexDir, "local", "setup.lock.reclaim");
+    writeFileSync(gate, "");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(gate, old, old);
+    expect(() => acquireSetupLock(mexDir)).toThrow(/already running/u);
+    acquireSetupLock(mexDir).release();
+    expect(existsSync(gate)).toBe(false);
+  });
+
+  it("releases the lock when the run fails", async () => {
+    const mexDir = join(fixture(), ".mex");
+    await expect(withSetupLock(mexDir, async () => { throw new Error("failed"); })).rejects.toThrow("failed");
+    expect(existsSync(join(mexDir, SETUP_LOCK_FILE))).toBe(false);
+  });
+
+  it("does not let a continuation inherited from a finished run reuse its lock", async () => {
+    const mexDir = join(fixture(), ".mex");
+    let later!: () => Promise<void>;
+    await withSetupLock(mexDir, async () => {
+      const { AsyncResource } = await import("node:async_hooks");
+      const resource = new AsyncResource("late setup");
+      later = () => resource.runInAsyncScope(() => withSetupLock(mexDir, async () => {}));
+    });
+    const next = acquireSetupLock(mexDir);
+    try { await expect(later()).rejects.toThrow(/already running/u); }
+    finally { next.release(); }
+  });
 });
 
 function writeLock(mexDir: string, owner: { pid: number; host: string; token?: string }, replace = false): void {
   mkdirSync(join(mexDir, "local"), { recursive: true });
   const path = join(mexDir, SETUP_LOCK_FILE);
   if (replace) rmSync(path, { force: true });
-  writeFileSync(path, `${JSON.stringify({ token: "abandoned", startedAt: "2026-10-25T00:00:00.000Z", ...owner })}\n`);
+  writeFileSync(path, `${JSON.stringify({ token: "abandoned", startedAt: new Date().toISOString(), ...owner })}\n`);
 }
 
 /** The pid of a process that has already exited. */
