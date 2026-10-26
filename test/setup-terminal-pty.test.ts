@@ -11,7 +11,7 @@ const cli = join(repo, "dist/cli.js");
 const harness = join(repo, "test/helpers/setup-pty.py");
 const python = process.platform === "win32" ? undefined : spawnSync("python3", ["-c", "import pty, termios, sys; print(sys.executable)"], { encoding: "utf8", timeout: 3000 });
 const pythonPath = python?.status === 0 ? python.stdout.trim() : undefined;
-const skipReason = process.platform === "win32" ? "requires a POSIX PTY" : !pythonPath ? "requires Python 3 with pty/termios" : undefined;
+const skipReason = process.platform === "win32" ? "requires a POSIX PTY; Windows runs setup-terminal-conpty" : !pythonPath ? "requires Python 3 with pty/termios" : undefined;
 const fixtures: Fixture[] = [];
 
 interface Fixture { root: string; project: string; record: string; env: NodeJS.ProcessEnv; cli?: string; workerRecord?: string }
