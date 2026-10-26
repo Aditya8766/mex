@@ -83,6 +83,9 @@ global `mex`.
   automatic Git maintenance in fixture-writing commands before taking those
   snapshots; a background maintenance lock disappearing after a fixture commit
   is unrelated to entry discovery. Keep the full snapshot assertion intact.
+- Healthy setup reruns report status without doing work. An unfinished stored
+  plan must resume even when shared placeholders are filled. Treat source drift
+  as a reason to run sync, and preserve the explicit force path.
 - Interactive terminal setup uses the shared ordered engine through a HUD.
   Enter on a tool selects it and starts setup atomically; that focused tool
   precedes other checked tools when selecting a native agent. Space optionally
