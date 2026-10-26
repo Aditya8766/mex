@@ -1154,7 +1154,7 @@ function populateSetupFixture(project) {
         const after = before
           .replaceAll("[Project Name]", "Setup Fixture")
           .replaceAll("[YYYY-MM-DD]", "2026-09-02");
-        if (after !== before) writeFileSync(path, after, "utf8");
+        if (after !== before) writeFileSync(path, after + "\nAuthored project guidance from source inspection.\n", "utf8");
       }
     }
   };

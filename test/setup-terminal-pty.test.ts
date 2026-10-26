@@ -455,7 +455,7 @@ else:
     if mode == "complete":
         for path in pathlib.Path(".mex").rglob("*.md"):
             content = path.read_text().replace("[Project Name]", "PTY fixture").replace("[Agent / Workspace Name]", "PTY fixture").replace("[YYYY-MM-DD]", "2026-01-01")
-            path.write_text(content)
+            path.write_text(content + "\nAuthored project guidance from source inspection.\n")
     print("MEX_PTY_CHILD_DONE", flush=True)
     sys.exit(7 if mode == "failed" else 0)
 `;
