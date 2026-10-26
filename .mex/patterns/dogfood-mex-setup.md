@@ -181,6 +181,9 @@ global `mex`.
   source/configuration drift still refuses, partial-file facts remain unverified,
   and missing targets are not reconciled across an incomplete corpus. Name the
   incomplete files and remedy rather than claiming a concurrent graph change.
+- Terminal, Hub and one-paste setup share one checkout lease before writes.
+  One-paste preparation can enter its own engine within that lease; unrelated
+  callers must still refuse. Verify dead-owner recovery after a killed process.
 - Terminal setup does not stage or commit. The setup Hub may create a local
   commit only after exact diff review and explicit user action, preserving
   unrelated staged work. MEX never pulls or pushes.

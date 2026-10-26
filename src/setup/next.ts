@@ -1,4 +1,5 @@
 import { populationWarning, fillPopulationPlaceholders, populationPlaceholderFiles, unpopulatedScaffoldFiles } from "./population-audit.js";
+import { withSetupLock } from "./setup-lock.js";
 import { describeUnfinishedSetup } from "./unfinished.js";
 /**
  * `mex setup next`: the one-paste setup for agents MEX cannot launch itself.
@@ -132,6 +133,16 @@ export async function runSetupNext(options: SetupNextOptions): Promise<SetupNext
     const health = await assessSetupHealth(root);
     if (health.healthy) return { status: "complete", exitCode: 0, progress: null, output: describeSetupHealth(health) };
   }
+  try {
+    return await withSetupLock(mexDir, () => runSetupNextLocked(options, root, mexDir, mode, progress));
+  } catch (error) {
+    return blocked(error instanceof SetupError ? error.userMessage : error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function runSetupNextLocked(
+  options: SetupNextOptions, root: string, mexDir: string, mode: SetupMode, progress: (line: string) => void,
+): Promise<SetupNextResult> {
   cleanupStaleSetupPrompts(root);
   mkdirSync(resolve(root, ".mex", "local"), { recursive: true });
   const release = acquireLock(root, options.now ?? Date.now);
