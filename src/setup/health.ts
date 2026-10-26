@@ -52,6 +52,7 @@ export async function assessSetupHealth(projectRoot: string): Promise<SetupHealt
   }
 
   const counts = countKnowledge(resolve(root, ".mex"));
+  if (counts?.unfinishedFiles.length) missing.push(`Setup finalization still needs to fill placeholders in ${counts.unfinishedFiles.map(file => `.mex/${file}`).join(", ")}.`);
   const needsCommitOnly = status.mode === "code-repo" && missing.length === 0 && !committed;
   if (needsCommitOnly) missing.push("The setup has not been committed yet.");
   const healthy = missing.length === 0;
@@ -122,11 +123,13 @@ async function observeWiki(root: string): Promise<{ missing?: string; note?: str
   }
 }
 
-function countKnowledge(mexDir: string): { entities: number; facts: number } | null {
+function countKnowledge(mexDir: string): { entities: number; facts: number; unfinishedFiles: string[] } | null {
   try {
-    const entities = inventoryScaffold({ scaffoldRoot: mexDir }).files
-      .flatMap((file) => file.parsed.entities.map((parsed) => parsed.entity));
-    return { entities: entities.length, facts: entities.filter((entity) => entity.type === "fact").length };
+    const files = inventoryScaffold({ scaffoldRoot: mexDir }).files;
+    const entities = files.flatMap((file) => file.parsed.entities.map((parsed) => parsed.entity));
+    const required = new Set(["AGENTS.md", "ROUTER.md", "context/architecture.md", "context/stack.md", "context/conventions.md", "context/decisions.md", "context/setup.md"]);
+    const unfinishedFiles = files.filter(file => required.has(file.path) && /\[YYYY-MM-DD\]|\[Project Name\]/u.test(file.text)).map(file => file.path);
+    return { entities: entities.length, facts: entities.filter((entity) => entity.type === "fact").length, unfinishedFiles };
   } catch {
     return null;
   }

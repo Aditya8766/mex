@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runHeadlessSetup } from "../headless.js";
+import * as headless from "../headless.js";
 import { runSetup } from "../index.js";
 import * as setup from "../index.js";
 import { assessSetupHealth } from "../health.js";
@@ -65,6 +66,19 @@ function snapshot(root: string): Record<string, string> {
 }
 
 describe("status-first setup rerun (#284)", () => {
+  it("keeps authored-file placeholders on the finalization path even when population is complete", async () => {
+    const root = fixture();
+    await runHeadlessSetup({ projectRoot: root, mode: "agent-memory", tools: [], populate: populate(root) });
+    writeFileSync(join(root, ".mex/context/stack.md"), "# Authored stack\nUpdated [YYYY-MM-DD] for [Project Name].\n");
+    const status = headless.inspectSetupStatus(root);
+    vi.spyOn(headless, "inspectSetupStatus").mockReturnValue({ ...status, populated: true });
+    const before = snapshot(root);
+    const health = await assessSetupHealth(root);
+    expect(health.healthy).toBe(false);
+    expect(health.needsCommitOnly).toBe(false);
+    expect(health.missing).toContain("Setup finalization still needs to fill placeholders in .mex/context/stack.md.");
+    expect(snapshot(root)).toEqual(before);
+  });
   it("reports an already set-up workspace and changes nothing", async () => {
     const root = fixture();
     expect(await runHeadlessSetup({ projectRoot: root, mode: "agent-memory", tools: [], populate: populate(root) }))
