@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Windows CI drives terminal setup through ConPTY, covering the tool picker, native agent handoff, recovery, and completion (#311).
 - Setup can launch background Cursor, GitHub Copilot and OpenCode CLI sessions alongside Claude Code and Codex. The selected agent needs to be installed and signed in.
 - `mex setup next` gives agents MEX cannot launch a one-paste setup flow: ask the agent to run `mex setup next --start` first, then follow its instructions until setup is complete. A new chat recovers complete batches without redoing them. Each call hands out several task files when work can run in parallel, applies ready batches, and continues the saved plan. Task prompts name source folders the code graph skips so agents can read them without trying to ground facts to unindexed code.
 - `mex wiki apply` accepts a JSON array of up to 200 operations as one atomic batch, reports problems by operation, and skips already applied operations on a rerun. Code links can name a file and symbol or line; MEX resolves the declaration and records its fingerprint and body hash. New entries link to their enclosing section or file automatically, and new knowledge files receive their own metadata.

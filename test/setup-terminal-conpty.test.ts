@@ -13,62 +13,64 @@
  * native module; the Windows CI job installs it for this run. Without it the
  * suite is skipped locally and fails in CI, so it cannot vanish silently.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
+import { release, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 interface PtyProcess {
+  on(event: "error", listener: (error: Error) => void): void;
   onData(listener: (data: string) => void): void;
   onExit(listener: (event: { exitCode: number }) => void): void;
   write(data: string): void;
   kill(): void;
 }
 interface PtyModule {
-  spawn(file: string, args: string[], options: { name: string; cols: number; rows: number; cwd: string; env: NodeJS.ProcessEnv }): PtyProcess;
+  spawn(file: string, args: string[], options: { name: string; cols: number; rows: number; cwd: string; env: NodeJS.ProcessEnv; useConpty: true }): PtyProcess;
 }
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const cli = join(repo, "dist", "cli.js");
-const pty = loadPty();
-const skipReason = process.platform !== "win32" ? "Windows only; POSIX uses setup-terminal-pty" : pty === null ? "node-pty is not installed" : undefined;
+const { pty, skipReason } = await loadPty();
+const requireCoverage = process.platform === "win32" && Boolean(process.env.CI);
 const fixtures: Fixture[] = [];
 
 interface Fixture { root: string; project: string; record: string; env: NodeJS.ProcessEnv }
-interface Action { expect: string; regex?: boolean; missing?: string[]; input?: string; probe?: boolean }
+interface Action { expect: string; regex?: boolean; missing?: string[]; input?: string; probe?: boolean; timeout?: number }
 interface Result { exitCode: number; output: string; events: Array<{ match: string; connected?: boolean }> }
 interface AgentRecord { pid: number; agent: string; argv: string[]; stdinTTY: boolean; stdoutTTY: boolean; promptExists: boolean; input?: string }
 
 beforeAll(() => {
-  if (process.platform === "win32" && pty === null && process.env.CI) {
-    throw new Error("The Windows CI job must install node-pty (npm install --no-save node-pty) for the ConPTY suite.");
+  if (requireCoverage && skipReason) {
+    throw new Error(`Windows CI requires ConPTY coverage: ${skipReason}. Install node-pty@1.1.0 and use Windows 10 build 17763 or newer.`);
   }
   if (!skipReason && !existsSync(cli)) throw new Error("Build dist/cli.js with npm run build before running the ConPTY acceptance tests.");
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const fixture of fixtures.splice(0)) {
-    if (existsSync(fixture.record)) {
-      const { pid } = agentRecord(fixture);
-      try { process.kill(pid); } catch { /* already gone */ }
-    }
     try {
-      rmSync(fixture.root, { recursive: true, force: true });
-    } catch {
-      // Windows can briefly keep a just-exited process's files open.
+      if (existsSync(fixture.record)) {
+        const { pid } = agentRecord(fixture);
+        try { await expect.poll(() => isAlive(pid), { timeout: 3000 }).toBe(false); }
+        finally { if (isAlive(pid)) process.kill(pid); }
+      }
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }
 });
 
-describe.skipIf(Boolean(skipReason))(`built terminal setup in a Windows console${skipReason ? ` (${skipReason})` : ""}`, { timeout: 60_000 }, () => {
+describe.skipIf(Boolean(skipReason) && !requireCoverage)(`built terminal setup in a Windows console${skipReason ? ` (${skipReason})` : ""}`, { timeout: 60_000 }, () => {
   it("shows the banner and tool picker before any setup writes, then cancels with Ctrl+C", async () => {
     const f = fixture("incomplete");
     const result = await terminal(f, ["setup", "--mode", "agent-memory", "--no-open"], [
       { expect: "Choose your AI tools", missing: [".mex", ".agents", "AGENTS.md", ".gitignore"], input: "\u0003" },
-    ]);
+    ], { columns: 80, rows: 24 });
     expect(result.exitCode, result.output).toBe(130);
     expect(result.output).toContain("88888b.d88b.");
     expect(result.output).toContain("Codex");
@@ -94,6 +96,55 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup in a Windows console$
     expectPromptCleaned(f);
   });
 
+  it("Space toggles multiple tools and Continue launches the checked native agent", async () => {
+    const f = fixture("incomplete");
+    const result = await terminal(f, setupArgs(), [
+      { expect: "> [x] Codex", input: " " },
+      { expect: "> [ ] Codex", input: "\u001b[A" },
+      { expect: "> [ ] OpenCode", input: "\u001b[A" },
+      { expect: "> [ ] Copilot", input: "\u001b[A" },
+      { expect: "> [ ] Windsurf", input: "\u001b[A" },
+      { expect: "> [ ] Cursor", input: "\u001b[A" },
+      { expect: "> [ ] Claude Code", input: " " },
+      { expect: "> [x] Claude Code", input: "\u001b[B" },
+      { expect: "> [ ] Cursor", input: " " },
+      { expect: "> [x] Cursor", input: "\u001b[A" },
+      { expect: "> [x] Claude Code", input: "\u001b[A" },
+      { expect: "> Continue with selected tools", input: "\r" },
+      { expect: "MEX_PTY_CHILD_READY", input: "space selection\r" },
+      { expect: "required scaffold placeholders remain", input: "\u001b[A" },
+      { expect: "> Finish later", input: "\r" },
+    ]);
+    expect(result.exitCode, result.output).toBe(2);
+    expect(agentRecord(f)).toMatchObject({ agent: "claude", input: "space selection", stdinTTY: true, stdoutTTY: true });
+    expect(JSON.parse(readFileSync(join(f.project, ".mex", "config.json"), "utf8")).aiTools).toEqual(["claude", "cursor"]);
+    expectPromptCleaned(f);
+  });
+
+  it("Continue without an agent writes no tool selection and pauses without launching one", async () => {
+    const f = fixture("incomplete");
+    const result = await terminal(f, ["setup", "--mode", "agent-memory", "--tool", "none", "--no-open"], [
+      { expect: "> Continue without an agent", missing: [".mex"], input: "\r" },
+      { expect: "> Show setup prompt", input: "\u001b[A" },
+      { expect: "> Finish later", input: "\r" },
+    ]);
+    expect(result.exitCode, result.output).toBe(2);
+    expect(result.output).toContain("Setup paused at population");
+    expect(JSON.parse(readFileSync(join(f.project, ".mex", "config.json"), "utf8")).aiTools).toEqual([]);
+    expect(existsSync(f.record)).toBe(false);
+  });
+
+  it("cleans the console and active fake agent after a driver timeout", async () => {
+    const f = fixture("incomplete");
+    await expect(terminal(f, setupArgs(), [
+      { expect: "Choose your AI tools", input: "\r" },
+      { expect: "MEX_PTY_CHILD_READY" },
+      { expect: "THIS_SCREEN_MUST_NEVER_APPEAR", timeout: 1000 },
+    ])).rejects.toThrow("timed out waiting for");
+    expect(existsSync(f.record)).toBe(true);
+    await expect.poll(() => isAlive(agentRecord(f).pid), { timeout: 3000 }).toBe(false);
+  });
+
   it("returns to recovery after a failed native agent and pauses on Finish later", async () => {
     const f = fixture("failed");
     const result = await terminal(f, setupArgs(), [
@@ -108,9 +159,15 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup in a Windows console$
     expectPromptCleaned(f);
   });
 
-  it("finishes a populated setup and serves the Hub link until q", async () => {
+  it.each(["agent-memory", "code-repo"])("finishes a populated %s setup and serves the Hub link until q", async (mode) => {
     const f = fixture("complete");
-    const result = await terminal(f, setupArgs(), [
+    if (mode === "code-repo") {
+      execFileSync("git", ["-c", "init.templateDir=", "init", "--quiet"], { cwd: f.project, env: f.env });
+      writeFileSync(join(f.project, "sample.ts"), "export function increment(value: number): number { return value + 1; }\n");
+    }
+    const args = setupArgs();
+    args[2] = mode;
+    const result = await terminal(f, args, [
       { expect: "Choose your AI tools", input: "\r" },
       { expect: "MEX_PTY_CHILD_READY", input: "populate\r" },
       { expect: "http://127\\.0\\.0\\.1:[0-9]+/#token=[A-Za-z0-9_-]+", regex: true, probe: true, input: "q" },
@@ -122,6 +179,8 @@ describe.skipIf(Boolean(skipReason))(`built terminal setup in a Windows console$
     const address = new URL(result.events[2]!.match);
     expect(await canConnect(Number(address.port))).toBe(false);
     expect(readFileSync(join(f.project, ".mex", "AGENTS.md"), "utf8")).not.toContain("[YYYY-MM-DD]");
+    expect(existsSync(join(f.project, ".mex", "graph.db"))).toBe(mode === "code-repo");
+    expect(existsSync(join(f.project, ".mex", "wiki.db"))).toBe(mode === "code-repo");
     expectPromptCleaned(f);
   });
 
@@ -157,7 +216,7 @@ function fixture(mode: "incomplete" | "failed" | "complete"): Fixture {
   // Windows environment names are case-insensitive: replace every PATH spelling.
   for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
   env.PATH = [bin, dirname(process.execPath), process.env.PATH ?? ""].join(delimiter);
-  Object.assign(env, { MEX_TELEMETRY: "0", DO_NOT_TRACK: "1", MEX_PTY_FAKE_MODE: mode, MEX_PTY_RECORD: record, MEX_HOME: join(root, "home") });
+  Object.assign(env, { TERM: "xterm-256color", MEX_TELEMETRY: "0", DO_NOT_TRACK: "1", MEX_PTY_FAKE_MODE: mode, MEX_PTY_RECORD: record, MEX_HOME: join(root, "home") });
   delete env.CI;
   delete env.NO_COLOR;
   delete env.FORCE_COLOR;
@@ -167,71 +226,100 @@ function fixture(mode: "incomplete" | "failed" | "complete"): Fixture {
 }
 
 /** Run the CLI in a ConPTY, answering each expected screen with its input. */
-function terminal(f: Fixture, args: string[], actions: Action[], options: { columns?: number; rows?: number } = {}): Promise<Result> {
-  return new Promise((resolve, reject) => {
-    const child = pty!.spawn(process.execPath, [cli, ...args], {
-      name: "xterm-256color", cols: options.columns ?? 140, rows: options.rows ?? 40, cwd: f.project, env: f.env,
-    });
-    let raw = "";
-    let searchFrom = 0;
-    let step = 0;
-    let busy = false;
-    let exitCode: number | null = null;
-    const events: Result["events"] = [];
-    const deadline = setTimeout(() => {
-      child.kill();
-      reject(new Error(`ConPTY step ${step} timed out waiting for ${JSON.stringify(actions[step]?.expect ?? "exit")}\n${plain(raw).slice(-4000)}`));
-    }, 50_000);
-    const finish = (): void => {
-      clearTimeout(deadline);
-      resolve({ exitCode: exitCode!, output: plain(raw), events });
-    };
-    const advance = async (): Promise<void> => {
-      if (busy) return;
-      busy = true;
-      try {
-        while (step < actions.length) {
-          const action = actions[step]!;
-          const text = plain(raw).slice(searchFrom);
-          const match = action.regex ? new RegExp(action.expect, "u").exec(text)?.[0] : text.includes(action.expect) ? action.expect : undefined;
-          if (match === undefined) return;
-          searchFrom += text.indexOf(match) + match.length;
-          for (const path of action.missing ?? []) {
-            if (existsSync(join(f.project, path))) throw new Error(`${path} exists before the screen that should precede any write`);
-          }
-          const event: Result["events"][number] = { match };
-          if (action.probe) event.connected = await canConnect(Number(new URL(match).port));
-          events.push(event);
-          step += 1;
-          if (action.input !== undefined) child.write(action.input);
-        }
-        if (exitCode !== null) finish();
-      } catch (error) {
-        clearTimeout(deadline);
-        child.kill();
-        reject(error);
-      } finally {
-        busy = false;
-      }
-    };
-    child.onData((data) => {
-      raw += data;
-      void advance();
-    });
-    child.onExit(({ exitCode: code }) => {
-      exitCode = code;
-      if (step >= actions.length) finish();
-      else {
-        // Output can still be draining; give the matcher one last pass.
-        void advance().then(() => {
-          if (step < actions.length) {
-            clearTimeout(deadline);
-            reject(new Error(`CLI exited ${code} before ${JSON.stringify(actions[step]!.expect)}\n${plain(raw).slice(-4000)}`));
-          }
-        });
-      }
-    });
+async function terminal(f: Fixture, args: string[], actions: Action[], options: { columns?: number; rows?: number } = {}): Promise<Result> {
+  const child = pty!.spawn(process.execPath, [cli, ...args], {
+    name: "xterm-256color", cols: options.columns ?? 140, rows: options.rows ?? 40, cwd: f.project, env: f.env, useConpty: true,
   });
+  let exited = false;
+  const closed = new Promise<void>(resolve => child.onExit(() => { exited = true; resolve(); }));
+  try {
+    return await new Promise((resolve, reject) => {
+      let raw = "";
+      let searchFrom = 0;
+      let step = 0;
+      let busy = false;
+      let settled = false;
+      let exitCode: number | null = null;
+      const events: Result["events"] = [];
+      const timedOut = (): void => {
+        fail(new Error(`ConPTY step ${step} timed out waiting for ${JSON.stringify(actions[step]?.expect ?? "exit")}\n${plain(raw).slice(-4000)}`));
+      };
+      let deadline = setTimeout(timedOut, 50_000);
+      const fail = (error: unknown): void => {
+        settled = true;
+        clearTimeout(deadline);
+        reject(error);
+      };
+      const finish = (): void => {
+        settled = true;
+        clearTimeout(deadline);
+        resolve({ exitCode: exitCode!, output: plain(raw), events });
+      };
+      const advance = async (): Promise<void> => {
+        if (busy || settled) return;
+        busy = true;
+        try {
+          while (step < actions.length) {
+            const action = actions[step]!;
+            const text = plain(raw).slice(searchFrom);
+            const match = action.regex ? new RegExp(action.expect, "u").exec(text)?.[0] : text.includes(action.expect) ? action.expect : undefined;
+            if (match === undefined) return;
+            searchFrom += text.indexOf(match) + match.length;
+            for (const path of action.missing ?? []) {
+              if (existsSync(join(f.project, path))) throw new Error(`${path} exists before the screen that should precede any write`);
+            }
+            const event: Result["events"][number] = { match };
+            if (action.probe) event.connected = await canConnect(Number(new URL(match).port));
+            events.push(event);
+            step += 1;
+            if (actions[step]?.timeout !== undefined) {
+              clearTimeout(deadline);
+              deadline = setTimeout(timedOut, actions[step]!.timeout);
+            }
+            if (action.input !== undefined) child.write(action.input);
+          }
+        } catch (error) {
+          fail(error);
+        } finally {
+          busy = false;
+          if (exitCode !== null && !settled) {
+            if (step >= actions.length) finish();
+            else fail(new Error(`CLI exited ${exitCode} before ${JSON.stringify(actions[step]!.expect)}\n${plain(raw).slice(-4000)}`));
+          }
+        }
+      };
+      child.onData((data) => {
+        if (settled) return;
+        raw += data;
+        if (raw.length > 2 * 1024 * 1024) {
+          fail(new Error("ConPTY output exceeded the 2 MiB acceptance limit"));
+          return;
+        }
+        void advance();
+      });
+      child.onExit(({ exitCode: code }) => {
+        exitCode = code;
+        // A pending async Hub probe finishes before the final exit decision.
+        void advance();
+      });
+    });
+  } finally {
+    // Also release ConPTY's handles after normal exit. On timeout/assertion
+    // failure kill the whole console before the fixture is removed.
+    child.kill();
+    if (!exited) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([closed, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("ConPTY did not exit after cleanup")), 5000);
+        })]);
+      } finally { clearTimeout(timer); }
+    }
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 /** Console output as text: VT sequences removed, line endings normalized. */
@@ -243,12 +331,35 @@ function plain(raw: string): string {
     .replace(/\r\n?/gu, "\n");
 }
 
-function loadPty(): PtyModule | null {
-  if (process.platform !== "win32") return null;
+async function loadPty(): Promise<{ pty: PtyModule | null; skipReason?: string }> {
+  if (process.platform !== "win32") return { pty: null, skipReason: "Windows only; POSIX uses setup-terminal-pty" };
+  const [major, , build] = release().split(".").map(Number);
+  if (major! < 10 || (major === 10 && build! < 17763)) return { pty: null, skipReason: `ConPTY requires Windows 10 build 17763 or newer (found ${release()})` };
   try {
-    return createRequire(import.meta.url)("node-pty") as PtyModule;
-  } catch {
-    return null;
+    const pty = createRequire(import.meta.url)("node-pty") as PtyModule;
+    // Loading the JS package alone does not prove the native backend works.
+    const child = pty.spawn(process.execPath, ["-e", "console.log('CONPTY_TTY', Boolean(process.stdin.isTTY && process.stdout.isTTY))"], {
+      name: "xterm-256color", cols: 80, rows: 24, cwd: repo, env: process.env, useConpty: true,
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let output = "";
+        timer = setTimeout(() => reject(new Error("ConPTY startup probe timed out")), 5000);
+        child.on("error", reject);
+        child.onData(data => { output = (output + plain(data)).slice(-1000); });
+        child.onExit(({ exitCode }) => {
+          if (exitCode === 0 && output.includes("CONPTY_TTY true")) resolve();
+          else reject(new Error(`ConPTY startup probe exited ${exitCode} without a real TTY`));
+        });
+      });
+    } finally {
+      clearTimeout(timer);
+      child.kill();
+    }
+    return { pty };
+  } catch (error) {
+    return { pty: null, skipReason: `node-pty unavailable: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 

@@ -127,7 +127,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          npm install --no-save --no-audit --no-fund node-pty@1.1.0
+          npm install --no-save --package-lock=false --no-audit --no-fund node-pty@1.1.0
           npx vitest run --maxWorkers=1 test/setup-terminal-conpty.test.ts
       - run: npm run build
       - name: Smoke test the packed install
