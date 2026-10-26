@@ -174,8 +174,6 @@ export interface PlanOptions extends LocateOptions {
    * synthesis and every low-level caller, whose bytes stay exactly theirs.
    */
   deriveStructure?: boolean;
-  /** Setup may add a metadata block when stamping authored plain Markdown. */
-  createAdoptionFrontmatter?: boolean;
   /**
    * Accept a mutating operation carrying no `baseContentHash`.
    *

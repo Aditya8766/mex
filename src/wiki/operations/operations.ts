@@ -522,7 +522,7 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
     if (payload.groundsTo?.some((entry) => isCodeNameReference(entry) || entry.fingerprint === undefined)) {
       return reject("INVALID_OPERATION_PAYLOAD", "create-entry with `adopt` needs a fingerprint on every grounding; it does not derive one from the graph.");
     }
-    return adoptInto(file, payload, payload.adopt, id, context.options.createAdoptionFrontmatter);
+    return adoptInto(file, payload, payload.adopt, id);
   }
 
   // **§12.4, on the operation that mints rather than moves.** `set-grounding`
@@ -633,7 +633,6 @@ function adoptInto(
   payload: CreateEntryPayload,
   adopt: NonNullable<CreateEntryPayload["adopt"]>,
   id: EntityId,
-  createFrontmatter = false,
 ): OperationEdits {
   if (file.parsed.entities.some((entry) => entry.entity.id === id)) {
     return { files: [], entityIds: [], createdIds: [id], preconditions: [], revisions: [], diagnostics: [] };
@@ -676,7 +675,7 @@ function adoptInto(
     });
   } else {
     const frontmatter = file.parsed.frontmatter;
-    if (frontmatter === null && !createFrontmatter) {
+    if (frontmatter === null) {
       return reject(
         "AMBIGUOUS_MIGRATION",
         `${file.path} has no frontmatter block to hold a \`mex\` key, so its file-level entity cannot be adopted in place.`,
@@ -687,11 +686,8 @@ function adoptInto(
     }
     const fields = newEntityFields(id, { ...payload, headingDepth: undefined });
     const map = Object.fromEntries(fields.filter(([, value]) => value !== undefined));
-    const target: MetadataTarget | null = frontmatter === null ? null : { region: regionOfFrontmatter(file), prefix: [] };
-    const bom = file.text.charCodeAt(0) === 0xfeff ? 1 : 0;
-    const edit = target === null
-      ? { start: bom, end: bom, text: `---${eol}${renderKeyValues([["mex", map]], eol)}${eol}---${eol}${eol}`, label: `file-level entity ${id}` }
-      : metadataEdit(file.text, target, "mex", map);
+    const target: MetadataTarget = { region: regionOfFrontmatter(file), prefix: [] };
+    const edit = metadataEdit(file.text, target, "mex", map);
     if (edit === null) return reject("WIKI_PARSE_ERROR", `${file.path} has frontmatter that cannot hold a \`mex\` key.`);
     edits.push(edit);
 
@@ -699,7 +695,6 @@ function adoptInto(
     // payload rather than implied: leaving a root key whose values have moved
     // under `mex:` would leave two stores of one fact.
     for (const key of adopt.absorbRootKeys ?? []) {
-      if (target === null) return reject("WIKI_PARSE_ERROR", `${file.path} has no root key to absorb.`);
       const removal = keyPathRemoveEdit(file.text, target.region, [key]);
       if (removal === null) {
         return reject("WIKI_PARSE_ERROR", `${file.path}: could not locate the root \`${key}\` key to absorb.`);

@@ -85,9 +85,9 @@ export function stampTypeOf(file: InventoryFile, scope: StampOptions["scope"]): 
   const path = file.path;
   if (isTeamOwnedReadOnlyPath(path) || Object.hasOwn(NON_KNOWLEDGE_FILES, path) || path.startsWith("specs/")) return null;
   if (file.parsed.diagnostics.some((entry) => entry.severity === "error")) return null;
-  // Setup can add frontmatter to plain Markdown; adoption still preserves
-  // every authored byte below that new metadata block.
-  if (fileTitleOf(file) === null) return null;
+  // The file-level entity lives in frontmatter; a file without any is not
+  // given one, for the reason migration gives (bytes above unowned prose).
+  if (file.parsed.frontmatter === null || fileTitleOf(file) === null) return null;
   const entities = file.parsed.entities;
   if (entities.some((entry) => entry.metadataKind === "frontmatter")) return null;
   if (entities.some((entry) => SPEC_FAMILY.includes(entry.entity.type))) return null;
@@ -108,8 +108,6 @@ export function stampTypeOf(file: InventoryFile, scope: StampOptions["scope"]): 
   const ruled = role?.fileType ?? declaredType;
 
   if (scope === "placed") return ruled;
-  // Plain Markdown has no metadata block yet; setup adds one for it.
-  if (file.parsed.frontmatter === null) return ruled ?? folderType(path);
   if (entities.length > 0) return ruled ?? folderType(path);
   return ruled === null ? folderType(path) : null;
 }
@@ -160,7 +158,6 @@ export function stampScaffoldFiles(options: StampOptions): StampResult {
   if (envelopes.length === 0) return { stamped: [], applied: true, diagnostics: [] };
   const planOptions = {
     scaffoldRoot: options.scaffoldRoot,
-    createAdoptionFrontmatter: true,
     ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
     ...(options.registry === undefined ? {} : { registry: options.registry }),
   };
