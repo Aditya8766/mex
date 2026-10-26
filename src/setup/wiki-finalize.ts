@@ -125,6 +125,14 @@ export async function finalizeSetupWiki(
 
   options.onProgress?.("Checking Wiki ids...");
   throwIfSetupAborted(options.signal);
+  // Stamping is a write too. Refuse structural errors before adding ids to
+  // otherwise healthy files in a scaffold that cannot safely be finalized.
+  const initial = await engine.validate({ projectRoot });
+  throwIfSetupAborted(options.signal);
+  if (hasErrors(initial)) {
+    collectDiagnostics(initial.diagnostics);
+    return result(false, "plan", "Wiki migration is blocked by errors in the populated scaffold.");
+  }
   const stamped = stampScaffoldFiles({
     scaffoldRoot,
     scope: "remaining",

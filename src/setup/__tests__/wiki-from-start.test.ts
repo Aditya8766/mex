@@ -49,6 +49,8 @@ describe("a Wiki from the start (#286)", () => {
       "**Reasoning:** One file, no server, rebuilt from Markdown at any time.",
       "",
     ].join("\n"));
+    // A fact in the log must not make finalize skip its authored decisions.
+    await createFact(mexDir, "context/decisions.md", "decision_fact", "The log retains decisions");
 
     const warnings: string[] = [];
     const result = await finalizeSetupWiki({ projectRoot, scaffoldRoot: mexDir, onWarning: (message) => warnings.push(message) });
@@ -73,6 +75,7 @@ describe("a Wiki from the start (#286)", () => {
     const decision = entities.find((entity) => entity.title === "Keep the index in SQLite");
     expect(decision?.type).toBe("decision");
     expect(refinesOf("Keep the index in SQLite")).toEqual([decisionsId]);
+    expect(refinesOf("The log retains decisions")).toEqual([decisionsId]);
     // The architecture template's edge to the decision log now resolves.
     const architecture = entities.find((entity) => entity.id === architectureId);
     expect(architecture?.relations.map((relation) => relation.target)).toContain(decisionsId);
@@ -115,6 +118,32 @@ describe("a Wiki from the start (#286)", () => {
       .flatMap((file) => file.parsed.entities)
       .find((entry) => entry.entity.title === "Workers drain the queue");
     expect(fact?.entity.relations).toEqual([expect.objectContaining({ type: "refines", target: fileId })]);
+  });
+
+  it("stamps plain Markdown from its folder without changing prose, BOM or line endings", async () => {
+    const projectRoot = fixture();
+    const mexDir = join(projectRoot, ".mex");
+    const files = {
+      "context/worker.md": "\ufeff# Worker\r\n\r\nAn authored subsystem overview.\r\n",
+      "patterns/check.md": "# Check\n\nRun the checks before publishing.\n",
+      "context/runbook.md": "---\nname: runbook\ntype: guide\n---\n\n# Runbook\n\nAuthored instructions.\n",
+    };
+    for (const [file, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(mexDir, file)), { recursive: true });
+      writeFileSync(join(mexDir, file), text);
+    }
+    const first = await finalizeSetupWiki({ projectRoot, scaffoldRoot: mexDir });
+    expect(first).toMatchObject({ ready: true, abstentions: 0 });
+    const inventory = inventoryScaffold({ scaffoldRoot: mexDir });
+    for (const [file, type] of [["context/worker.md", "component"], ["patterns/check.md", "pattern"], ["context/runbook.md", "guide"]]) {
+      expect(inventory.files.find(entry => entry.path === file)?.parsed.entities[0]?.entity.type).toBe(type);
+    }
+    expect(read(mexDir, "context/worker.md")).toMatch(/^\ufeff---\r\n/u);
+    expect(read(mexDir, "context/worker.md")).toContain(files["context/worker.md"].slice(1));
+    expect(read(mexDir, "patterns/check.md")).toContain(files["patterns/check.md"]);
+    const before = Object.keys(files).map(file => read(mexDir, file));
+    expect(await finalizeSetupWiki({ projectRoot, scaffoldRoot: mexDir })).toMatchObject({ ready: true, stampedFiles: 0, plannedEntities: 0 });
+    expect(Object.keys(files).map(file => read(mexDir, file))).toEqual(before);
   });
 });
 

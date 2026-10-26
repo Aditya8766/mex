@@ -145,6 +145,9 @@ describe("setup Wiki finalization", () => {
       "utf8",
     );
     const before = readFileSync(brokenPath, "utf8");
+    const healthyPath = join(scaffoldRoot, "context", "worker.md");
+    const healthy = "---\nname: worker\n---\n\n# Worker\n\nRetain this overview unchanged on failure.\n";
+    writeFileSync(healthyPath, healthy);
     const progress: string[] = [];
 
     const result = await finalizeSetupWiki({
@@ -162,9 +165,10 @@ describe("setup Wiki finalization", () => {
     expect(result.reason).toContain("blocked");
     expect(result.diagnostics.some((entry) => entry.severity === "error")).toBe(true);
     expect(readFileSync(brokenPath, "utf8")).toBe(before);
+    expect(readFileSync(healthyPath, "utf8")).toBe(healthy);
     expect(existsSync(join(scaffoldRoot, "events", "operations.jsonl"))).toBe(false);
     expect(existsSync(join(scaffoldRoot, "wiki.db"))).toBe(false);
-    expect(progress).toEqual(["Checking Wiki ids...", "Planning Wiki migration..."]);
+    expect(progress).toEqual(["Checking Wiki ids..."]);
   });
 
   it("honors configured read-only paths during migration", async () => {

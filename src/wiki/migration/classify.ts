@@ -301,7 +301,9 @@ export function classifyFile(file: InventoryFile): FileClassification {
 
   // A file that already carries entities has been migrated. Section 13.3: a
   // file with valid ids is skipped, never regenerated.
-  if (file.parsed.entities.length > 0) {
+  const partialDecisionLog = file.path === "context/decisions.md"
+    && !file.parsed.entities.some((entry) => entry.metadataKind === "frontmatter");
+  if (file.parsed.entities.length > 0 && !partialDecisionLog) {
     return { ...result, skipped: true, skipReason: ALREADY_ADOPTED_REASON };
   }
 
@@ -354,6 +356,8 @@ export function classifyFile(file: InventoryFile): FileClassification {
   // (the log itself), each carrying the structural decision marker.
   if (file.path === "context/decisions.md") {
     file.headings.forEach((heading, index) => {
+      // A previous run or wiki apply may already have adopted some entries.
+      if (file.parsed.entities.some((entry) => entry.entity.location.headingStart === heading.start)) return;
       // A depth-2 heading groups entries and makes no claim of its own; the
       // rule decides that, so it is not an abstention for a person to settle.
       // Its prose belongs to the file-level entity, as the title does (#286).
