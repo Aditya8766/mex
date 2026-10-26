@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { isUtf8 } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -418,7 +419,9 @@ function readPackagedDirectory(
     if (!entryStat.isFile()) {
       throw invalidPackagedSkill(skill, `Packaged skills may contain only regular files: ${relativePath}`);
     }
-    const bytes = readRegularFileNoFollow(absolutePath);
+    // Package sources can themselves be a Windows Git checkout. Record and
+    // write one LF text representation regardless of the package's checkout.
+    const bytes = withLineFeeds(readRegularFileNoFollow(absolutePath));
     files.push({
       relativePath,
       bytes,
@@ -572,9 +575,11 @@ function planSkill(
     );
   }
 
-  const metadataExact = bytesEqual(metadataLineFeeds, desired.metadataBytes);
-  const desiredFilesExact = recordsEqual(metadata.files, desired.metadata.files);
-  if (metadataExact && desiredFilesExact) {
+  // Older Windows installs recorded CRLF hashes. If the verified copy still
+  // matches this package's content and version, keep its bytes and ownership
+  // record rather than rewriting it only to canonicalize those hashes.
+  if (metadata.packageVersion === desired.metadata.packageVersion &&
+    matchesRecordedFiles(snapshot, desired.metadata.files)) {
     return {
       action: {
         kind: "skill",
@@ -582,7 +587,7 @@ function planSkill(
         client,
         skill,
         path: relativePath,
-        message: `${relativePath} already exactly matches packaged ${skill}.`,
+        message: `${relativePath} already matches packaged ${skill} (allowing checkout line endings).`,
       },
     };
   }
@@ -1180,6 +1185,8 @@ interface DirectorySnapshot {
    * That is not a modification: the content is the content MEX installed.
    */
   readonly lineFeedFiles: Readonly<Record<string, string>>;
+  /** Compatibility with ownership hashes recorded from older CRLF packages. */
+  readonly crlfFiles: Readonly<Record<string, string>>;
   readonly directories: readonly string[];
   readonly fingerprint: string;
 }
@@ -1195,7 +1202,7 @@ class UnsafeTreeError extends Error {
 function snapshotDirectory(root: string): DirectorySnapshot {
   const rootStat = lstatSync(root);
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new UnsafeTreeError(".");
-  const entries: Array<{ path: string; hash: string; lineFeedHash: string | null }> = [];
+  const entries: SnapshotEntry[] = [];
   const directories: string[] = [];
   snapshotDirectoryInto(root, "", entries, directories);
   entries.sort((left, right) => comparePortableText(left.path, right.path));
@@ -1204,6 +1211,9 @@ function snapshotDirectory(root: string): DirectorySnapshot {
   const lineFeedFiles = Object.fromEntries(entries
     .filter((entry) => entry.lineFeedHash !== null)
     .map((entry) => [entry.path, entry.lineFeedHash as string]));
+  const crlfFiles = Object.fromEntries(entries
+    .filter((entry) => entry.crlfHash !== null)
+    .map((entry) => [entry.path, entry.crlfHash as string]));
   const fingerprintHash = createHash("sha256");
   for (const directory of directories) {
     fingerprintHash.update("directory:");
@@ -1218,13 +1228,20 @@ function snapshotDirectory(root: string): DirectorySnapshot {
     fingerprintHash.update(entry.hash);
     fingerprintHash.update("\n");
   }
-  return { files, lineFeedFiles, directories, fingerprint: fingerprintHash.digest("hex") };
+  return { files, lineFeedFiles, crlfFiles, directories, fingerprint: fingerprintHash.digest("hex") };
+}
+
+interface SnapshotEntry {
+  path: string;
+  hash: string;
+  lineFeedHash: string | null;
+  crlfHash: string | null;
 }
 
 function snapshotDirectoryInto(
   root: string,
   relativeDirectory: string,
-  entries: Array<{ path: string; hash: string; lineFeedHash: string | null }>,
+  entries: SnapshotEntry[],
   directories: string[],
 ): void {
   const directory = relativeDirectory ? absoluteFromPortable(root, relativeDirectory) : root;
@@ -1244,6 +1261,9 @@ function snapshotDirectoryInto(
         path: relativePath,
         hash: sha256(bytes),
         lineFeedHash: lineFeeds === bytes ? null : sha256(lineFeeds),
+        crlfHash: isTextBytes(lineFeeds)
+          ? sha256(Buffer.from(Buffer.from(lineFeeds).toString("utf8").replace(/\n/gu, "\r\n")))
+          : null,
       });
     } else {
       throw new UnsafeTreeError(relativePath);
@@ -1313,34 +1333,30 @@ function matchesRecordedFiles(
   const recordedKeys = Object.keys(recorded).sort();
   return actualKeys.length === recordedKeys.length &&
     actualKeys.every((key, index) => key === recordedKeys[index] &&
-      (actual[key] === recorded[key] || actualTree.lineFeedFiles[key] === recorded[key])) &&
+      (actual[key] === recorded[key] || actualTree.lineFeedFiles[key] === recorded[key] ||
+        actualTree.crlfFiles[key] === recorded[key])) &&
     arraysEqual(actualTree.directories, directoriesFromFiles(Object.keys(recorded)));
 }
 
 /**
  * The bytes with every CRLF turned into LF, or the same array when there is
- * none. Only ever compared against hashes MEX recorded from LF package files,
- * so a file that matches after this differs from what MEX installed in its
- * line endings alone (see {@link DirectorySnapshot.lineFeedFiles}).
+ * none. Only UTF-8 text without NUL bytes is eligible; binary assets stay exact.
+ * BOMs, bare CRs and trailing-newline differences are deliberately retained.
  */
 function withLineFeeds(bytes: Uint8Array): Uint8Array {
-  if (!Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes("\r\n")) return bytes;
-  const out: number[] = [];
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (!buffer.includes("\r\n") || !isTextBytes(bytes)) return bytes;
+  const out = Buffer.allocUnsafe(bytes.length);
+  let length = 0;
   for (let index = 0; index < bytes.length; index += 1) {
     if (bytes[index] === 0x0d && bytes[index + 1] === 0x0a) continue;
-    out.push(bytes[index]!);
+    out[length++] = bytes[index]!;
   }
-  return Uint8Array.from(out);
+  return out.subarray(0, length);
 }
 
-function recordsEqual(
-  left: Readonly<Record<string, string>>,
-  right: Readonly<Record<string, string>>,
-): boolean {
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  return leftKeys.length === rightKeys.length &&
-    leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+function isTextBytes(bytes: Uint8Array): boolean {
+  return !bytes.includes(0) && isUtf8(bytes);
 }
 
 function inspectFixedTarget(

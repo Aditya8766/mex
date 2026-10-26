@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Setup and `mex skills sync` no longer refuse a managed skill whose files differ from what MEX installed only in line endings. Git checks text files out with CRLF under `core.autocrlf=true`, the Windows default, so a Windows clone of a set-up repository failed setup with "Official MEX agent assets have conflicts". A CRLF checkout of an unmodified skill is now left as it is, updated normally when the package changes, and a real edit is still preserved and reported (#308).
+  Packaged text and new ownership hashes use LF consistently, including when MEX itself is installed from a Windows checkout. Older CRLF ownership hashes remain recognized across checkouts; binary files, BOMs, trailing-newline changes, and edits after preview still require exact preservation.
 - Setup pauses when an agent reaches its usage limit, reports the reset time when available, and keeps finished work. Rerun `mex setup` after the limit resets to continue.
 - A scoped Wiki apply reports code links excluded from the graph as missing, so they can be corrected instead of repeatedly failing as a stale graph.
 - `mex graph refresh` falls back to full extraction when the affected compiler closure exceeds its incremental budget, releasing the previous extraction cache first.
