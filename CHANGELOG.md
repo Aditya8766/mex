@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Windows CI drives terminal setup through ConPTY, covering the tool picker, native agent handoff, recovery, and completion (#311).
 - Setup can launch background Cursor, GitHub Copilot and OpenCode CLI sessions alongside Claude Code and Codex. The selected agent needs to be installed and signed in.
 - `mex setup next` gives agents MEX cannot launch a one-paste setup flow: ask the agent to run `mex setup next --start` first, then follow its instructions until setup is complete. A new chat recovers complete batches without redoing them. Each call hands out several task files when work can run in parallel, applies ready batches, and continues the saved plan. Task prompts name source folders the code graph skips so agents can read them without trying to ground facts to unindexed code.
 - `mex wiki apply` accepts a JSON array of up to 200 operations as one atomic batch, reports problems by operation, and skips already applied operations on a rerun. Code links can name a file and symbol or line; MEX resolves the declaration and records its fingerprint and body hash. New entries link to their enclosing section or file automatically, and new knowledge files receive their own metadata.
@@ -18,6 +19,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- When `mex setup` pauses for population without a terminal, as when an agent runs it, the output now addresses that agent: run `mex setup next --start` for the one-paste handoff, or follow a full population prompt in this session and rerun `mex setup` to finalize. Do not commit until setup reports complete. A person running `mex setup --yes` in a terminal still sees the previous wording (#285).
+- Setup and `mex skills sync` no longer refuse a managed skill whose files differ from what MEX installed only in line endings. Git checks text files out with CRLF under `core.autocrlf=true`, the Windows default, so a Windows clone of a set-up repository failed setup with "Official MEX agent assets have conflicts". A CRLF checkout of an unmodified skill is now left as it is, updated normally when the package changes, and a real edit is still preserved and reported (#308).
+  Ownership hashes recorded from a CRLF package are also recognized in an LF checkout. Only UTF-8 text is compared across line endings; binary files, BOMs, trailing-newline changes, and edits after preview still require exact preservation.
 - Setup pauses when an agent reaches its usage limit, reports the reset time when available, and keeps finished work. Rerun `mex setup` after the limit resets to continue.
 - A scoped Wiki apply reports code links excluded from the graph as missing, so they can be corrected instead of repeatedly failing as a stale graph.
 - `mex graph refresh` falls back to full extraction when the affected compiler closure exceeds its incremental budget, releasing the previous extraction cache first.
