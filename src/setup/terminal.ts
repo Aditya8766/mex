@@ -1,16 +1,18 @@
+import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { AI_TOOLS, type AiTool } from "../types.js";
 import { BACKGROUND_AGENT_CLIS, isBackgroundAgentTool } from "../agent-command.js";
-import { loadConfiguredAiTools } from "../config.js";
+import { loadConfiguredAiTools, loadConfiguredSetupMode } from "../config.js";
 import { isCliAvailable } from "../cli-tools.js";
 import {
-  ensureToolAnchors, findSetupProjectRoot, installSetupAgentAssets, isScaffoldPopulated,
+  ensureToolAnchors, findSetupProjectRoot, installSetupAgentAssets, isScaffoldPopulated, setupCommitCheckpointCommands,
   type SetupRunOptions, type SetupRunResult,
 } from "./index.js";
 import {
   createSetupScaffold, requireSetupGitRepository, resolveSetupMode, setupTemplatesDirectory, throwIfSetupAborted,
 } from "./phases.js";
+import { assessSetupHealth, describeSetupHealth } from "./health.js";
 import { runHeadlessSetup, type HeadlessSetupResult } from "./headless.js";
 import { SetupError } from "./errors.js";
 import { classifySetupAgentAssetsError } from "./agent-errors.js";
@@ -37,6 +39,26 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   requireSetupGitRepository(projectRoot, mode);
   const hasTerminal = Boolean(stdin.isTTY && stdout.isTTY);
   const interactive = hasTerminal && !options.yes && !process.env.CI && process.env.TERM !== "dumb";
+  // Status first (#284): a rerun over an existing scaffold reports instead of
+  // redoing work, unless --force asks for the full flow or the person asks for
+  // a different mode or tool set, which only the flow can apply.
+  const health = !options.force && existsSync(resolve(mexDir, "ROUTER.md"))
+    && mode === loadConfiguredSetupMode(mexDir)
+    && (options.tools === undefined || sameTools(options.tools, loadConfiguredAiTools(mexDir)))
+    ? await assessSetupHealth(projectRoot)
+    : undefined;
+  if (health?.healthy) {
+    console.log(describeSetupHealth(health));
+    return { outcome: "complete", exitCode: 0, message: health.summary };
+  }
+  if (health?.needsCommitOnly && !interactive) {
+    const message = "MEX is prepared here but the setup is not committed yet. Run `mex setup --browser` to review and commit it.";
+    console.log(message);
+    return { outcome: "complete", exitCode: 0, message };
+  }
+  if (health && health.missing.length > 0 && !interactive) {
+    console.log(`Setup will finish what is missing:\n${health.missing.map(item => `- ${item}`).join("\n")}`);
+  }
   const abort = new AbortController();
   let cancelCode = 130;
   let cancellationDetail = "";
@@ -157,11 +179,18 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
       pending?.({ type: "cancel" });
     };
     let outcome: SetupRunResult | undefined;
-    let validated: HeadlessSetupResult | undefined;
+    // Prepared but uncommitted: skip the picker and the engine and go straight
+    // to the reviewed commit on the completion page (#284).
+    let validated: HeadlessSetupResult | undefined = health?.needsCommitOnly ? {
+      mode, stage: "ready", populated: true, ready: true, selectedTools, prompt: null,
+      populationTool: null, populationCompleted: true,
+      commitCommands: setupCommitCheckpointCommands(selectedTools), anchorNotes: [],
+      message: "Graph and Wiki are ready. Review and commit the canonical MEX setup.",
+    } : undefined;
     let anchorNotes: readonly string[] = [];
     let populationFailure: string | undefined;
     try {
-      const action = await choose();
+      const action: TerminalSetupAction = validated ? { type: "start" } : await choose();
       if (action.type !== "start") throwIfSetupAborted(abort.signal);
       const focusedTool = action.type === "start" ? action.tool : undefined;
       if (focusedTool) {
@@ -323,6 +352,12 @@ function pressEnterToReturn(signal: AbortSignal): Promise<"return" | "cancel"> {
   return waitForTerminalReturn(signal);
 }
 
+/** An explicit tool choice equal to the saved one changes nothing for a rerun. */
+function sameTools(requested: readonly AiTool[], configured: readonly AiTool[]): boolean {
+  const wanted = new Set(requested);
+  return wanted.size === new Set(configured).size && configured.every(tool => wanted.has(tool));
+}
+
 function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", tools: AiTool[], explicit: boolean): SetupRunResult {
   console.log(`MEX setup · DRY RUN · ${mode === "agent-memory" ? "agent-memory workspace" : basename(projectRoot)}`);
   console.log("No files will be created or modified.");
@@ -344,7 +379,7 @@ function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", t
   console.log(isScaffoldPopulated(resolve(projectRoot, ".mex"))
     ? "Would preserve and verify the populated scaffold."
     : "Would populate the scaffold with a selected agent or the manual prompt.");
-  if (mode === "code-repo") console.log("Would capture grounding, migrate and index Wiki, then validate the result.");
+  if (mode === "code-repo") console.log("Would capture grounding, give remaining files their Wiki ids, link and index the Wiki, then validate the result.");
   console.log("Interactive setup would then open the Hub completion page.");
   const message = "Dry run complete. Population and validation were not run.";
   console.log(message);

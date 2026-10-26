@@ -119,6 +119,8 @@ The browser runs the same setup engine with the background agents listed above a
 
 For scripts, use `--yes` with repeatable `--tool <name>` flags (or `--tool none`). Piped input/output and CI also use plain output. These runs reuse saved choices, default to no integrations when none are saved, and never launch an agent or browser or wait for input. Exit codes are `0` for completed preparation or a successful dry run, `2` when population is still required, `1` for failure, and `130`/`143` for interruption. After a population checkpoint, rerun `mex setup` to continue. Once preparation is complete, `mex setup --browser` opens the commit and completion page.
 
+Rerunning `mex setup` on a checkout that is already set up reports its status — entities, facts and whether the graph is current — and does no work; changed code is reported as drift with a pointer to `mex sync`. A prepared but uncommitted checkout goes straight to the commit step, and anything else is named before setup finishes only that part. `mex setup --browser` shows the same status. Use `mex setup --force` to run the full flow; authored files are always preserved. Choosing a different mode or AI tools also runs the flow.
+
 `mex setup --dry-run` remains a terminal preview without changes. Once installed, bare `mex` opens the Hub for an established code project or terminal setup for an incomplete project. `mex hub` explicitly opens the browser, while `mex tui` opens the terminal dashboard.
 
 ![Three steps to a ready project: run setup, populate memory, then review and commit the checkpoint before opening Hub.](docs/diagrams/readme/setup.svg)

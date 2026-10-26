@@ -83,6 +83,9 @@ global `mex`.
   automatic Git maintenance in fixture-writing commands before taking those
   snapshots; a background maintenance lock disappearing after a fixture commit
   is unrelated to entry discovery. Keep the full snapshot assertion intact.
+- Healthy setup reruns report status without doing work. An unfinished stored
+  plan must resume even when shared placeholders are filled. Treat source drift
+  as a reason to run sync, and preserve the explicit force path.
 - Interactive terminal setup uses the shared ordered engine through a HUD.
   Enter on a tool selects it and starts setup atomically; that focused tool
   precedes other checked tools when selecting a native agent. Space optionally
@@ -151,6 +154,10 @@ global `mex`.
 
 - A global CLI can report the same version while containing different bytes;
   use the built checkout when validating uncommitted setup changes.
+- Knowledge templates receive Wiki file identities before population. Keep the
+  decision-log container unstamped until its prose entries are adopted; creating
+  a fact in that log must not stamp it early. Finalization stamps remaining
+  files and links sections. Verify the provisional one-paste index as well.
 - Setup copies missing scaffold files but does not overwrite substantive files.
   Population prompts must merge at section granularity and preserve managed blocks.
 - A non-interactive run pauses after printing the population prompt when

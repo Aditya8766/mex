@@ -1,4 +1,5 @@
 import { populationWarning, fillPopulationPlaceholders, populationPlaceholderFiles, unpopulatedScaffoldFiles } from "./population-audit.js";
+import { describeUnfinishedSetup } from "./unfinished.js";
 /**
  * `mex setup next`: the one-paste setup for agents MEX cannot launch itself.
  *
@@ -117,7 +118,6 @@ function folder(path: string, remainder?: boolean): string {
 /** Run one step of the one-paste setup. Never throws for an expected problem: the output says what to do. */
 export async function runSetupNext(options: SetupNextOptions): Promise<SetupNextResult> {
   const root = resolve(options.projectRoot);
-  cleanupStaleSetupPrompts(root);
   const mexDir = resolve(root, ".mex");
   const progress = (line: string) => { try { options.onProgress?.(line); } catch { /* observation only */ } };
   let mode: SetupMode;
@@ -126,6 +126,13 @@ export async function runSetupNext(options: SetupNextOptions): Promise<SetupNext
   if (mode === "code-repo" && !existsSync(resolve(root, ".git"))) {
     return blocked("No Git repository found. Run `git init` first, then run `mex setup next` again.");
   }
+  // A completed older scaffold needs no queue or setup writes (#284).
+  if (existsSync(resolve(mexDir, "ROUTER.md")) && describeUnfinishedSetup(root) === null && !options.retry) {
+    const { assessSetupHealth, describeSetupHealth } = await import("./health.js");
+    const health = await assessSetupHealth(root);
+    if (health.healthy) return { status: "complete", exitCode: 0, progress: null, output: describeSetupHealth(health) };
+  }
+  cleanupStaleSetupPrompts(root);
   mkdirSync(resolve(root, ".mex", "local"), { recursive: true });
   const release = acquireLock(root, options.now ?? Date.now);
   if (release === null) {
@@ -837,8 +844,9 @@ function computePlan(root: string): SubsystemPlan | null {
  * Keep the Wiki usable while setup is unfinished. Without an index, a scaffold
  * whose files are not yet migrated reads as `migration_required` (#268), which
  * blocks Wiki reads and the Hub. Rebuilding the disposable index over the
- * current files makes it valid and fresh without migrating templates the
- * agents are still filling; finalize migrates and indexes for real. Returns a
+ * current files makes it valid and fresh. Templates already have their Wiki
+ * identities, and fact batches stamp new subsystem files; finalization adopts
+ * only remaining legacy knowledge and repairs missing section links. Returns a
  * warning when the index could not be rebuilt.
  */
 export async function ensureWikiIndexUsable(projectRoot: string): Promise<string | null> {

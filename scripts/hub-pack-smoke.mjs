@@ -1058,7 +1058,7 @@ async function verifyFreshCodeRepoSetup(tarball, workRoot, cache, version) {
     "You are the population agent. Run `mex setup next --start` in this session and do exactly what it prints.",
     "Do not commit until setup reports complete.",
     "run `mex setup next --start` first, then do exactly what it prints.",
-    "Wiki migration and index are ready.",
+    "Wiki ids, links and index are ready.",
     "Graph and Wiki are ready. Review and commit the canonical MEX setup.",
   ]) {
     if (!normalized.includes(expected)) {
@@ -1241,7 +1241,7 @@ function runManualPopulationSetup(cli, project, env, tools, {
   const completed = runPlainSetup(cli, project, env, entryOptions, 0);
   assertNoAgent();
   for (const expected of [
-    "Wiki migration and index are ready.",
+    "Wiki ids, links and index are ready.",
     "Graph and Wiki are ready. Review and commit the canonical MEX setup.",
     "Run `mex setup --browser` to open the setup completion page.",
   ]) {
@@ -1332,7 +1332,7 @@ function verifyPackedSetupOutput(output) {
     "You are the population agent. Run `mex setup next --start` in this session and do exactly what it prints.",
     "Do not commit until setup reports complete.",
     "run `mex setup next --start` first, then do exactly what it prints.",
-    "Wiki migration and index are ready.",
+    "Wiki ids, links and index are ready.",
     "Graph and Wiki are ready. Review and commit the canonical MEX setup.",
   ];
   // Installation itself is checked against the exact packaged trees, managed
