@@ -13,7 +13,7 @@ export function findSetupProjectRoot(startDir: string = process.cwd()): string {
   }
 }
 
-/** Report completed setup; retain the Hub's recovery surfaces for missing indexes. */
+/** Keep established code projects on the Hub's existing recovery surfaces. */
 export async function resolveDefaultEntry(
   projectRoot: string = findSetupProjectRoot(),
 ): Promise<"setup" | "hub"> {
@@ -22,9 +22,5 @@ export async function resolveDefaultEntry(
     || !existsSync(resolve(scaffoldRoot, "ROUTER.md"))) return "setup";
   // New workspaces do not need to load the Hub or inspect Graph/Wiki state.
   const { hasCommittedHubIdentity } = await import("../hub/setup/readiness.js");
-  if (!await hasCommittedHubIdentity(projectRoot)) return "setup";
-  const { assessSetupHealth } = await import("./health.js");
-  const { describeUnfinishedSetup } = await import("./unfinished.js");
-  if (describeUnfinishedSetup(projectRoot) !== null || (await assessSetupHealth(projectRoot)).healthy) return "setup";
-  return "hub";
+  return await hasCommittedHubIdentity(projectRoot) ? "hub" : "setup";
 }

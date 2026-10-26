@@ -178,7 +178,7 @@ describe("status-first setup rerun (#284)", () => {
     execFileSync("git", ["commit", "-m", "Set up MEX"], { cwd: root, stdio: "ignore" });
     const healthy = await rerun(root);
     expect(healthy.output).toMatch(/MEX is already set up here \(\d+ entities, \d+ facts?, graph current\)\./u);
-    expect(await resolveDefaultEntry(root)).toBe("setup");
+    expect(await resolveDefaultEntry(root)).toBe("hub");
 
     const wikiPath = join(root, ".mex/wiki.db");
     const db = openSqlite(wikiPath);

@@ -121,7 +121,7 @@ For scripts, use `--yes` with repeatable `--tool <name>` flags (or `--tool none`
 
 Rerunning `mex setup` on a checkout that is already set up reports its status — entities, facts and whether the graph is current — and does no work; changed code is reported as drift with a pointer to `mex sync`. A prepared but uncommitted checkout goes straight to the commit step, and anything else is named before setup finishes only that part. `mex setup --browser` shows the same status. Use `mex setup --force` to run the full flow; authored files are always preserved. Choosing a different mode or AI tools also runs the flow.
 
-`mex setup --dry-run` remains a terminal preview without changes. Bare `mex` reports status for a healthy checkout, opens terminal setup for an unfinished project, and retains Hub recovery for an established code project with missing indexes. `mex hub` explicitly opens the browser, while `mex tui` opens the terminal dashboard.
+`mex setup --dry-run` remains a terminal preview without changes. Once installed, bare `mex` opens the Hub for an established code project or terminal setup for an incomplete project. `mex hub` explicitly opens the browser, while `mex tui` opens the terminal dashboard.
 
 ![Three steps to a ready project: run setup, populate memory, then review and commit the checkpoint before opening Hub.](docs/diagrams/readme/setup.svg)
 
