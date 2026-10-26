@@ -55,7 +55,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   }
   if (health?.needsCommitOnly && !interactive) {
     const message = "MEX is prepared here but the setup is not committed yet. Run `mex setup --browser` to review and commit it.";
-    console.log(message);
+    console.log([message, ...health.notes].join("\n"));
     return { outcome: "complete", exitCode: 0, message };
   }
   if (health && health.missing.length > 0 && !interactive) {
@@ -288,7 +288,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
             });
             if (!result.ready) {
               outcome = { outcome: populationFailure ? "failed" : "paused", exitCode: populationFailure ? 1 : 2,
-                message: `${populationFailure ? `Setup failed: ${populationFailure}` : `Setup paused at population. ${result.message}`} ${describeUnfinishedSetup(projectRoot)?.line ?? CONTINUE}` };
+                message: `${populationFailure ? `Setup failed: ${populationFailure}` : `Setup paused at population. ${result.message}`} ${describeUnfinishedSetup(projectRoot)?.line ? `${describeUnfinishedSetup(projectRoot)!.line} ` : ""}${CONTINUE}` };
               continue;
             }
             validated = result;
@@ -312,7 +312,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
           const { projectSetupStatus } = await import("../hub/setup/readiness.js");
           const finished = await projectSetupStatus(projectRoot);
           const message = finished.mode === "agent-memory" || finished.ready
-            ? `Setup complete.${validated.coverageNotice ? ` ${validated.coverageNotice}` : ""}${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Hub stopped. Run \`mex hub\` to open Hub again.`
+            ? `Setup complete. Hub stopped.${validated.coverageNotice ? ` ${validated.coverageNotice}` : ""}${validated.groundingNotice ? ` ${validated.groundingNotice}` : ""} Run \`mex hub\` to open Hub again.`
             : `${validated.message} Hub stopped. Run \`mex setup --browser\` to reopen the completion page.`;
           outcome = { outcome: "complete", exitCode: 0, message };
         } catch (error) {

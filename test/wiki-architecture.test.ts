@@ -786,6 +786,7 @@ describe("no unscoped scaffold writes", () => {
       "src/setup/ignore.ts": "creates or appends only the setup-managed .mex/.gitignore rules",
       "src/setup/next-graph.ts": "atomically writes bounded graph worker progress to .mex/local/setup-next-graph.json through checked non-redirected directories; removes only its exclusive temporary file",
       "src/setup/next.ts": "writes the checkout-local one-paste task files, plan view and call lock under .mex/local; never Wiki Markdown",
+      "src/setup/population-audit.ts": "replaces only date/project-name tokens in seven bounded authored scaffold files during explicit setup finalization; refuses redirected paths and publishes through an exclusive staging file after byte revalidation",
       "src/setup/subsystem-links.ts": "writes setup navigation from finished batches: frontmatter edges, marker-bounded ROUTER and pattern INDEX rows, and new pattern files it never overwrites",
       "src/setup/subsystem-runs.ts": "writes the checkout-local plan progress view and marks applied batch files under .mex/local; never Wiki Markdown",
       "src/setup/subsystem-state.ts": "atomically saves the checkout-local setup plan state under .mex/local and sets a corrupt one aside",

@@ -1,3 +1,4 @@
+import { populationWarning, fillPopulationPlaceholders, populationPlaceholderFiles, unpopulatedScaffoldFiles } from "./population-audit.js";
 import { withSetupLock } from "./setup-lock.js";
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -19,7 +20,6 @@ import { describeGroundingDrift } from "../graph/grounding-failures.js";
 import { BACKGROUND_AGENT_CLIS, COMMAND_CAPABLE_AGENTS, isBackgroundAgentTool, type BackgroundAgentTool } from "../agent-command.js";
 import {
   HeadlessPopulationError,
-  readSingleUsagePause,
   describeSetupAgentChoice,
   findAvailableSetupAgent,
   launchHeadlessSetupPopulation,
@@ -31,7 +31,7 @@ import {
 } from "./headless-population.js";
 import type { SetupBatchApplier } from "./subsystem-apply.js";
 import { populateDuringGraph } from "./concurrent-graph.js";
-import { createPlanState, hasUnfinishedPlanState, loadPlanState, savePlanState, type SetupPlanState } from "./subsystem-state.js";
+import { createPlanState, hasUnfinishedPlanState, isUnstartedSetupPlan, loadPlanState, readSetupPlanSnapshot, savePlanState, type SetupPlanState } from "./subsystem-state.js";
 import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup, syncSetupNotice } from "./unfinished.js";
 import {
   SubsystemPhaseStoppedError,
@@ -280,9 +280,15 @@ async function runLockedSetup(
 
   requireSetupGitRepository(projectRoot, mode);
 
-  const singlePaused = readSingleUsagePause(projectRoot);
-  const resumeSingle = singlePaused?.queue?.mode === "single" && singlePaused.shared.reason === "usage_limit";
-  const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir) && !resumeSingle;
+  const storedSingle = readSetupPlanSnapshot(projectRoot);
+  const singlePaused = (storedSingle?.queue?.mode === "single"
+    && !storedSingle.queue.finalized && storedSingle.finalizedAt === undefined && storedSingle.shared.state !== "done" ? storedSingle : null);
+  // An interrupted single session may already have authored all seven files.
+  // Finalize it with the content audit rather than repeat the whole session.
+  const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir);
+  const resumeSingle = singlePaused !== null && !scaffoldPopulatedAtStart;
+  const unusedLegacyPlan = scaffoldPopulatedAtStart && storedSingle !== null
+    && populationPlaceholderFiles(mexDir).length > 0 && isUnstartedSetupPlan(projectRoot, storedSingle);
   const state = detectProjectState(projectRoot, mexDir);
   report("detect", describeDetectedState(mode, state));
 
@@ -398,7 +404,7 @@ async function runLockedSetup(
   let plan: SubsystemPlan | null | undefined;
   if (!resumeSingle && mode === "code-repo" && state !== "fresh" && options.confirmPopulation !== true) {
     const env = options.perSubsystem?.env ?? process.env;
-    const resuming = perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
+    const resuming = !unusedLegacyPlan && perSubsystemSwitch(env) !== "off" && hasUnfinishedPlanState(projectRoot);
     if (!scaffoldPopulatedAtStart || resuming) {
       if (!resuming) plan = (await import("./subsystems.js")).computeSubsystemPlan(projectRoot, { useGraph: false });
       const injected = options.perSubsystem?.launch !== undefined;
@@ -427,7 +433,10 @@ async function runLockedSetup(
     report("graph");
     await buildSetupGraph(projectRoot, { background: true, signal: options.signal, onProgress: options.onGraphProgress });
   }
-  const prompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan);
+  const fullPrompt = await buildSetupPopulationPrompt(mode, state, scannerBrief, projectRoot, perSubsystemState?.plan ?? plan);
+  const prompt = resumeSingle
+    ? `Continue the recorded setup; do not restart population. Only these required files still lack authored knowledge: ${unpopulatedScaffoldFiles(mexDir).map(file => `.mex/${file}`).join(", ")}. Preserve completed files and facts. Fill the missing knowledge and check patterns, facts and refines links using the guidance below.\n\n${fullPrompt}`
+    : fullPrompt;
   options.onPopulationPrompt?.(prompt);
   if (perSubsystemState === null) report("population");
 
@@ -436,7 +445,7 @@ async function runLockedSetup(
   // rest here, setup pauses and says how to continue.
   if (perSubsystemState === null && mode === "code-repo") {
     const unfinished = describeUnfinishedSetup(projectRoot);
-    if (unfinished !== null && unfinished.driver === "queue" && loadPlanState(projectRoot).state?.queue?.mode === "units") {
+    if (!unusedLegacyPlan && unfinished !== null && loadPlanState(projectRoot).state?.queue?.mode !== "single") {
       syncSetupNotice(projectRoot, { done: unfinished.done, total: unfinished.total });
       return {
         mode, stage: "needs_population", populated: isScaffoldPopulated(mexDir), ready: false, selectedTools,
@@ -527,6 +536,13 @@ async function runLockedSetup(
       announce(choice);
       tool = choice?.tool;
     }
+    const recorded = singlePaused ?? createPlanState({ source: "tree", ranking: "size", sourceFiles: 0, target: { min: 0, max: 0 }, candidates: [] });
+    if (options.populate !== undefined || tool !== undefined) {
+      recorded.queue ??= { mode: "single" };
+      recorded.shared.state = "running";
+      recorded.shared.reason = "population_incomplete";
+      savePlanState(projectRoot, recorded);
+    }
     const launched = await (options.populate ?? launchHeadlessSetupPopulation)({
       selectedTools,
       ...(tool === undefined ? {} : { tool }),
@@ -542,12 +558,10 @@ async function runLockedSetup(
     populationCompleted = launched.completed;
     throwIfSetupAborted(options.signal);
     if (launched.completed) {
-      if (resumeSingle && singlePaused) {
-        singlePaused.shared.state = "done";
-        delete singlePaused.shared.reason;
-        singlePaused.final.state = "done";
-        savePlanState(projectRoot, singlePaused);
-      }
+      recorded.shared.state = isScaffoldPopulated(mexDir) ? "done" : "pending";
+      delete recorded.shared.reason;
+      recorded.final.state = "done";
+      savePlanState(projectRoot, recorded);
       populationFinished = isScaffoldPopulated(mexDir);
     }
   }
@@ -611,6 +625,7 @@ async function runLockedSetup(
     };
   }
 
+  const placeholderNotices = fillPopulationPlaceholders(projectRoot, mexDir, options.onMessage);
   let finalized: import("./finalize-repair.js").SetupFinalizeOutcome = { dropped: [], drift: null };
   if (mode === "code-repo") {
     report("finalize");
@@ -626,7 +641,11 @@ async function runLockedSetup(
     throwIfSetupAborted(options.signal);
   }
 
+  const auditNotice = await populationWarning(projectRoot, mexDir, mode);
+  if (auditNotice !== null) options.onMessage?.(auditNotice);
   const groundingNotice = [
+    ...placeholderNotices,
+    auditNotice ?? "",
     finalized.dropped.length
       ? `Dropped references: ${finalized.dropped.slice(0, 3).map(f => `${f.file} → ${f.node}`).join("; ")}${finalized.dropped.length > 3 ? `; and ${finalized.dropped.length - 3} more` : ""}.`
       : "",
@@ -651,7 +670,7 @@ async function runLockedSetup(
     message: mode === "code-repo"
       ? "Graph and Wiki are ready. Review and commit the canonical MEX setup."
         + (coverageNotice ? ` ${coverageNotice}` : "") + (groundingNotice ? ` ${groundingNotice}` : "")
-      : "Setup complete.",
+      : `Setup complete.${groundingNotice ? ` ${groundingNotice}` : ""}`,
   };
 }
 
@@ -700,11 +719,16 @@ function uniqueTools(tools: readonly AiTool[]): AiTool[] {
 export function markSetupQueueFinished(projectRoot: string): void {
   try {
     const loaded = loadPlanState(projectRoot);
-    if (loaded.state !== null) {
+    if (loaded.state !== null && loaded.state.finalizedAt === undefined && loaded.state.queue?.finalized !== true) {
       loaded.state.finalizedAt = new Date().toISOString();
       if (loaded.state.queue !== undefined) {
         loaded.state.queue.finalized = true;
         delete loaded.state.queue.awaiting;
+        if (loaded.state.queue.mode === "single") {
+          loaded.state.shared.state = "done";
+          delete loaded.state.shared.reason;
+          loaded.state.final.state = "done";
+        }
       }
       savePlanState(projectRoot, loaded.state);
     }

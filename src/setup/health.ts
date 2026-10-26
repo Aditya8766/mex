@@ -51,6 +51,12 @@ export async function assessSetupHealth(projectRoot: string): Promise<SetupHealt
     committed = await hasCommittedHubIdentity(root);
   }
 
+  // A finished but thin setup keeps saying what it lacks on every status rerun (#283).
+  if (status.hasScaffold && status.populated && (status.mode === "code-repo" || status.mode === "agent-memory")) {
+    const { populationWarning } = await import("./population-audit.js");
+    const thin = await populationWarning(root, resolve(root, ".mex"), status.mode);
+    if (thin) notes.push(thin);
+  }
   const counts = countKnowledge(resolve(root, ".mex"));
   if (counts?.unfinishedFiles.length) missing.push(`Setup finalization still needs to fill placeholders in ${counts.unfinishedFiles.map(file => `.mex/${file}`).join(", ")}.`);
   const needsCommitOnly = status.mode === "code-repo" && missing.length === 0 && !committed;

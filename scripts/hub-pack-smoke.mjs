@@ -1154,7 +1154,13 @@ function populateSetupFixture(project) {
         const after = before
           .replaceAll("[Project Name]", "Setup Fixture")
           .replaceAll("[YYYY-MM-DD]", "2026-09-02");
-        if (after !== before) writeFileSync(path, after, "utf8");
+        if (after !== before || entry.name === "ROUTER.md") {
+          // Setup counts project knowledge, not text appended to MEX-managed boilerplate.
+          const note = "\nAuthored project guidance from source inspection.\n";
+          const slot = /^## (?:What This Is|Current (?:Project|Operational) State)[^\n]*\r?\n/mu.exec(after);
+          const at = slot ? slot.index + slot[0].length : after.length;
+          writeFileSync(path, after.slice(0, at) + note + after.slice(at), "utf8");
+        }
       }
     }
   };
