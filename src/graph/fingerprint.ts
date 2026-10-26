@@ -335,7 +335,7 @@ export function decodeMinhash(blob: Uint8Array): number[] {
   return values;
 }
 
-function assertFingerprint(value: unknown): asserts value is Fingerprint {
+export function assertFingerprint(value: unknown): asserts value is Fingerprint {
   if (!value || typeof value !== "object") throw new Error("Invalid fingerprint");
   const candidate = value as Partial<Fingerprint>;
   if (

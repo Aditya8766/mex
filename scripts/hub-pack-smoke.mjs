@@ -1054,7 +1054,8 @@ async function verifyFreshCodeRepoSetup(tarball, workRoot, cache, version) {
   const normalized = output.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
   for (const expected of [
     "Setup paused: scaffold population is still required.",
-    "Population prompt:",
+    "Population prompt (paste it into your agent):",
+    "run `mex setup next --start` first, then do exactly what it prints.",
     "Wiki migration and index are ready.",
     "Graph and Wiki are ready. Review and commit the canonical MEX setup.",
   ]) {
@@ -1215,7 +1216,11 @@ function runManualPopulationSetup(cli, project, env, tools, {
     ...entryOptions, "--mode", "code-repo", ...tools.flatMap((tool) => ["--tool", tool]),
   ], 2);
   assertNoAgent();
-  for (const expected of ["Setup paused: scaffold population is still required.", "Population prompt:"]) {
+  for (const expected of [
+    "Setup paused: scaffold population is still required.",
+    "Population prompt (paste it into your agent):",
+    "run `mex setup next --start` first, then do exactly what it prints.",
+  ]) {
     if (!paused.includes(expected)) {
       throw new Error(`Packed setup omitted its manual population checkpoint: ${expected}\n${paused}`);
     }
@@ -1313,7 +1318,8 @@ function verifyPackedSetupOutput(output) {
     "Link AI tool instructions",
     "Install official MEX agent skills",
     "Setup paused: scaffold population is still required.",
-    "Population prompt:",
+    "Population prompt (paste it into your agent):",
+    "run `mex setup next --start` first, then do exactly what it prints.",
     "Wiki migration and index are ready.",
     "Graph and Wiki are ready. Review and commit the canonical MEX setup.",
   ];
