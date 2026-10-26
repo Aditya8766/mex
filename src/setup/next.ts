@@ -822,8 +822,9 @@ function computePlan(root: string): SubsystemPlan | null {
  * Keep the Wiki usable while setup is unfinished. Without an index, a scaffold
  * whose files are not yet migrated reads as `migration_required` (#268), which
  * blocks Wiki reads and the Hub. Rebuilding the disposable index over the
- * current files makes it valid and fresh without migrating templates the
- * agents are still filling; finalize migrates and indexes for real. Returns a
+ * current files makes it valid and fresh. Templates already have their Wiki
+ * identities, and fact batches stamp new subsystem files; finalization adopts
+ * only remaining legacy knowledge and repairs missing section links. Returns a
  * warning when the index could not be rebuilt.
  */
 export async function ensureWikiIndexUsable(projectRoot: string): Promise<string | null> {

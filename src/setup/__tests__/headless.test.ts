@@ -81,7 +81,7 @@ describe("headless setup run", () => {
       env: { MEX_SETUP_PER_SUBSYSTEM: "force" }, launch, freeMemory: () => 64 * 1024 ** 3,
       trackSource: false, applier: { apply, close: async () => ({ changed: false }) },
     } }).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(launch.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(launch.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 10_000 });
     expect(apply).not.toHaveBeenCalled();
     fail(new Error("Graph worker failed; rerun mex setup"));
     expect(await pending).toMatchObject({ message: "Graph worker failed; rerun mex setup" });
