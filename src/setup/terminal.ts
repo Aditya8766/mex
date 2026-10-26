@@ -20,6 +20,7 @@ import type { TerminalSetupAction, TerminalSetupView } from "./terminal-ui.js";
 import { appendTerminalSetupEvent } from "./terminal-events.js";
 import { SETUP_HANDOFF_PROMPT, describeUnfinishedSetup } from "./unfinished.js";
 import { waitForTerminalReturn } from "./terminal-return.js";
+import { assertSetupAvailable } from "./setup-lock.js";
 
 const CONTINUE = "Run `mex setup` to continue. Existing authored files are preserved.";
 const AGENT_CONTINUE = "\nYou are the population agent. Follow the prompt below in this session.\n"
@@ -35,6 +36,7 @@ export async function runTerminalSetup(options: SetupRunOptions): Promise<SetupR
   if (options.dryRun) return previewSetup(projectRoot, mode, selectedTools, options.tools !== undefined);
   // Before the tool picker: a choice the engine would then refuse is wasted (#287).
   requireSetupGitRepository(projectRoot, mode);
+  assertSetupAvailable(mexDir);
   const hasTerminal = Boolean(stdin.isTTY && stdout.isTTY);
   const interactive = hasTerminal && !options.yes && !process.env.CI && process.env.TERM !== "dumb";
   const abort = new AbortController();
