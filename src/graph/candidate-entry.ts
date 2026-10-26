@@ -93,7 +93,7 @@ async function main(): Promise<void> {
         },
       } as Parameters<typeof createGraphEngine>[0]);
       const result = request.operation === "refresh" ? await engine.sync([]) : await engine.build();
-      flushGraphPhaseTimings(`candidate-${request.operation}`);
+      flushGraphPhaseTimings(`candidate-${request.operation}`, request.projectRoot);
       engine.close();
       engine = undefined;
       outcome = { type: "complete", result };

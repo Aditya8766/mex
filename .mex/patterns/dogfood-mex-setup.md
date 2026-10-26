@@ -13,12 +13,12 @@ edges:
     condition: "when distinguishing canonical artifacts from local projections"
   - target: "patterns/release-performance-gate.md"
     condition: "when the change also affects packed-install or release gates"
-last_updated: 2026-10-10
+last_updated: 2026-10-26
 mex:
   id: mx_01M1M0CJJD2AQZ6XKHV4VKYTGJ
   type: pattern
   status: promoted
-  revision: 7
+  revision: 8
   title: dogfood-mex-setup
   grounds_to:
     - node: function:9055347f917caf8721a2f6d4e18bcc9a
@@ -64,6 +64,13 @@ global `mex`.
 
 ## Gotchas
 
+- Source-based setup state detection must recognize deeply nested layouts such
+  as `src/main/java/com/acme/App.java`. Walk until the first source match
+  without a depth cap, retaining graph default/configured ignores and dependency
+  exclusions. The synchronous glob iterator completes its filesystem walk before
+  yielding, so taking one result alone does not stop directory I/O. A populated
+  scaffold plus source still distinguishes partial setup. Coverage ranking has
+  stricter exclusions: authored tests and examples still count for setup state.
 - Unflagged `setup` now opens terminal setup; `--cli` remains a compatibility
   alias. Browser drivers must pass `setup --browser` or use `hub` explicitly.
   Bare `mex` uses terminal setup for incomplete/agent-memory projects and the

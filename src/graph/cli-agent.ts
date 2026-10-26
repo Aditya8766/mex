@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { globSync } from "glob";
-import { graphManifest, graphManifestDiffersOnlyByConfig } from "./engine-impl.js";
+import { discoverGraphReadPaths } from "./read-discovery.js";
+import { GRAPH_CORPUS_LIMITS } from "./corpus-policy.js";
+import { graphManifest, graphManifestDiffersOnlyByConfig } from "./manifest.js";
 import type { GraphEngine, GraphNeighbor, IndexedFileInfo } from "./engine.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
-import { isSupportedSourceFile, SUPPORTED_SOURCE_GLOB } from "./extraction/index.js";
+import { isSupportedSourceFile, SUPPORTED_SOURCE_GLOB } from "./extraction/grammars.js";
 import {
   coverageFields, coverageReportable, hasGraphCoverageCache, readGraphCoverageObservation,
   type GraphCoverageObservation,
@@ -75,6 +76,8 @@ export interface AgentCommandDeps {
 
 type RawOptions = Partial<Record<keyof AgentOptions, unknown>>;
 type Rec = Record<string, unknown>;
+/** A node `graph scope` may return a fact for: a ranked candidate, or an unranked flow endpoint. */
+type FactEntry = Pick<ScopedCandidate, "id" | "score" | "reasons">;
 type ImpactDirection = "callers" | "callees" | "both";
 
 /** Agent-facing blast radius. Output is newline-delimited JSON (JSONL). */
@@ -609,6 +612,52 @@ export function runGraphScope(
       plannedSources, primaryNodeOrder, exactNodeOrder, flowAnswerCandidateIds,
       reservedPrimaryNodeIds, globallyReservedSourceOrder, nodeById,
     ), nodeById);
+    // `--fingerprint` puts fingerprints on fact records, which are admitted
+    // after every source spill. Each source admission also holds room for the
+    // facts of its nodes, so returned source keeps its fingerprints.
+    const fingerprintFactTokens = new Map<string, number>();
+    // A flow endpoint can come back as source without being a ranked
+    // candidate. With `--fingerprint` it gets an unranked fact too, or its
+    // returned source would have no fingerprint.
+    const unrankedSourceFacts: FactEntry[] = [];
+    if (opts.fingerprint && opts.detail === "source") {
+      const ranked = new Set(selection.candidates.map((candidate) => candidate.id));
+      const flowEndpoints = plannedFlowRecords.flatMap(({ record }) => (
+        record.steps as Array<{ source: string; target: string }>
+      ).flatMap((step) => [step.source, step.target]))
+        .filter((id) => !ranked.has(id))
+        .map((id): FactEntry => ({ id, score: 0, reasons: [] }));
+      for (const entry of [...selection.candidates, ...flowEndpoints]) {
+        if (fingerprintFactTokens.has(entry.id)) continue;
+        const node = nodeById.get(entry.id);
+        const fact = node && !stale.has(node.filePath) ? factFor(session, entry.id, opts.detail, true) : null;
+        if (fact) {
+          fingerprintFactTokens.set(entry.id, estimateTokens(
+            scopeFactRecord(fact, entry.score, entry.reasons, opts),
+          ));
+          if (!ranked.has(entry.id)) unrankedSourceFacts.push(entry);
+        }
+      }
+    }
+    const heldFactIds = new Set<string>();
+    let factTokenReserve = 0;
+    /** Fact tokens admitting `record` would add to the reserve. */
+    const factTokensFor = (record: Rec): number => {
+      const ids = new Set((record.ranges as SourceRange[]).flatMap((range) => range.nodeIds));
+      let tokens = 0;
+      for (const id of ids) if (!heldFactIds.has(id)) tokens += fingerprintFactTokens.get(id) ?? 0;
+      return tokens;
+    };
+    const holdFacts = (records: Rec[]): void => {
+      for (const record of records) {
+        factTokenReserve += factTokensFor(record);
+        for (const range of record.ranges as SourceRange[]) range.nodeIds.forEach((id) => heldFactIds.add(id));
+      }
+    };
+    // Hard-ledger room left once the summary and the held facts are set aside.
+    const roomAboveFactReserve = (): number => (
+      ctx.effectiveMax - ledger.estimatedTokens - summaryTokenReserve - factTokenReserve
+    );
     for (const planned of sourceAdmissions) {
       const { record, phase } = planned;
       // A large atomic answer may fail the source-share fit while a later
@@ -620,8 +669,9 @@ export function runGraphScope(
         continue;
       }
       const admission = admitSourceWithinShare(
-        record, sourceShare - sourceTokens, ledger, planned.atomic,
+        record, sourceShare - sourceTokens - factTokenReserve - factTokensFor(record), ledger, planned.atomic,
       );
+      holdFacts(admission.admitted);
       sourceRecords.push(...admission.admitted);
       sourceTokens += admission.tokens;
       truncated ||= admission.trimmed;
@@ -634,13 +684,11 @@ export function runGraphScope(
         for (const deferred of unresolved) {
           const spill = admitSourceWithinShare(
             deferred,
-            Math.max(
-              0,
-              ctx.effectiveMax - ledger.estimatedTokens - summaryTokenReserve - flowTokenReserve,
-            ),
+            Math.max(0, roomAboveFactReserve() - flowTokenReserve - factTokensFor(deferred)),
             ledger,
             true,
           );
+          holdFacts(spill.admitted);
           sourceRecords.push(...spill.admitted);
           sourceTokens += spill.tokens;
           stillDeferred.push(...spill.deferred);
@@ -674,21 +722,37 @@ export function runGraphScope(
       }
       const spill = admitSourceWithinShare(
         deferred.record,
-        Math.max(
-          0,
-          ctx.effectiveMax - ledger.estimatedTokens - summaryTokenReserve - flowTokenReserve,
-        ),
+        Math.max(0, roomAboveFactReserve() - flowTokenReserve - factTokensFor(deferred.record)),
         ledger,
         true,
       );
+      holdFacts(spill.admitted);
       sourceRecords.push(...spill.admitted);
       if (spill.trimmed || spill.deferred.length > 0) truncated = true;
+    }
+
+    const factRecordFor = (entry: FactEntry): { record: Rec; node: GraphNode } | null => {
+      const fact = factFor(session, entry.id, opts.detail, opts.fingerprint);
+      const node = nodeById.get(entry.id);
+      if (!fact || !node || stale.has(node.filePath)) return null;
+      return { record: scopeFactRecord(fact, entry.score, entry.reasons, opts), node };
+    };
+    // Outside source detail nothing holds room for facts, and flows would fill
+    // a small budget first. With `--fingerprint`, facts go ahead of flows but
+    // leave them their bounded share; the facts are still emitted after them.
+    const earlyFacts = new Map<string, { record: Rec; node: GraphNode }>();
+    if (opts.fingerprint && opts.detail !== "source") {
+      for (const candidate of selection.candidates) {
+        const fact = factRecordFor(candidate);
+        if (fact && estimateTokens(fact.record) <= roomAboveFactReserve() - flowTokenReserve
+          && ledger.tryAdd(fact.record)) earlyFacts.set(candidate.id, fact);
+      }
     }
 
     const flowRecords: Rec[] = [];
     let returnedEdges = 0;
     for (const { record, stepCount } of plannedFlowRecords) {
-      if (ledger.tryAdd(record)) {
+      if (estimateTokens(record) <= roomAboveFactReserve() && ledger.tryAdd(record)) {
         flowRecords.push(record);
         returnedEdges += stepCount;
       } else truncated = true;
@@ -696,8 +760,14 @@ export function runGraphScope(
 
     for (const deferred of ordinaryDeferredSources) {
       const spill = admitSourceWithinShare(
-        deferred.record, ctx.effectiveMax, ledger, deferred.atomic,
+        deferred.record,
+        fingerprintFactTokens.size > 0
+          ? Math.max(0, roomAboveFactReserve() - factTokensFor(deferred.record))
+          : ctx.effectiveMax,
+        ledger,
+        deferred.atomic,
       );
+      holdFacts(spill.admitted);
       sourceRecords.push(...spill.admitted);
       if (spill.trimmed || spill.deferred.length > 0) truncated = true;
     }
@@ -706,14 +776,36 @@ export function runGraphScope(
     const flowIds = new Set(flowRecords.flatMap((record) =>
       (record.steps as Array<{ source: string; target: string }>).flatMap((step) => [step.source, step.target])));
     const facts: Array<{ record: Rec; node: GraphNode }> = [];
-    for (const candidate of selection.candidates) {
+    // The reserve is for source-backed nodes, so their facts go before flow-only ones.
+    const factCandidates: FactEntry[] = fingerprintFactTokens.size > 0
+      ? [
+        ...selection.candidates.filter((candidate) => sourcedIds.has(candidate.id)),
+        ...unrankedSourceFacts.filter((entry) => sourcedIds.has(entry.id)),
+        ...selection.candidates.filter((candidate) => !sourcedIds.has(candidate.id)),
+      ]
+      : selection.candidates;
+    // Facts `--fingerprint` asked for that the budget could not hold.
+    let omittedFingerprintFacts = 0;
+    for (const candidate of factCandidates) {
       if (opts.detail === "source" && !sourcedIds.has(candidate.id) && !flowIds.has(candidate.id)) continue;
-      const fact = factFor(session, candidate.id, opts.detail, opts.fingerprint);
-      const node = nodeById.get(candidate.id);
-      if (!fact || !node || stale.has(node.filePath)) continue;
-      const record = scopeFactRecord(fact, candidate.score, candidate.reasons, opts);
-      if (ledger.tryAdd(record)) facts.push({ record, node }); else truncated = true;
+      const early = earlyFacts.get(candidate.id);
+      if (early) {
+        facts.push(early);
+        continue;
+      }
+      const fact = factRecordFor(candidate);
+      if (!fact) continue;
+      if (ledger.tryAdd(fact.record)) facts.push(fact);
+      else {
+        truncated = true;
+        if (opts.fingerprint) omittedFingerprintFacts += 1;
+      }
     }
+    // A returned source node whose fact did not fit has lost its fingerprint.
+    const unfingerprintedSourceNodes = opts.fingerprint
+      ? [...sourcedIds].filter((id) => fingerprintFactTokens.has(id)
+        && !facts.some((fact) => fact.node.id === id)).length
+      : 0;
 
     const finalSourcedIds = new Set(sourceRecords.flatMap((record) =>
       (record.ranges as SourceRange[]).flatMap((range) => range.nodeIds)));
@@ -777,6 +869,9 @@ export function runGraphScope(
       ...(highPriorityEvidenceOmitted
         ? [`High-priority evidence omitted: ${omittedHighPrioritySourceFiles.length} source file(s), ${omittedHighPriorityFlowSteps} flow step(s).`]
         : []),
+      ...(omittedFingerprintFacts > 0
+        ? [`Fingerprints omitted: ${omittedFingerprintFacts} fact(s) did not fit the output budget; raise --max-output-tokens or narrow the task.`]
+        : []),
       ...(isConfigDrifted(session)
         ? ["Graph build configuration changed after this index was built; flows and other resolved relationships may be out of date."]
         : []),
@@ -784,9 +879,15 @@ export function runGraphScope(
         ? ["Some indexed files did not parse completely; this answer may be missing symbols they define."]
         : []),
     ];
+    // `--fingerprint` exists to return fingerprints. An answer without any, or
+    // with returned source that lost its fingerprint, is not complete; nor is
+    // it a no-match when the facts matched but did not fit.
+    const fingerprintsMissing = unfingerprintedSourceNodes > 0
+      || (omittedFingerprintFacts > 0 && !facts.some((fact) => fact.record.fingerprint !== undefined));
     const status = returnedFiles.length === 0 && facts.length === 0 && flowRecords.length === 0
+      && !fingerprintsMissing
       ? "no-match"
-      : highPriorityEvidenceOmitted ? "partial"
+      : highPriorityEvidenceOmitted || fingerprintsMissing ? "partial"
         : materiallyReliesOnTextOnly ? "degraded"
           : "ok";
     const suggestions = status === "partial" && facts.length > 0
@@ -814,7 +915,8 @@ export function runGraphScope(
     ]);
     write(JSON.stringify(summaryRecord(ctx, {
       matchedNodes: selection.matchedCount,
-      returnedNodes: facts.length,
+      // Source-mode answers can return nodes as source alone, with no fact record.
+      returnedNodes: new Set([...finalSourcedIds, ...facts.map((fact) => fact.node.id)]).size,
       returnedEdges,
       truncated,
       suggestedNextCommands: suggestions,
@@ -2792,7 +2894,7 @@ function groundingOmissionRecords(scaffold: CommittedGroundingObservation): Rec[
 
 function liveUnindexedFiles(indexedFiles: IndexedFileInfo[], rootDir: string): string[] {
   const indexed = new Set(indexedFiles.map((file) => file.path));
-  return globSync(SUPPORTED_SOURCE_GLOB, {
+  return discoverGraphReadPaths(SUPPORTED_SOURCE_GLOB, {
     cwd: rootDir,
     ignore: [
       "**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.mex/**",
@@ -2801,7 +2903,8 @@ function liveUnindexedFiles(indexedFiles: IndexedFileInfo[], rootDir: string): s
     nodir: true,
     absolute: false,
     dot: false,
-  }).map((file) => file.replaceAll("\\", "/"))
+    follow: false,
+  }, GRAPH_CORPUS_LIMITS.maxSourceFiles).map((file) => file.replaceAll("\\", "/"))
     .filter((file) => isSupportedSourceFile(file) && !indexed.has(file))
     .sort();
 }

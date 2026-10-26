@@ -10,7 +10,7 @@ import type {
   SetupCommitDiff,
   SetupCommitDiffRequest,
 } from "@mex/hub-contracts/setup";
-import { SETUP_ACTIVITY_LIMIT } from "@mex/hub-contracts/setup";
+import { SETUP_ACTIVITY_LIMIT, SETUP_COVERAGE_SUBSYSTEM_LIMIT } from "@mex/hub-contracts/setup";
 import {
   inspectSetupStatus,
   runHeadlessSetup,
@@ -341,6 +341,20 @@ export class HubSetupRunner {
             this.transcriptTimer.unref();
           }
         },
+        onPopulationCoverage: (coverage) => {
+          if (signal.aborted || this.run.status !== "running" || this.controller?.signal !== signal) return;
+          this.run = {
+            ...this.run,
+            populationCoverage: {
+              phase: coverage.phase,
+              total: coverage.total,
+              done: coverage.done,
+              skipped: coverage.skipped,
+              subsystems: coverage.subsystems.slice(0, SETUP_COVERAGE_SUBSYSTEM_LIMIT).map((entry) => ({ path: entry.path.slice(0, 512), state: entry.state })),
+            },
+          };
+          // The progress event that follows each coverage change emits the run.
+        },
         onPopulationActivity: (activity) => {
           if (signal.aborted || this.run.status !== "running" || this.controller?.signal !== signal) return;
           const at = this.now().toISOString();
@@ -421,6 +435,8 @@ export class HubSetupRunner {
     const paused = status.stage === "needs_population" || status.stage === "needs_commit";
     const message = status.stage === "needs_commit"
       ? "Graph and Wiki are ready. Review and commit the canonical MEX files, then check again to open the Hub."
+        + (result.coverageNotice ? ` ${result.coverageNotice}` : "")
+        + (result.groundingNotice ? ` ${result.groundingNotice}` : "")
       : status.stage === "complete"
         ? "Agent memory is ready. Your selected AI tools can use this workspace."
         : result.message;
@@ -435,6 +451,7 @@ export class HubSetupRunner {
       populationTool: result.populationTool,
       populationCompleted: result.populationCompleted,
       ...(this.run.populationActivity === undefined ? {} : { populationActivity: this.run.populationActivity }),
+      ...(this.run.populationCoverage === undefined ? {} : { populationCoverage: this.run.populationCoverage }),
       ...(this.run.transcriptId === undefined ? {} : { transcriptId: this.run.transcriptId }),
       commitCommands: result.commitCommands,
       anchorNotes: result.anchorNotes,
