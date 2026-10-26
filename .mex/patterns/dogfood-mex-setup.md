@@ -73,10 +73,10 @@ global `mex`.
   stricter exclusions: authored tests and examples still count for setup state.
 - Unflagged `setup` now opens terminal setup; `--cli` remains a compatibility
   alias. Browser drivers must pass `setup --browser` or use `hub` explicitly.
-  Bare `mex` uses terminal setup for incomplete/agent-memory projects and the
-  Hub for code projects with a Router and committed identity, even when indexes
-  are missing. Keep that entry decision read-only and independent of source
-  scanning, CLI discovery, or database-presence completion claims.
+  Bare `mex` reports healthy status and uses terminal setup for unfinished
+  plans, while retaining Hub recovery for committed code projects with missing
+  indexes. Keep entry discovery read-only; database presence alone does not
+  prove setup health.
   `--dry-run` remains a read-only terminal preview. Reject `--browser` combined
   with `--cli`, `--dry-run`, `--tool`, or `--yes` before launching either flow.
 - Read-only entry tests snapshot Git bytes as well as project files. Disable
@@ -86,6 +86,9 @@ global `mex`.
 - Healthy setup reruns report status without doing work. An unfinished stored
   plan must resume even when shared placeholders are filled. Treat source drift
   as a reason to run sync, and preserve the explicit force path.
+  Leave abandoned-prompt cleanup behind the health shortcut, in the setup
+  engine. Hub completion and finalized queues must recheck index health rather
+  than treating database-file presence or a completed plan as current readiness.
 - Interactive terminal setup uses the shared ordered engine through a HUD.
   Enter on a tool selects it and starts setup atomically; that focused tool
   precedes other checked tools when selecting a native agent. Space optionally
