@@ -92,8 +92,16 @@ describe("setup entry points", () => {
     expect(help).toContain("Setup modes:");
     expect(help).toContain("Terminal (default, or --cli)");
     expect(help).toContain("Browser (--browser)");
-    expect(help.replace(/\s+/g, " ")).toContain("It cannot be combined with --cli, --tool, --yes or --dry-run.");
+    expect(help.replace(/\s+/g, " ")).toContain("It cannot be combined with --cli, --tool, --yes, --force or --dry-run.");
+    expect(help.replace(/\s+/g, " ")).toContain("On a checkout that is already set up, setup reports its status and does no work;");
     expect(help).toContain("--no-open prints the Hub link instead of opening it in a browser.");
+  });
+
+  it("passes --force to terminal setup so a set-up checkout reruns the full flow (#284)", async () => {
+    const { program } = await import("../src/cli.js");
+    await program.parseAsync(["setup", "--force", "--no-open"], { from: "user" });
+    expect(mocks.setup).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ force: true, openBrowser: false }));
+    expect(mocks.hub).not.toHaveBeenCalled();
   });
 
   it("keeps the TUI explicitly available", async () => {

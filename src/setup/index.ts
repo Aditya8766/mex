@@ -188,6 +188,8 @@ export interface SetupRunOptions {
   tools?: AiTool[];
   /** Plain, noninteractive setup. Never starts an agent or a browser. */
   yes?: boolean;
+  /** Run the full flow even on a set-up checkout instead of reporting its status (#284). */
+  force?: boolean;
   port?: number;
   openBrowser?: boolean;
 }
