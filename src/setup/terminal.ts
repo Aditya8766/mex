@@ -344,7 +344,7 @@ function previewSetup(projectRoot: string, mode: "code-repo" | "agent-memory", t
   console.log(isScaffoldPopulated(resolve(projectRoot, ".mex"))
     ? "Would preserve and verify the populated scaffold."
     : "Would populate the scaffold with a selected agent or the manual prompt.");
-  if (mode === "code-repo") console.log("Would capture grounding, migrate and index Wiki, then validate the result.");
+  if (mode === "code-repo") console.log("Would capture grounding, give remaining files their Wiki ids, link and index the Wiki, then validate the result.");
   console.log("Interactive setup would then open the Hub completion page.");
   const message = "Dry run complete. Population and validation were not run.";
   console.log(message);
