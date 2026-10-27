@@ -632,6 +632,7 @@ graphCommand
   .option("--max-nodes <n>", "maximum results to return")
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
+  .option("--include-tests", "also return callers/callees in test files when other results exist")
   .action(async (relation, target, options) => {
     const { createGraphCliWriter } = await import("./graph-cli-output.js");
     return import("./graph/cli-agent.js").then(({ runGraphQuery }) => runGraphQuery(relation, target, process.cwd(), { write: createGraphCliWriter() }, options));
@@ -1029,6 +1030,7 @@ program
   .option("--max-nodes <n>", "maximum impacted nodes to return")
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
+  .option("--include-tests", "also return impacted nodes in test files when other results exist")
   .action(async (target, options) => {
     const { createGraphCliWriter } = await import("./graph-cli-output.js");
     return import("./graph/cli-agent.js").then(({ runImpact }) => runImpact(target, process.cwd(), { write: createGraphCliWriter() }, options));

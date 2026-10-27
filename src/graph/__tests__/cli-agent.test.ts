@@ -225,7 +225,11 @@ describe("runGraphScope", () => {
       type: "summary", status: "ok", evidenceStrength: "strong",
       returnedFiles: expect.arrayContaining(["main.ts"]), textFallbackFiles: [], suggestedNextCommands: [],
     });
-    expect(summary.sourceBackedNodes).toEqual(expect.arrayContaining(facts.map((fact) => fact.id)));
+    // Source records already carry their node ids; the summary does not repeat them (#289).
+    expect(summary).not.toHaveProperty("sourceBackedNodes");
+    const sourcedIds = sources.flatMap((source) => (source.ranges as SourceRange[]).flatMap((range) => range.nodeIds));
+    expect(sourcedIds).toEqual(expect.arrayContaining(facts.map((fact) => fact.id)));
+    expect(summary.returnedNodes).toBe(new Set([...sourcedIds, ...facts.map((fact) => fact.id as string)]).size);
     expect(typeof summary.estimatedOutputTokens).toBe("number");
     expect(typeof summary.truncated).toBe("boolean");
     expect(records.findIndex((r) => r.type === "source")).toBeLessThan(records.findIndex((r) => r.type === "fact"));
@@ -237,6 +241,69 @@ describe("runGraphScope", () => {
     expect(source.length).toBeGreaterThan(0);
     const joined = JSON.stringify(source);
     expect(joined).toContain("helper");
+  });
+
+  it("counts nodes returned only as source in returnedNodes (#289)", async () => {
+    const isolated = mkdtempSync(join(tmpdir(), "mex-scope-returned-"));
+    // Mid-sized matching declarations: their source spends the budget before
+    // every source-backed declaration can also get a fact record.
+    const body = Array.from({ length: 24 }, (_, line) => `  total += path.length * ${line + 1};`).join("\n");
+    writeFileSync(join(isolated, "routes.ts"), Array.from({ length: 12 }, (_, index) => (
+      `export function routeHandler${index}(path: string): number {\n  let total = 0;\n${body}\n  return total;\n}\n`
+    )).join("\n"));
+    const isolatedEngine = createGraphEngine({ rootDir: isolated });
+    await isolatedEngine.build(isolated);
+    const db = openSqlite(join(isolated, ".mex", "graph.db"));
+    const isolatedDeps: AgentCommandDeps = {
+      open: () => ({ graph: isolatedEngine, db, close: () => {} }), write: (line) => lines.push(line),
+    };
+    try {
+      const records = capture(() => runGraphScope("route handler", isolated, isolatedDeps, {}));
+      const sourcedIds = records.filter((r) => r.type === "source")
+        .flatMap((source) => (source.ranges as SourceRange[]).flatMap((range) => range.nodeIds));
+      const factIds = records.filter((r) => r.type === "fact").map((fact) => fact.id as string);
+      const returned = new Set([...sourcedIds, ...factIds]);
+      expect(returned.size).toBeGreaterThan(factIds.length);
+      expect(records.at(-1)).toMatchObject({ type: "summary", returnedNodes: returned.size });
+    } finally {
+      db.close();
+      isolatedEngine.close();
+      rmSync(isolated, { recursive: true, force: true });
+    }
+  });
+
+  it("renders source from a CRLF checkout without carriage returns (#289)", async () => {
+    const isolated = mkdtempSync(join(tmpdir(), "mex-scope-crlf-"));
+    writeFileSync(join(isolated, "crlf.ts"), [
+      "export function parseRoute(path: string): string[] {",
+      "  return path.split(\"/\");",
+      "}",
+      "export function matchRoute(path: string): boolean {",
+      "  return parseRoute(path).length > 0;",
+      "}",
+      "",
+    ].join("\r\n"));
+    const isolatedEngine = createGraphEngine({ rootDir: isolated });
+    await isolatedEngine.build(isolated);
+    const db = openSqlite(join(isolated, ".mex", "graph.db"));
+    const isolatedDeps: AgentCommandDeps = {
+      open: () => ({ graph: isolatedEngine, db, close: () => {} }), write: (line) => lines.push(line),
+    };
+    try {
+      const scoped = capture(() => runGraphScope("match route", isolated, isolatedDeps, {}));
+      const id = (scoped.find((r) => r.type === "source")!.ranges as SourceRange[])[0]!.nodeIds[0]!;
+      const fetched = capture(() => runGraphGet([id], isolated, isolatedDeps));
+      for (const records of [scoped, fetched]) {
+        const sources = records.filter((r) => r.type === "source");
+        expect(sources.length).toBeGreaterThan(0);
+        expect(JSON.stringify(sources)).toContain("parseRoute");
+        expect(JSON.stringify(sources)).not.toContain("\\r");
+      }
+    } finally {
+      db.close();
+      isolatedEngine.close();
+      rmSync(isolated, { recursive: true, force: true });
+    }
   });
 
   it("rejects an output-token budget too small for honest protocol framing", () => {
@@ -716,9 +783,6 @@ describe("runGraphScope", () => {
         && (record.steps as GraphEdge[]).some((step) => step.source === parent.id
           && step.target === helper.id))).toBe(true);
       expect(records.at(-1)).toMatchObject({ type: "summary", status: "ok" });
-      expect(records.at(-1)!.sourceBackedNodes).toEqual(expect.arrayContaining([
-        parent.id, helper.id,
-      ]));
       expect(records.at(-1)!.estimatedOutputTokens as number).toBeLessThanOrEqual(3000);
     } finally {
       rmSync(isolated, { recursive: true, force: true });
@@ -1755,6 +1819,123 @@ describe("runImpact", () => {
     const nodeRecords = records.filter((r) => r.type === "defines" || r.type === "caller");
     expect(nodeRecords.length).toBeLessThanOrEqual(1);
     expect((records.at(-1)!.returnedNodes as number)).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("test-file call results (#289)", () => {
+  let project: string;
+  let projectEngine: GraphEngine;
+  let projectDeps: AgentCommandDeps;
+  let projectDb: ReturnType<typeof openSqlite>;
+
+  beforeAll(async () => {
+    project = mkdtempSync(join(tmpdir(), "mex-test-callers-"));
+    mkdirSync(join(project, "src"));
+    writeFileSync(join(project, "src", "lib.ts"), [
+      "export function compose(value: number): number { return value * 2; }",
+      "export function onlyTested(value: number): number { return value + 1; }",
+      "export function measure(value: number): number { return value - 1; }",
+      "",
+    ].join("\n"));
+    writeFileSync(join(project, "src", "app.ts"), [
+      "import { compose } from \"./lib\";",
+      "export function run(): number { return compose(1); }",
+      "",
+    ].join("\n"));
+    // A 252-line caller: its own span is too long to report as a location.
+    writeFileSync(join(project, "src", "big.ts"), [
+      "import { measure } from \"./lib\";",
+      "export function bigCaller(): number {",
+      "  let total = 0;",
+      ...Array.from({ length: 248 }, (_, index) => `  total += ${index};`),
+      "  return measure(total);",
+      "}",
+      "",
+    ].join("\n"));
+    writeFileSync(join(project, "src", "lib.test.ts"), [
+      "import { compose, onlyTested } from \"./lib\";",
+      "declare function it(name: string, body: () => void): void;",
+      "function testHelper(): number { return compose(0); }",
+      ...Array.from({ length: 5 }, (_, index) => `it("case ${index}", () => { compose(${index}); testHelper(); });`),
+      "it(\"only\", () => { onlyTested(1); });",
+      "",
+    ].join("\n"));
+    projectEngine = createGraphEngine({ rootDir: project });
+    await projectEngine.build(project);
+    projectDb = openSqlite(join(project, ".mex", "graph.db"));
+    projectDeps = { open: () => ({ graph: projectEngine, db: projectDb, close: () => {} }), write: (line) => lines.push(line) };
+  });
+
+  afterAll(() => {
+    projectDb.close();
+    projectEngine.close();
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  const names = (records: Record<string, unknown>[], type: string) => records
+    .filter((record) => record.type === type).map((record) => String(record.name));
+
+  it("who-calls leaves test callers out while a real caller exists, and says how many", () => {
+    const records = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps));
+    expect(names(records, "result")).toEqual(["run"]);
+    const summary = records.at(-1)!;
+    expect(summary).toMatchObject({ type: "summary", returnedNodes: 1, omittedTestNodes: 6 });
+    expect(summary.matchedNodes).toBe(7);
+    expect(summary.suggestedNextCommands).toContain("mex graph query who-calls compose --include-tests");
+  });
+
+  it("--include-tests returns test callers after the real caller", () => {
+    const records = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps, { includeTests: true }));
+    const results = names(records, "result");
+    expect(results[0]).toBe("run");
+    expect(results).toHaveLength(7);
+    expect(records.at(-1)).not.toHaveProperty("omittedTestNodes");
+  });
+
+  it("keeps test callers when only tests call the target", () => {
+    const records = capture(() => runGraphQuery("who-calls", "onlyTested", project, projectDeps));
+    expect(names(records, "result")).toHaveLength(1);
+    expect(records.at(-1)).not.toHaveProperty("omittedTestNodes");
+  });
+
+  it("keeps test callers of a target that is itself in a test file", () => {
+    const records = capture(() => runGraphQuery("who-calls", "testHelper", project, projectDeps));
+    expect(names(records, "result")).toHaveLength(5);
+    expect(records.at(-1)).not.toHaveProperty("omittedTestNodes");
+  });
+
+  it("impact ranks real callers first and leaves test callers out with a count", () => {
+    const records = capture(() => runImpact("compose", project, projectDeps));
+    expect(names(records, "caller")).toEqual(["run"]);
+    expect(records.at(-1)).toMatchObject({ type: "summary", omittedTestNodes: 6 });
+    expect(records.at(-1)!.suggestedNextCommands).toContain("mex impact compose --include-tests");
+
+    const all = capture(() => runImpact("compose", project, projectDeps, { includeTests: true }));
+    const callers = names(all, "caller");
+    expect(callers[0]).toBe("run");
+    expect(callers).toHaveLength(7);
+  });
+
+  it("call results carry the line of the call", () => {
+    const callers = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps));
+    expect(callers.find((record) => record.name === "run")).toMatchObject({ filePath: "src/app.ts", callLine: 2 });
+    // what-calls: the call is in the queried function's file.
+    const callees = capture(() => runGraphQuery("what-calls", "run", project, projectDeps));
+    expect(callees.find((record) => record.name === "compose")).toMatchObject({ filePath: "src/lib.ts", callLine: 2 });
+    const impact = capture(() => runImpact("compose", project, projectDeps));
+    expect(impact.find((record) => record.type === "caller" && record.name === "run")).toMatchObject({ callLine: 2 });
+    const downstream = capture(() => runImpact("run", project, projectDeps, { direction: "callees" }));
+    expect(downstream.find((record) => record.type === "callee" && record.name === "compose")).toMatchObject({ callLine: 2 });
+  });
+
+  it("reports a declaration over 200 lines by its start and length, not its full span", () => {
+    const records = capture(() => runGraphQuery("who-calls", "measure", project, projectDeps));
+    const caller = records.find((record) => record.name === "bigCaller")!;
+    expect(caller).toMatchObject({ filePath: "src/big.ts", lineStart: 2, lineCount: 252, callLine: 252 });
+    expect(caller).not.toHaveProperty("lineEnd");
+    // Short declarations keep their full span.
+    const short = capture(() => runGraphQuery("who-calls", "compose", project, projectDeps));
+    expect(short.find((record) => record.name === "run")).toMatchObject({ lineStart: 2, lineEnd: 2 });
   });
 });
 
